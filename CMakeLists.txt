@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
     RemoteFileManager
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "Native remote file manager over SSH and SFTP"
     LANGUAGES CXX
 )
@@ -32,4 +32,3 @@ if(BUILD_TESTING AND RFM_BUILD_TESTS)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Test)
     add_subdirectory(tests)
 endif()
-

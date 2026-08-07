@@ -1,7 +1,10 @@
+#include "remotefilemanager/app/ConnectionDialog.hpp"
 #include "remotefilemanager/app/MainWindow.hpp"
 
+#include <QDialogButtonBox>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSpinBox>
 #include <QTest>
 
 class MainWindowTest final : public QObject {
@@ -9,6 +12,7 @@ class MainWindowTest final : public QObject {
 
 private slots:
     void exposesInitialDisconnectedShell();
+    void validatesSecureConnectionForm();
 };
 
 void MainWindowTest::exposesInitialDisconnectedShell()
@@ -26,6 +30,27 @@ void MainWindowTest::exposesInitialDisconnectedShell()
         window.findChild<QPushButton*>(QStringLiteral("newConnectionButton"));
     QVERIFY(connectionButton != nullptr);
     QVERIFY(connectionButton->isEnabled());
+}
+
+void MainWindowTest::validatesSecureConnectionForm()
+{
+    rfm::app::ConnectionDialog dialog;
+    auto* const host = dialog.findChild<QLineEdit*>(QStringLiteral("hostEdit"));
+    auto* const user = dialog.findChild<QLineEdit*>(QStringLiteral("usernameEdit"));
+    auto* const port = dialog.findChild<QSpinBox*>(QStringLiteral("portSpin"));
+    auto* const buttons = dialog.findChild<QDialogButtonBox*>();
+    QVERIFY(host != nullptr);
+    QVERIFY(user != nullptr);
+    QVERIFY(port != nullptr);
+    QVERIFY(buttons != nullptr);
+    QVERIFY(!buttons->button(QDialogButtonBox::Ok)->isEnabled());
+
+    host->setText(QStringLiteral("server.example.test"));
+    user->setText(QStringLiteral("gabriel"));
+    QVERIFY(buttons->button(QDialogButtonBox::Ok)->isEnabled());
+    QCOMPARE(dialog.profile().port, quint16{22});
+    QCOMPARE(dialog.profile().effectiveDisplayName(),
+             QStringLiteral("gabriel@server.example.test"));
 }
 
 QTEST_MAIN(MainWindowTest)

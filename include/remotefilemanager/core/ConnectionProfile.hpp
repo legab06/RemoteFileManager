@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QMetaType>
 #include <QtGlobal>
 
 namespace rfm::core {
@@ -17,3 +18,4 @@ struct ConnectionProfile {
 
 }  // namespace rfm::core
 
+Q_DECLARE_METATYPE(rfm::core::ConnectionProfile)

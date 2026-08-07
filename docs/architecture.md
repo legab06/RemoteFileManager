@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | Interface | `rfm_ui` | Fenêtres, navigation, actions et retours utilisateur Qt Widgets |
 | Cœur | `rfm_core` | Profils, modèles de fichiers, règles métier et orchestration |
-| Transport | actuellement dans `rfm_core`, extraction prévue | Adaptateurs libssh, sessions SSH et SFTP |
+| Transport | `rfm_core` (`src/ssh`) | Adaptateur libssh, session SSH et lecture SFTP dans un worker dédié |
 | Exécutable | `RemoteFileManager` | Démarrage de l’application et assemblage des couches |
 
 La règle principale est que l’interface ne doit jamais manipuler directement `ssh_session`, `sftp_session` ou un autre type de libssh. Elle déclenche des intentions et reçoit des résultats métier.
@@ -35,4 +35,3 @@ Le thread principal reste réservé à Qt. Les connexions et opérations réseau
 ## Portabilité
 
 La priorité du prototype est Linux. Qt, CMake et libssh ont été retenus pour ne pas enfermer le cœur dans Linux : le même code doit pouvoir être construit ensuite sous Windows et macOS, avec seulement des adaptations d’intégration système et de packaging.
-
