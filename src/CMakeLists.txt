@@ -2,6 +2,8 @@ add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
     ssh/LibsshRuntime.cpp
+    ssh/SshSession.cpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
 )
 add_library(RemoteFileManager::Core ALIAS rfm_core)
 
@@ -17,7 +19,9 @@ rfm_set_project_warnings(rfm_core)
 add_library(
     rfm_ui STATIC
     app/MainWindow.cpp
+    app/ConnectionDialog.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/MainWindow.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ConnectionDialog.hpp
 )
 add_library(RemoteFileManager::Ui ALIAS rfm_ui)
 
