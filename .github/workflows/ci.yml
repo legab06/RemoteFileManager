@@ -1,0 +1,33 @@
+name: Linux CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ninja-build qt6-base-dev libssh-dev
+
+      - name: Configure
+        run: cmake --preset debug -DRFM_WARNINGS_AS_ERRORS=ON
+
+      - name: Build
+        run: cmake --build --preset debug
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --preset debug

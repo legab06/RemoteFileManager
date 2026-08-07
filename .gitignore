@@ -1,0 +1,19 @@
+# Build products
+/build/
+/out/
+/cmake-build-*/
+
+# CMake
+CMakeUserPresets.json
+compile_commands.json
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Platform files
+.DS_Store
+Thumbs.db
+
