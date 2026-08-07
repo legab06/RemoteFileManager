@@ -2,6 +2,7 @@
 
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
+#include "remotefilemanager/core/RemoteFileOperations.hpp"
 
 #include <QObject>
 #include <memory>
@@ -19,12 +20,22 @@ public slots:
     void connectToHost(rfm::core::ConnectionProfile profile, QString password);
     void confirmUnknownHost(bool accepted);
     void listDirectory(QString path);
+    void createDirectory(quint64 id, QString parent, QString name);
+    void renameEntry(quint64 id, QString source, QString newName);
+    void moveEntries(quint64 id,
+                     QList<rfm::core::RemoteSelection> sources,
+                     QString destinationDirectory);
+    void copyEntries(quint64 id,
+                     QList<rfm::core::RemoteSelection> sources,
+                     QString destinationDirectory);
+    void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
     void disconnectFromHost();
 
 signals:
     void hostKeyConfirmationRequired(QString host, QString fingerprint);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(QString path, QList<rfm::core::RemoteEntry> entries);
+    void operationFinished(rfm::core::RemoteOperationResult result);
     void failed(QString message);
     void disconnected();
 

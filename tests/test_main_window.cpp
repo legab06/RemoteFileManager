@@ -1,10 +1,13 @@
 #include "remotefilemanager/app/ConnectionDialog.hpp"
 #include "remotefilemanager/app/MainWindow.hpp"
 
+#include <QAction>
 #include <QDialogButtonBox>
+#include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QTest>
 
 class MainWindowTest final : public QObject {
@@ -13,6 +16,7 @@ class MainWindowTest final : public QObject {
 private slots:
     void exposesInitialDisconnectedShell();
     void validatesSecureConnectionForm();
+    void enablesMultipleRemoteSelection();
 };
 
 void MainWindowTest::exposesInitialDisconnectedShell()
@@ -30,6 +34,43 @@ void MainWindowTest::exposesInitialDisconnectedShell()
         window.findChild<QPushButton*>(QStringLiteral("newConnectionButton"));
     QVERIFY(connectionButton != nullptr);
     QVERIFY(connectionButton->isEnabled());
+}
+
+void MainWindowTest::enablesMultipleRemoteSelection()
+{
+    rfm::app::MainWindow window;
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("first.txt"), 10, {}, false, false},
+        {QStringLiteral("folder"), 0, {}, true, false},
+    };
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showRemoteDirectory", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("remoteFileTable"));
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->selectionMode(), QAbstractItemView::ExtendedSelection);
+    table->selectionModel()->select(table->model()->index(0, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    table->selectionModel()->select(table->model()->index(1, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    QCOMPARE(table->selectionModel()->selectedRows(0).size(), 2);
+    auto* const createAction =
+        window.findChild<QAction*>(QStringLiteral("createDirectoryAction"));
+    auto* const renameAction = window.findChild<QAction*>(QStringLiteral("renameAction"));
+    auto* const moveAction = window.findChild<QAction*>(QStringLiteral("moveAction"));
+    auto* const copyAction = window.findChild<QAction*>(QStringLiteral("copyAction"));
+    auto* const removeAction = window.findChild<QAction*>(QStringLiteral("removeAction"));
+    QVERIFY(createAction != nullptr);
+    QVERIFY(renameAction != nullptr);
+    QVERIFY(moveAction != nullptr);
+    QVERIFY(copyAction != nullptr);
+    QVERIFY(removeAction != nullptr);
+    QVERIFY(createAction->isEnabled());
+    QVERIFY(!renameAction->isEnabled());
+    QVERIFY(moveAction->isEnabled());
+    QVERIFY(copyAction->isEnabled());
+    QVERIFY(removeAction->isEnabled());
 }
 
 void MainWindowTest::validatesSecureConnectionForm()

@@ -1,12 +1,190 @@
 #include "remotefilemanager/ssh/SshSession.hpp"
 
+#include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
+
 #include <libssh/libssh.h>
+#include <libssh/libssh_version.h>
 #include <libssh/sftp.h>
 
 #include <QByteArray>
+#include <QCoreApplication>
 #include <QDateTime>
 
 #include <algorithm>
+
+namespace {
+
+rfm::core::RemoteBackendError backendError(int sftpError)
+{
+    switch (sftpError) {
+    case SSH_FX_OK:
+        return rfm::core::RemoteBackendError::None;
+    case SSH_FX_NO_SUCH_FILE:
+    case SSH_FX_NO_SUCH_PATH:
+        return rfm::core::RemoteBackendError::NotFound;
+    case SSH_FX_PERMISSION_DENIED:
+        return rfm::core::RemoteBackendError::PermissionDenied;
+    case SSH_FX_FILE_ALREADY_EXISTS:
+        return rfm::core::RemoteBackendError::AlreadyExists;
+    case SSH_FX_OP_UNSUPPORTED:
+        return rfm::core::RemoteBackendError::Unsupported;
+    default:
+        return rfm::core::RemoteBackendError::Failure;
+    }
+}
+
+class SftpBackend final : public rfm::core::RemoteFileBackend {
+public:
+    SftpBackend(ssh_session session, sftp_session sftp)
+        : m_session(session)
+        , m_sftp(sftp)
+    {
+    }
+
+    rfm::core::RemoteProbeResult probe(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        sftp_attributes attributes = sftp_lstat(m_sftp, encoded.constData());
+        if (attributes == nullptr) {
+            return {{backendError(sftp_get_error(m_sftp)), {}}, {}};
+        }
+        const bool directory = attributes->type == SSH_FILEXFER_TYPE_DIRECTORY;
+        sftp_attributes_free(attributes);
+        return {{}, {true, directory}};
+    }
+
+    rfm::core::RemoteDirectoryResult list(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        sftp_dir directory = sftp_opendir(m_sftp, encoded.constData());
+        if (directory == nullptr) {
+            return {{backendError(sftp_get_error(m_sftp)), {}}, {}};
+        }
+        QList<QPair<QString, bool>> entries;
+        while (sftp_attributes attributes = sftp_readdir(m_sftp, directory)) {
+            const QString name = QString::fromUtf8(attributes->name);
+            if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
+                entries.push_back({name, attributes->type == SSH_FILEXFER_TYPE_DIRECTORY});
+            }
+            sftp_attributes_free(attributes);
+        }
+        const int error = sftp_dir_eof(directory) == 0 ? sftp_get_error(m_sftp) : SSH_FX_OK;
+        sftp_closedir(directory);
+        return {{backendError(error), {}}, entries};
+    }
+
+    rfm::core::RemoteBackendResult createDirectory(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        if (sftp_mkdir(m_sftp, encoded.constData(), 0755) == SSH_OK) {
+            return {};
+        }
+        return {backendError(sftp_get_error(m_sftp)), {}};
+    }
+
+    rfm::core::RemoteBackendResult rename(
+        const QString& source, const QString& destination) override
+    {
+        const QByteArray encodedSource = source.toUtf8();
+        const QByteArray encodedDestination = destination.toUtf8();
+        if (sftp_rename(
+                m_sftp, encodedSource.constData(), encodedDestination.constData())
+            == SSH_OK) {
+            return {};
+        }
+        return {backendError(sftp_get_error(m_sftp)), {}};
+    }
+
+    rfm::core::RemoteBackendResult removeFile(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        if (sftp_unlink(m_sftp, encoded.constData()) == SSH_OK) {
+            return {};
+        }
+        return {backendError(sftp_get_error(m_sftp)), {}};
+    }
+
+    rfm::core::RemoteBackendResult removeDirectory(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        if (sftp_rmdir(m_sftp, encoded.constData()) == SSH_OK) {
+            return {};
+        }
+        return {backendError(sftp_get_error(m_sftp)), {}};
+    }
+
+    rfm::core::RemoteBackendResult copyOnServer(
+        const QString& source, const QString& destination, bool recursive) override
+    {
+        const QString command = rfm::ssh::RemoteCopyCommand::build(source, destination, recursive);
+        if (command.isEmpty()) {
+            return {rfm::core::RemoteBackendError::InvalidPath, {}};
+        }
+        ssh_channel channel = ssh_channel_new(m_session);
+        if (channel == nullptr) {
+            return {rfm::core::RemoteBackendError::Failure,
+                    QCoreApplication::translate("SftpBackend", "Unable to open an SSH channel.")};
+        }
+        const auto closeChannel = [&channel] {
+            ssh_channel_close(channel);
+            ssh_channel_free(channel);
+        };
+        if (ssh_channel_open_session(channel) != SSH_OK) {
+            closeChannel();
+            return {rfm::core::RemoteBackendError::Unsupported,
+                    QCoreApplication::translate(
+                        "SftpBackend", "The server rejected remote SSH commands.")};
+        }
+        const QByteArray encodedCommand = command.toUtf8();
+        if (ssh_channel_request_exec(channel, encodedCommand.constData()) != SSH_OK) {
+            closeChannel();
+            return {rfm::core::RemoteBackendError::Unsupported,
+                    QCoreApplication::translate(
+                        "SftpBackend", "Remote copy is not supported by this server.")};
+        }
+
+        QByteArray errorOutput;
+        char buffer[512];
+        int bytesRead = 0;
+        do {
+            bytesRead = ssh_channel_read(channel, buffer, sizeof(buffer), 1);
+            if (bytesRead > 0 && errorOutput.size() < 2048) {
+                const int remaining = 2048 - static_cast<int>(errorOutput.size());
+                errorOutput.append(buffer, std::min(bytesRead, remaining));
+            }
+        } while (bytesRead > 0);
+        uint32_t exitCode = UINT32_MAX;
+#if LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 11, 0)
+        const int exitState = ssh_channel_get_exit_state(channel, &exitCode, nullptr, nullptr);
+#else
+        const int legacyExitCode = ssh_channel_get_exit_status(channel);
+        const int exitState = legacyExitCode >= 0 ? SSH_OK : SSH_ERROR;
+        if (legacyExitCode >= 0) {
+            exitCode = static_cast<uint32_t>(legacyExitCode);
+        }
+#endif
+        closeChannel();
+        if (exitState == SSH_OK && exitCode == 0) {
+            return {};
+        }
+        const QString detail = QString::fromUtf8(errorOutput).trimmed();
+        if (exitCode == 126 || exitCode == 127) {
+            return {rfm::core::RemoteBackendError::Unsupported,
+                    QCoreApplication::translate(
+                        "SftpBackend", "The 'cp' command is not available on the server.")};
+        }
+        return {rfm::core::RemoteBackendError::Failure,
+                detail.isEmpty()
+                    ? QCoreApplication::translate("SftpBackend", "Remote copy failed.")
+                    : detail};
+    }
+
+private:
+    ssh_session m_session;
+    sftp_session m_sftp;
+};
+
+}  // namespace
 
 namespace rfm::ssh {
 
@@ -73,12 +251,14 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         || ssh_options_set(m_impl->session, SSH_OPTIONS_USER, user.constData()) != SSH_OK
         || ssh_options_set(m_impl->session, SSH_OPTIONS_PORT, &port) != SSH_OK
         || ssh_options_set(m_impl->session, SSH_OPTIONS_TIMEOUT, &timeout) != SSH_OK) {
-        fail(tr("Unable to configure SSH: %1").arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+        fail(tr("Unable to configure SSH: %1")
+                 .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
 
     if (ssh_connect(m_impl->session) != SSH_OK) {
-        fail(tr("SSH connection failed: %1").arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+        fail(tr("SSH connection failed: %1")
+                 .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
 
@@ -88,7 +268,8 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         return;
     }
     if (knownState == SSH_KNOWN_HOSTS_ERROR) {
-        fail(tr("Host key verification failed: %1").arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+        fail(tr("Host key verification failed: %1")
+                 .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
     if (knownState == SSH_KNOWN_HOSTS_UNKNOWN || knownState == SSH_KNOWN_HOSTS_NOT_FOUND) {
@@ -96,7 +277,9 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         unsigned char* hash = nullptr;
         size_t hashLength = 0;
         if (ssh_get_server_publickey(m_impl->session, &key) != SSH_OK
-            || ssh_get_publickey_hash(key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLength) != SSH_OK) {
+            || ssh_get_publickey_hash(
+                   key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLength)
+                != SSH_OK) {
             if (key != nullptr) {
                 ssh_key_free(key);
             }
@@ -184,7 +367,8 @@ void SshSession::authenticateAndOpen()
         }
         sftp_attributes_free(attributes);
     }
-    const int directoryError = sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
+    const int directoryError =
+        sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
     sftp_closedir(directory);
     if (directoryError != SSH_FX_OK) {
         fail(tr("Unable to read the remote home directory."));
@@ -212,13 +396,16 @@ void SshSession::listDirectory(QString path)
     while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
         const QString name = QString::fromUtf8(attributes->name);
         if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
-            entries.push_back({name, attributes->size, QDateTime::fromSecsSinceEpoch(attributes->mtime),
+            entries.push_back({name,
+                               attributes->size,
+                               QDateTime::fromSecsSinceEpoch(attributes->mtime),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
                                attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
         }
         sftp_attributes_free(attributes);
     }
-    const int directoryError = sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
+    const int directoryError =
+        sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
     sftp_closedir(directory);
     if (directoryError != SSH_FX_OK) {
         fail(tr("Unable to read %1.").arg(path));
@@ -228,6 +415,64 @@ void SshSession::listDirectory(QString path)
         return std::pair{!entry.directory, entry.name.toCaseFolded()};
     });
     emit directoryListed(path, entries);
+}
+
+void SshSession::createDirectory(quint64 id, QString parent, QString name)
+{
+    if (m_impl->sftp == nullptr) {
+        emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    SftpBackend backend(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteFileOperations operations(backend);
+    emit operationFinished(operations.createDirectory(id, parent, name));
+}
+
+void SshSession::renameEntry(quint64 id, QString source, QString newName)
+{
+    if (m_impl->sftp == nullptr) {
+        emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    SftpBackend backend(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteFileOperations operations(backend);
+    emit operationFinished(operations.rename(id, source, newName));
+}
+
+void SshSession::moveEntries(
+    quint64 id, QList<rfm::core::RemoteSelection> sources, QString destinationDirectory)
+{
+    if (m_impl->sftp == nullptr) {
+        emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    SftpBackend backend(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteFileOperations operations(backend);
+    emit operationFinished(operations.move(id, sources, destinationDirectory));
+}
+
+void SshSession::copyEntries(
+    quint64 id, QList<rfm::core::RemoteSelection> sources, QString destinationDirectory)
+{
+    if (m_impl->sftp == nullptr) {
+        emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    SftpBackend backend(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteFileOperations operations(backend);
+    emit operationFinished(operations.copy(id, sources, destinationDirectory));
+}
+
+void SshSession::removeEntries(
+    quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive)
+{
+    if (m_impl->sftp == nullptr) {
+        emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    SftpBackend backend(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteFileOperations operations(backend);
+    emit operationFinished(operations.remove(id, sources, recursive));
 }
 
 void SshSession::disconnectFromHost()
