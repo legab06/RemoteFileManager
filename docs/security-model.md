@@ -23,6 +23,5 @@
 - intégration aux trousseaux de secrets Linux, Windows et macOS ;
 - politique de reconnexion et d’expiration des sessions ;
 - format chiffré des profils persistants ;
-- confirmation et récupération après opérations destructrices ;
+- récupération après opérations destructrices ;
 - journal d’audit local respectueux des données sensibles.
-

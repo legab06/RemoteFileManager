@@ -1,7 +1,10 @@
 add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
+    core/RemoteFileOperations.cpp
+    core/RemotePath.cpp
     ssh/LibsshRuntime.cpp
+    ssh/RemoteCopyCommand.cpp
     ssh/SshSession.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
 )
