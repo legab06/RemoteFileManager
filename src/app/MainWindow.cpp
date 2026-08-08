@@ -1,6 +1,8 @@
 #include "remotefilemanager/app/MainWindow.hpp"
 
 #include "remotefilemanager/app/ConnectionDialog.hpp"
+#include "remotefilemanager/app/TransferPanel.hpp"
+#include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/ssh/LibsshRuntime.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
@@ -9,10 +11,15 @@
 #include <QApplication>
 #include <QCursor>
 #include <QDialog>
+#include <QDir>
 #include <QDockWidget>
+#include <QEventLoop>
+#include <QFileDialog>
 #include <QFileIconProvider>
+#include <QFileInfo>
 #include <QFont>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QItemSelectionModel>
 #include <QKeySequence>
@@ -24,22 +31,65 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSizePolicy>
 #include <QStatusBar>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QThread>
+#include <QTimer>
 #include <QToolBar>
+#include <QToolButton>
 #include <QVBoxLayout>
 #include <QWidget>
 
 #include <limits>
+#include <utility>
 
-namespace rfm::app {
+namespace rfm::app
+{
+namespace
+{
 
-MainWindow::MainWindow(QWidget* parent)
-    : QMainWindow(parent)
+class UploadSelectionDialog final : public QFileDialog
+{
+  public:
+    explicit UploadSelectionDialog(QWidget* parent)
+        : QFileDialog(parent, tr("Select files or folders to upload"), QDir::homePath())
+    {
+        setOption(QFileDialog::DontUseNativeDialog);
+        setAcceptMode(QFileDialog::AcceptOpen);
+        setFileMode(QFileDialog::ExistingFiles);
+        setLabelText(QFileDialog::Accept, tr("Select"));
+    }
+
+    [[nodiscard]] QStringList selectedPaths() const { return m_selectedPaths; }
+
+  protected:
+    void accept() override
+    {
+        QStringList paths;
+        for (const QString& path : selectedFiles()) {
+            const QFileInfo info(path);
+            if ((info.isFile() || info.isDir()) && !paths.contains(info.absoluteFilePath())) {
+                paths.push_back(info.absoluteFilePath());
+            }
+        }
+        if (paths.isEmpty()) {
+            return;
+        }
+        m_selectedPaths = std::move(paths);
+        QDialog::accept();
+    }
+
+  private:
+    QStringList m_selectedPaths;
+};
+
+} // namespace
+
+MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
 {
     setObjectName(QStringLiteral("mainWindow"));
     setWindowTitle(tr("RemoteFileManager"));
@@ -51,48 +101,86 @@ MainWindow::MainWindow(QWidget* parent)
     createMenus();
     createNavigationBar();
     createPlacesDock();
+    createTransferDock();
     createEmptyState();
+
+    m_autoRefreshTimer = new QTimer(this);
+    m_autoRefreshTimer->setObjectName(QStringLiteral("autoRefreshTimer"));
+    m_autoRefreshTimer->setInterval(3000);
+    connect(m_autoRefreshTimer, &QTimer::timeout, this,
+            [this] { requestDirectoryListing(m_currentPath, false, false); });
+    m_refreshDebounceTimer = new QTimer(this);
+    m_refreshDebounceTimer->setObjectName(QStringLiteral("refreshDebounceTimer"));
+    m_refreshDebounceTimer->setInterval(150);
+    m_refreshDebounceTimer->setSingleShot(true);
+    connect(m_refreshDebounceTimer, &QTimer::timeout, this, [this] {
+        const bool showBusy = m_scheduledRefreshBusy;
+        m_scheduledRefreshBusy = false;
+        requestDirectoryListing(m_currentPath, showBusy, true);
+    });
 
     qRegisterMetaType<rfm::core::ConnectionProfile>();
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
     qRegisterMetaType<rfm::core::RemoteOperationResult>();
+    qRegisterMetaType<rfm::core::TransferRequest>();
+    qRegisterMetaType<rfm::core::TransferProgress>();
     m_sshThread = new QThread(this);
     m_sshSession = new rfm::ssh::SshSession;
     m_sshSession->moveToThread(m_sshThread);
     connect(m_sshThread, &QThread::finished, m_sshSession, &QObject::deleteLater);
-    connect(this, &MainWindow::connectionRequested,
-            m_sshSession, &rfm::ssh::SshSession::connectToHost);
-    connect(this, &MainWindow::hostKeyDecision,
-            m_sshSession, &rfm::ssh::SshSession::confirmUnknownHost);
-    connect(this, &MainWindow::directoryRequested,
-            m_sshSession, &rfm::ssh::SshSession::listDirectory);
-    connect(this, &MainWindow::createDirectoryRequested,
-            m_sshSession, &rfm::ssh::SshSession::createDirectory);
-    connect(this, &MainWindow::renameRequested,
-            m_sshSession, &rfm::ssh::SshSession::renameEntry);
-    connect(this, &MainWindow::moveRequested,
-            m_sshSession, &rfm::ssh::SshSession::moveEntries);
-    connect(this, &MainWindow::copyRequested,
-            m_sshSession, &rfm::ssh::SshSession::copyEntries);
-    connect(this, &MainWindow::removeRequested,
-            m_sshSession, &rfm::ssh::SshSession::removeEntries);
-    connect(this, &MainWindow::disconnectionRequested,
-            m_sshSession, &rfm::ssh::SshSession::disconnectFromHost);
-    connect(m_sshSession, &rfm::ssh::SshSession::hostKeyConfirmationRequired,
-            this, &MainWindow::showHostKeyConfirmation);
-    connect(m_sshSession, &rfm::ssh::SshSession::connected,
-            this, [this](const QString& path, const QList<rfm::core::RemoteEntry>& entries) {
+    connect(this, &MainWindow::connectionRequested, m_sshSession,
+            &rfm::ssh::SshSession::connectToHost);
+    connect(this, &MainWindow::hostKeyDecision, m_sshSession,
+            &rfm::ssh::SshSession::confirmUnknownHost);
+    connect(this, &MainWindow::directoryRequested, m_sshSession,
+            &rfm::ssh::SshSession::listDirectory);
+    connect(this, &MainWindow::createDirectoryRequested, m_sshSession,
+            &rfm::ssh::SshSession::createDirectory);
+    connect(this, &MainWindow::renameRequested, m_sshSession, &rfm::ssh::SshSession::renameEntry);
+    connect(this, &MainWindow::moveRequested, m_sshSession, &rfm::ssh::SshSession::moveEntries);
+    connect(this, &MainWindow::copyRequested, m_sshSession, &rfm::ssh::SshSession::copyEntries);
+    connect(this, &MainWindow::removeRequested, m_sshSession, &rfm::ssh::SshSession::removeEntries);
+    connect(this, &MainWindow::transferRequested, m_sshSession,
+            &rfm::ssh::SshSession::enqueueTransfer);
+    connect(this, &MainWindow::pauseTransferRequested, m_sshSession,
+            &rfm::ssh::SshSession::pauseTransfer);
+    connect(this, &MainWindow::resumeTransferRequested, m_sshSession,
+            &rfm::ssh::SshSession::resumeTransfer);
+    connect(this, &MainWindow::cancelTransferRequested, m_sshSession,
+            &rfm::ssh::SshSession::cancelTransfer);
+    connect(this, &MainWindow::shutdownRequested, m_sshSession,
+            &rfm::ssh::SshSession::shutdownTransfers);
+    connect(this, &MainWindow::disconnectionRequested, m_sshSession,
+            &rfm::ssh::SshSession::disconnectFromHost);
+    connect(m_sshSession, &rfm::ssh::SshSession::hostKeyConfirmationRequired, this,
+            &MainWindow::showHostKeyConfirmation);
+    connect(m_sshSession, &rfm::ssh::SshSession::connected, this,
+            [this](const QString& path, const QList<rfm::core::RemoteEntry>& entries) {
                 m_connected = true;
                 showRemoteDirectory(path, entries);
                 statusBar()->showMessage(tr("Connected securely to %1").arg(m_activeProfile.host));
             });
-    connect(m_sshSession, &rfm::ssh::SshSession::directoryListed,
-            this, &MainWindow::showRemoteDirectory);
-    connect(m_sshSession, &rfm::ssh::SshSession::failed,
-            this, &MainWindow::showConnectionError);
-    connect(m_sshSession, &rfm::ssh::SshSession::operationFinished,
-            this, &MainWindow::handleOperationResult);
+    connect(m_sshSession, &rfm::ssh::SshSession::directoryListed, this,
+            &MainWindow::showRemoteDirectory);
+    connect(m_sshSession, &rfm::ssh::SshSession::failed, this, &MainWindow::showConnectionError);
+    connect(m_sshSession, &rfm::ssh::SshSession::operationFinished, this,
+            &MainWindow::handleOperationResult);
+    connect(m_sshSession, &rfm::ssh::SshSession::transferUpdated, this,
+            &MainWindow::handleTransferProgress);
+    connect(m_sshSession, &rfm::ssh::SshSession::transferRejected, this,
+            [this](quint64 id, const QString& error) {
+                if (m_pendingTransferRequests.remove(id) > 0) {
+                    m_nonTerminalTransfers.remove(id);
+                }
+                updateConnectionAction();
+                statusBar()->showMessage(error, 8000);
+            });
+    connect(m_sshSession, &rfm::ssh::SshSession::disconnected, this, [this] {
+        m_connected = false;
+        stopAutomaticRefresh();
+        setBusy(false);
+    });
     m_sshThread->start();
 
     statusBar()->showMessage(
@@ -101,9 +189,13 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow()
 {
+    stopAutomaticRefresh();
     if (m_sshThread != nullptr && m_sshThread->isRunning()) {
-        QMetaObject::invokeMethod(m_sshSession, &rfm::ssh::SshSession::disconnectFromHost,
-                                  Qt::BlockingQueuedConnection);
+        QEventLoop shutdownLoop;
+        connect(m_sshSession, &rfm::ssh::SshSession::transfersShutdown, &shutdownLoop,
+                &QEventLoop::quit, Qt::QueuedConnection);
+        emit shutdownRequested();
+        shutdownLoop.exec(QEventLoop::ExcludeUserInputEvents);
         m_sshThread->quit();
         m_sshThread->wait();
     }
@@ -111,8 +203,8 @@ MainWindow::~MainWindow()
 
 void MainWindow::createActions()
 {
-    m_newConnectionAction = new QAction(
-        style()->standardIcon(QStyle::SP_ComputerIcon), tr("New connection…"), this);
+    m_newConnectionAction =
+        new QAction(style()->standardIcon(QStyle::SP_ComputerIcon), tr("New connection…"), this);
     m_newConnectionAction->setObjectName(QStringLiteral("newConnectionAction"));
     m_newConnectionAction->setShortcut(QKeySequence::New);
     connect(m_newConnectionAction, &QAction::triggered, this, &MainWindow::showConnectionDialog);
@@ -126,8 +218,7 @@ void MainWindow::createActions()
 
     m_createDirectoryAction = new QAction(tr("New folder…"), this);
     m_createDirectoryAction->setObjectName(QStringLiteral("createDirectoryAction"));
-    connect(m_createDirectoryAction, &QAction::triggered,
-            this, &MainWindow::createRemoteDirectory);
+    connect(m_createDirectoryAction, &QAction::triggered, this, &MainWindow::createRemoteDirectory);
     m_renameAction = new QAction(tr("Rename…"), this);
     m_renameAction->setObjectName(QStringLiteral("renameAction"));
     connect(m_renameAction, &QAction::triggered, this, &MainWindow::renameSelectedEntry);
@@ -140,6 +231,20 @@ void MainWindow::createActions()
     m_removeAction = new QAction(tr("Delete…"), this);
     m_removeAction->setObjectName(QStringLiteral("removeAction"));
     connect(m_removeAction, &QAction::triggered, this, &MainWindow::removeSelectedEntries);
+
+    const QIcon uploadIcon =
+        QIcon::fromTheme(QStringLiteral("go-up"), style()->standardIcon(QStyle::SP_ArrowUp));
+    m_uploadAction = new QAction(uploadIcon, tr("Upload"), this);
+    m_uploadAction->setObjectName(QStringLiteral("uploadAction"));
+    m_uploadAction->setToolTip(tr("Upload files or folders to the server"));
+    connect(m_uploadAction, &QAction::triggered, this, &MainWindow::chooseUploads);
+
+    const QIcon downloadIcon =
+        QIcon::fromTheme(QStringLiteral("go-down"), style()->standardIcon(QStyle::SP_ArrowDown));
+    m_downloadAction = new QAction(downloadIcon, tr("Download"), this);
+    m_downloadAction->setObjectName(QStringLiteral("downloadAction"));
+    m_downloadAction->setToolTip(tr("Download the selection to this computer"));
+    connect(m_downloadAction, &QAction::triggered, this, &MainWindow::chooseDownloadDirectory);
     updateOperationActions();
 }
 
@@ -154,6 +259,9 @@ void MainWindow::createMenus()
     fileMenu->addAction(m_copyAction);
     fileMenu->addAction(m_removeAction);
     fileMenu->addSeparator();
+    fileMenu->addAction(m_uploadAction);
+    fileMenu->addAction(m_downloadAction);
+    fileMenu->addSeparator();
     fileMenu->addAction(m_quitAction);
 
     QMenu* const helpMenu = menuBar()->addMenu(tr("&Help"));
@@ -166,14 +274,28 @@ void MainWindow::createNavigationBar()
     navigationBar->setObjectName(QStringLiteral("navigationToolBar"));
     navigationBar->setMovable(false);
 
-    m_backAction = navigationBar->addAction(
-        style()->standardIcon(QStyle::SP_ArrowBack), tr("Back"));
-    m_forwardAction = navigationBar->addAction(
-        style()->standardIcon(QStyle::SP_ArrowForward), tr("Forward"));
-    m_upAction = navigationBar->addAction(
-        style()->standardIcon(QStyle::SP_ArrowUp), tr("Parent folder"));
-    m_refreshAction = navigationBar->addAction(
-        style()->standardIcon(QStyle::SP_BrowserReload), tr("Refresh"));
+    m_backAction =
+        navigationBar->addAction(style()->standardIcon(QStyle::SP_ArrowBack), tr("Back"));
+    m_forwardAction =
+        navigationBar->addAction(style()->standardIcon(QStyle::SP_ArrowForward), tr("Forward"));
+    m_upAction =
+        navigationBar->addAction(style()->standardIcon(QStyle::SP_ArrowUp), tr("Parent folder"));
+    m_refreshAction =
+        navigationBar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Refresh"));
+
+    navigationBar->addSeparator();
+    navigationBar->addAction(m_uploadAction);
+    navigationBar->addAction(m_downloadAction);
+    if (auto* const uploadButton =
+            qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_uploadAction));
+        uploadButton != nullptr) {
+        uploadButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    }
+    if (auto* const downloadButton =
+            qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_downloadAction));
+        downloadButton != nullptr) {
+        downloadButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    }
 
     m_backAction->setEnabled(false);
     m_forwardAction->setEnabled(false);
@@ -182,8 +304,7 @@ void MainWindow::createNavigationBar()
     connect(m_upAction, &QAction::triggered, this, &MainWindow::requestParentDirectory);
     connect(m_refreshAction, &QAction::triggered, this, [this] {
         if (!m_currentPath.isEmpty()) {
-            setBusy(true, tr("Refreshing %1…").arg(m_currentPath));
-            emit directoryRequested(m_currentPath);
+            requestDirectoryListing(m_currentPath, true, true);
         }
     });
 
@@ -207,12 +328,29 @@ void MainWindow::createPlacesDock()
 
     auto* const placesList = new QListWidget(placesDock);
     placesList->setObjectName(QStringLiteral("placesList"));
-    auto* const remoteItem = new QListWidgetItem(
-        style()->standardIcon(QStyle::SP_ComputerIcon), tr("Remote server"), placesList);
+    auto* const remoteItem = new QListWidgetItem(style()->standardIcon(QStyle::SP_ComputerIcon),
+                                                 tr("Remote server"), placesList);
     remoteItem->setFlags(remoteItem->flags() & ~Qt::ItemIsEnabled);
 
     placesDock->setWidget(placesList);
     addDockWidget(Qt::LeftDockWidgetArea, placesDock);
+}
+
+void MainWindow::createTransferDock()
+{
+    auto* const transferDock = new QDockWidget(tr("Transfers"), this);
+    transferDock->setObjectName(QStringLiteral("transferDock"));
+    transferDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    m_transferPanel = new TransferPanel(transferDock);
+    transferDock->setWidget(m_transferPanel);
+    addDockWidget(Qt::BottomDockWidgetArea, transferDock);
+
+    connect(m_transferPanel, &TransferPanel::pauseRequested, this,
+            &MainWindow::pauseTransferRequested);
+    connect(m_transferPanel, &TransferPanel::resumeRequested, this,
+            &MainWindow::resumeTransferRequested);
+    connect(m_transferPanel, &TransferPanel::cancelRequested, this,
+            &MainWindow::cancelTransferRequested);
 }
 
 void MainWindow::createEmptyState()
@@ -237,8 +375,8 @@ void MainWindow::createEmptyState()
     description->setAlignment(Qt::AlignCenter);
     description->setWordWrap(true);
 
-    auto* const connectionButton = new QPushButton(
-        style()->standardIcon(QStyle::SP_ComputerIcon), tr("New connection…"), emptyState);
+    auto* const connectionButton = new QPushButton(style()->standardIcon(QStyle::SP_ComputerIcon),
+                                                   tr("New connection…"), emptyState);
     connectionButton->setObjectName(QStringLiteral("newConnectionButton"));
     connectionButton->setDefault(true);
 
@@ -266,15 +404,13 @@ void MainWindow::showConnectionDialog()
 void MainWindow::showHostKeyConfirmation(const QString& host, const QString& fingerprint)
 {
     QMessageBox confirmation(
-        QMessageBox::Warning,
-        tr("Unknown SSH host key"),
+        QMessageBox::Warning, tr("Unknown SSH host key"),
         tr("This is the first connection to %1.\n\nSHA-256 fingerprint:\n%2\n\n"
            "Verify this fingerprint with the server administrator before continuing.")
             .arg(host, fingerprint),
-        QMessageBox::NoButton,
-        this);
-    auto* const trustButton = confirmation.addButton(
-        tr("Trust and connect"), QMessageBox::AcceptRole);
+        QMessageBox::NoButton, this);
+    auto* const trustButton =
+        confirmation.addButton(tr("Trust and connect"), QMessageBox::AcceptRole);
     confirmation.addButton(QMessageBox::Cancel);
     confirmation.exec();
     const bool accepted = confirmation.clickedButton() == trustButton;
@@ -284,9 +420,30 @@ void MainWindow::showHostKeyConfirmation(const QString& host, const QString& fin
     emit hostKeyDecision(accepted);
 }
 
-void MainWindow::showRemoteDirectory(
-    const QString& path, const QList<rfm::core::RemoteEntry>& entries)
+void MainWindow::showRemoteDirectory(const QString& path,
+                                     const QList<rfm::core::RemoteEntry>& entries)
 {
+    QStringList namesToSelect;
+    int previousScrollPosition = -1;
+    const bool sameDirectory =
+        m_fileTable != nullptr &&
+        rfm::core::RemotePath::normalize(path) == rfm::core::RemotePath::normalize(m_currentPath);
+    if (sameDirectory && m_fileTable->selectionModel() != nullptr) {
+        for (const QModelIndex& index : m_fileTable->selectionModel()->selectedRows(0)) {
+            if (const QTableWidgetItem* const item = m_fileTable->item(index.row(), 0);
+                item != nullptr) {
+                namesToSelect.push_back(item->text());
+            }
+        }
+        previousScrollPosition = m_fileTable->verticalScrollBar()->value();
+    }
+    for (const QString& name : std::as_const(m_pendingSelectionNames)) {
+        if (!namesToSelect.contains(name)) {
+            namesToSelect.push_back(name);
+        }
+    }
+    m_pendingSelectionNames.clear();
+
     m_connected = true;
     if (m_fileTable == nullptr) {
         m_fileTable = new QTableWidget(this);
@@ -301,12 +458,12 @@ void MainWindow::showRemoteDirectory(
         m_fileTable->verticalHeader()->hide();
         m_fileTable->horizontalHeader()->setStretchLastSection(true);
         m_fileTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-        connect(m_fileTable, &QTableWidget::cellDoubleClicked,
-                this, &MainWindow::openSelectedEntry);
-        connect(m_fileTable, &QWidget::customContextMenuRequested,
-                this, &MainWindow::showFileContextMenu);
-        connect(m_fileTable->selectionModel(), &QItemSelectionModel::selectionChanged,
-                this, &MainWindow::updateOperationActions);
+        connect(m_fileTable, &QTableWidget::cellDoubleClicked, this,
+                &MainWindow::openSelectedEntry);
+        connect(m_fileTable, &QWidget::customContextMenuRequested, this,
+                &MainWindow::showFileContextMenu);
+        connect(m_fileTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
+                &MainWindow::updateOperationActions);
         setCentralWidget(m_fileTable);
     }
     m_currentPath = path;
@@ -322,42 +479,55 @@ void MainWindow::showRemoteDirectory(
         m_fileTable->setItem(static_cast<int>(row), 0, nameItem);
         const qint64 displaySize =
             entry.size > static_cast<quint64>(std::numeric_limits<qint64>::max())
-            ? std::numeric_limits<qint64>::max()
-            : static_cast<qint64>(entry.size);
+                ? std::numeric_limits<qint64>::max()
+                : static_cast<qint64>(entry.size);
         auto* const sizeItem = new QTableWidgetItem(
             entry.directory ? QString{} : QLocale{}.formattedDataSize(displaySize));
         sizeItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_fileTable->setItem(static_cast<int>(row), 1, sizeItem);
         m_fileTable->setItem(
             static_cast<int>(row), 2,
-            new QTableWidgetItem(
-                QLocale{}.toString(entry.modifiedAt, QLocale::ShortFormat)));
+            new QTableWidgetItem(QLocale{}.toString(entry.modifiedAt, QLocale::ShortFormat)));
     }
-    if (!m_pendingSelectionNames.isEmpty()) {
+    if (!namesToSelect.isEmpty()) {
         for (int row = 0; row < m_fileTable->rowCount(); ++row) {
             const QTableWidgetItem* const item = m_fileTable->item(row, 0);
-            if (item != nullptr && m_pendingSelectionNames.contains(item->text())) {
-                m_fileTable->selectionModel()->select(
-                    m_fileTable->model()->index(row, 0),
-                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+            if (item != nullptr && namesToSelect.contains(item->text())) {
+                m_fileTable->selectionModel()->select(m_fileTable->model()->index(row, 0),
+                                                      QItemSelectionModel::Select |
+                                                          QItemSelectionModel::Rows);
             }
         }
-        m_pendingSelectionNames.clear();
     }
-    m_remotePathEdit->setText(
-        QStringLiteral("sftp://%1@%2:%3/%4")
-            .arg(m_activeProfile.username, m_activeProfile.host)
-            .arg(m_activeProfile.port)
-            .arg(path == QStringLiteral(".") ? QString{} : path));
+    if (previousScrollPosition >= 0) {
+        m_fileTable->verticalScrollBar()->setValue(previousScrollPosition);
+    }
+    m_remotePathEdit->setText(QStringLiteral("sftp://%1@%2:%3/%4")
+                                  .arg(m_activeProfile.username, m_activeProfile.host)
+                                  .arg(m_activeProfile.port)
+                                  .arg(path == QStringLiteral(".") ? QString{} : path));
     m_upAction->setEnabled(path != QStringLiteral("."));
     m_refreshAction->setEnabled(true);
+    m_listingInProgress = false;
     setBusy(false);
     updateOperationActions();
+    if (!m_autoRefreshTimer->isActive()) {
+        m_autoRefreshTimer->start();
+    }
+
+    if (!m_deferredDirectoryPath.isEmpty()) {
+        const QString deferredPath = std::exchange(m_deferredDirectoryPath, {});
+        const bool showBusy = std::exchange(m_deferredDirectoryBusy, false);
+        requestDirectoryListing(deferredPath, showBusy, true);
+    }
 }
 
 void MainWindow::showConnectionError(const QString& message)
 {
     m_connected = false;
+    stopAutomaticRefresh();
+    m_pendingTransferRequests.clear();
+    m_nonTerminalTransfers.clear();
     setBusy(false);
     statusBar()->showMessage(tr("Disconnected"));
     QMessageBox::critical(this, tr("SSH connection error"), message);
@@ -383,6 +553,7 @@ void MainWindow::showFileContextMenu(const QPoint& position)
         menu.addAction(m_renameAction);
         menu.addAction(m_moveAction);
         menu.addAction(m_copyAction);
+        menu.addAction(m_downloadAction);
         menu.addSeparator();
         menu.addAction(m_removeAction);
     }
@@ -392,15 +563,14 @@ void MainWindow::showFileContextMenu(const QPoint& position)
 void MainWindow::createRemoteDirectory()
 {
     bool accepted = false;
-    const QString name = QInputDialog::getText(
-        this, tr("New folder"), tr("Folder name:"), QLineEdit::Normal, {}, &accepted);
+    const QString name = QInputDialog::getText(this, tr("New folder"), tr("Folder name:"),
+                                               QLineEdit::Normal, {}, &accepted);
     if (!accepted) {
         return;
     }
     if (!rfm::core::RemotePath::isValidName(name)) {
-        QMessageBox::warning(
-            this, tr("Invalid folder name"),
-            tr("The name must not be empty, '.', '..', or contain '/'."));
+        QMessageBox::warning(this, tr("Invalid folder name"),
+                             tr("The name must not be empty, '.', '..', or contain '/'."));
         return;
     }
     setBusy(true, tr("Creating folder %1…").arg(name));
@@ -415,15 +585,14 @@ void MainWindow::renameSelectedEntry()
     }
     const QString oldName = rfm::core::RemotePath::fileName(selection.constFirst().path);
     bool accepted = false;
-    const QString newName = QInputDialog::getText(
-        this, tr("Rename"), tr("New name:"), QLineEdit::Normal, oldName, &accepted);
+    const QString newName = QInputDialog::getText(this, tr("Rename"), tr("New name:"),
+                                                  QLineEdit::Normal, oldName, &accepted);
     if (!accepted) {
         return;
     }
     if (!rfm::core::RemotePath::isValidName(newName)) {
-        QMessageBox::warning(
-            this, tr("Invalid name"),
-            tr("The name must not be empty, '.', '..', or contain '/'."));
+        QMessageBox::warning(this, tr("Invalid name"),
+                             tr("The name must not be empty, '.', '..', or contain '/'."));
         return;
     }
     setBusy(true, tr("Renaming %1…").arg(oldName));
@@ -470,47 +639,173 @@ void MainWindow::removeSelectedEntries()
         names.push_back(rfm::core::RemotePath::fileName(item.path));
         recursive = recursive || item.directory;
     }
-    const QString warning = recursive
-        ? tr("The selected folders and all their contents will be permanently deleted.\n\n%1")
-              .arg(names.join(QChar{'\n'}))
-        : tr("The selected files will be permanently deleted.\n\n%1")
-              .arg(names.join(QChar{'\n'}));
+    const QString warning =
+        recursive
+            ? tr("The selected folders and all their contents will be permanently deleted.\n\n%1")
+                  .arg(names.join(QChar{'\n'}))
+            : tr("The selected files will be permanently deleted.\n\n%1")
+                  .arg(names.join(QChar{'\n'}));
     if (QMessageBox::warning(this, tr("Confirm permanent deletion"), warning,
                              QMessageBox::Yes | QMessageBox::Cancel,
-                             QMessageBox::Cancel)
-        != QMessageBox::Yes) {
+                             QMessageBox::Cancel) != QMessageBox::Yes) {
         return;
     }
     setBusy(true, tr("Deleting %1 item(s)…").arg(selection.size()));
     emit removeRequested(nextOperationId(), selection, recursive);
 }
 
+void MainWindow::chooseUploads()
+{
+    UploadSelectionDialog dialog(this);
+    if (dialog.exec() == QDialog::Accepted) {
+        queueUploads(dialog.selectedPaths());
+    }
+}
+
+void MainWindow::chooseDownloadDirectory()
+{
+    if (selectedEntries().isEmpty()) {
+        return;
+    }
+    const QString destination =
+        QFileDialog::getExistingDirectory(this, tr("Select the download destination folder"),
+                                          QDir::homePath(), QFileDialog::ShowDirsOnly);
+    if (!destination.isEmpty()) {
+        queueDownloads(destination);
+    }
+}
+
+void MainWindow::queueUploads(QStringList localPaths)
+{
+    if (!m_connected || m_currentPath.isEmpty()) {
+        return;
+    }
+    for (const QString& path : std::as_const(localPaths)) {
+        const auto request = TransferRequestFactory::upload(nextOperationId(), path, m_currentPath);
+        if (request.has_value()) {
+            m_pendingTransferRequests.insert(request->id);
+            m_nonTerminalTransfers.insert(request->id);
+            updateConnectionAction();
+            emit transferRequested(*request);
+        }
+    }
+}
+
+void MainWindow::queueDownloads(QString localDirectory)
+{
+    if (!m_connected || localDirectory.isEmpty()) {
+        return;
+    }
+    for (const rfm::core::RemoteSelection& entry : selectedEntries()) {
+        const auto request =
+            TransferRequestFactory::download(nextOperationId(), entry, localDirectory);
+        if (request.has_value()) {
+            m_pendingTransferRequests.insert(request->id);
+            m_nonTerminalTransfers.insert(request->id);
+            updateConnectionAction();
+            emit transferRequested(*request);
+        }
+    }
+}
+
 void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& result)
 {
     QStringList failures;
+    bool anySuccess = false;
     m_pendingSelectionNames.clear();
     for (const rfm::core::RemoteItemResult& item : result.items) {
         if (!item.success) {
             const QString label = item.source.isEmpty() ? item.destination : item.source;
             failures.push_back(tr("%1: %2").arg(label, item.error));
-        } else if (!item.destination.isEmpty()
-                   && rfm::core::RemotePath::normalize(
-                          rfm::core::RemotePath::parent(item.destination))
-                       == rfm::core::RemotePath::normalize(m_currentPath)) {
+        } else if (!item.destination.isEmpty() &&
+                   rfm::core::RemotePath::normalize(rfm::core::RemotePath::parent(
+                       item.destination)) == rfm::core::RemotePath::normalize(m_currentPath)) {
             m_pendingSelectionNames.push_back(rfm::core::RemotePath::fileName(item.destination));
         }
+        anySuccess = anySuccess || item.success;
     }
     if (!failures.isEmpty()) {
-        QMessageBox::warning(
-            this,
-            result.allSucceeded() ? tr("Remote operation") : tr("Remote operation incomplete"),
-            failures.join(QChar{'\n'}));
+        QMessageBox::warning(this,
+                             result.allSucceeded() ? tr("Remote operation")
+                                                   : tr("Remote operation incomplete"),
+                             failures.join(QChar{'\n'}));
     }
-    statusBar()->showMessage(
-        failures.isEmpty() ? tr("Remote operation completed")
-                           : tr("Remote operation completed with errors"));
-    setBusy(true, tr("Refreshing %1…").arg(m_currentPath));
-    emit directoryRequested(m_currentPath);
+    statusBar()->showMessage(failures.isEmpty() ? tr("Remote operation completed")
+                                                : tr("Remote operation completed with errors"));
+    setBusy(false);
+    if (anySuccess) {
+        scheduleCurrentDirectoryRefresh(true);
+    }
+}
+
+void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progress)
+{
+    m_transferPanel->updateTransfer(progress);
+    m_pendingTransferRequests.remove(progress.id);
+    const bool terminal = progress.state == rfm::core::TransferState::Completed ||
+                          progress.state == rfm::core::TransferState::Cancelled ||
+                          progress.state == rfm::core::TransferState::Failed;
+    if (terminal) {
+        m_nonTerminalTransfers.remove(progress.id);
+    } else {
+        m_nonTerminalTransfers.insert(progress.id);
+    }
+    updateConnectionAction();
+
+    if (progress.state == rfm::core::TransferState::Completed &&
+        progress.direction == rfm::core::TransferDirection::Upload &&
+        rfm::core::RemotePath::normalize(rfm::core::RemotePath::parent(progress.destination)) ==
+            rfm::core::RemotePath::normalize(m_currentPath)) {
+        scheduleCurrentDirectoryRefresh(false);
+    }
+}
+
+void MainWindow::updateConnectionAction()
+{
+    m_newConnectionAction->setEnabled(!m_busy && m_nonTerminalTransfers.isEmpty());
+}
+
+void MainWindow::requestDirectoryListing(const QString& path, bool showBusy, bool deferIfActive)
+{
+    if (!m_connected || path.isEmpty()) {
+        return;
+    }
+    if (m_listingInProgress || (m_busy && !showBusy)) {
+        if (deferIfActive && (!m_deferredDirectoryBusy || showBusy)) {
+            m_deferredDirectoryPath = path;
+            m_deferredDirectoryBusy = m_deferredDirectoryBusy || showBusy;
+        }
+        return;
+    }
+
+    m_listingInProgress = true;
+    if (showBusy) {
+        setBusy(true, tr("Refreshing %1…").arg(path));
+    }
+    emit directoryRequested(path);
+}
+
+void MainWindow::scheduleCurrentDirectoryRefresh(bool showBusy)
+{
+    if (!m_connected || m_currentPath.isEmpty()) {
+        return;
+    }
+    m_scheduledRefreshBusy = m_scheduledRefreshBusy || showBusy;
+    m_refreshDebounceTimer->start();
+}
+
+void MainWindow::stopAutomaticRefresh()
+{
+    if (m_autoRefreshTimer != nullptr) {
+        m_autoRefreshTimer->stop();
+    }
+    if (m_refreshDebounceTimer != nullptr) {
+        m_refreshDebounceTimer->stop();
+    }
+    m_listingInProgress = false;
+    m_deferredDirectoryPath.clear();
+    m_deferredDirectoryBusy = false;
+    m_scheduledRefreshBusy = false;
 }
 
 void MainWindow::updateOperationActions()
@@ -522,6 +817,8 @@ void MainWindow::updateOperationActions()
     m_moveAction->setEnabled(available && count > 0);
     m_copyAction->setEnabled(available && count > 0);
     m_removeAction->setEnabled(available && count > 0);
+    m_uploadAction->setEnabled(available);
+    m_downloadAction->setEnabled(available && count > 0);
 }
 
 QList<rfm::core::RemoteSelection> MainWindow::selectedEntries() const
@@ -544,24 +841,21 @@ QList<rfm::core::RemoteSelection> MainWindow::selectedEntries() const
 QString MainWindow::askDestination(const QString& title)
 {
     bool accepted = false;
-    const QString value = QInputDialog::getText(
-        this, title, tr("Remote destination folder:"), QLineEdit::Normal, m_currentPath, &accepted);
+    const QString value = QInputDialog::getText(this, title, tr("Remote destination folder:"),
+                                                QLineEdit::Normal, m_currentPath, &accepted);
     if (!accepted) {
         return {};
     }
     const QString normalized = rfm::core::RemotePath::normalize(value);
-    if (normalized.isEmpty() || normalized == QStringLiteral("..")
-        || normalized.startsWith(QStringLiteral("../"))) {
+    if (normalized.isEmpty() || normalized == QStringLiteral("..") ||
+        normalized.startsWith(QStringLiteral("../"))) {
         QMessageBox::warning(this, tr("Invalid destination"), tr("Enter a valid remote folder."));
         return {};
     }
     return normalized;
 }
 
-quint64 MainWindow::nextOperationId()
-{
-    return m_nextOperationId++;
-}
+quint64 MainWindow::nextOperationId() { return m_nextOperationId++; }
 
 void MainWindow::openSelectedEntry(int row, int /* column */)
 {
@@ -570,10 +864,9 @@ void MainWindow::openSelectedEntry(int row, int /* column */)
         return;
     }
     const QString nextPath = m_currentPath == QStringLiteral(".")
-        ? QStringLiteral("./%1").arg(item->text())
-        : QStringLiteral("%1/%2").arg(m_currentPath, item->text());
-    setBusy(true, tr("Opening %1…").arg(nextPath));
-    emit directoryRequested(nextPath);
+                                 ? QStringLiteral("./%1").arg(item->text())
+                                 : QStringLiteral("%1/%2").arg(m_currentPath, item->text());
+    requestDirectoryListing(nextPath, true, true);
 }
 
 void MainWindow::requestParentDirectory()
@@ -585,8 +878,7 @@ void MainWindow::requestParentDirectory()
     if (parent.isEmpty()) {
         parent = QStringLiteral(".");
     }
-    setBusy(true, tr("Opening %1…").arg(parent));
-    emit directoryRequested(parent);
+    requestDirectoryListing(parent, true, true);
 }
 
 void MainWindow::setBusy(bool busy, const QString& message)
@@ -599,7 +891,7 @@ void MainWindow::setBusy(bool busy, const QString& message)
         }
         m_busy = busy;
     }
-    m_newConnectionAction->setEnabled(!busy);
+    updateConnectionAction();
     m_upAction->setEnabled(!busy && m_connected && m_currentPath != QStringLiteral("."));
     m_refreshAction->setEnabled(!busy && m_connected);
     if (m_fileTable != nullptr) {
@@ -609,16 +901,21 @@ void MainWindow::setBusy(bool busy, const QString& message)
         statusBar()->showMessage(message);
     }
     updateOperationActions();
+
+    if (!m_busy && !m_listingInProgress && !m_deferredDirectoryPath.isEmpty()) {
+        const QString deferredPath = std::exchange(m_deferredDirectoryPath, {});
+        const bool showBusy = std::exchange(m_deferredDirectoryBusy, false);
+        requestDirectoryListing(deferredPath, showBusy, true);
+    }
 }
 
 void MainWindow::showAboutDialog()
 {
     QMessageBox::about(
-        this,
-        tr("About RemoteFileManager"),
+        this, tr("About RemoteFileManager"),
         tr("RemoteFileManager %1\n\nA native file manager for standard SSH/SFTP servers.\n"
-           "Sprint 2: secure remote file operations.")
+           "Sprint 3: queued file and folder transfers.")
             .arg(QApplication::applicationVersion()));
 }
 
-}  // namespace rfm::app
+} // namespace rfm::app

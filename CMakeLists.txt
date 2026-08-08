@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.25)
 
 project(
     RemoteFileManager
-    VERSION 0.3.0
+    VERSION 0.4.0
     DESCRIPTION "Native remote file manager over SSH and SFTP"
     LANGUAGES CXX
 )

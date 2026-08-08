@@ -3,9 +3,13 @@ add_library(
     core/ConnectionProfile.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp
+    core/TransferDirectoryJob.cpp
+    core/TransferFileJob.cpp
+    core/TransferQueue.cpp
     ssh/LibsshRuntime.cpp
     ssh/RemoteCopyCommand.cpp
     ssh/SshSession.cpp
+    ssh/SftpTransferBackend.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
 )
 add_library(RemoteFileManager::Core ALIAS rfm_core)
@@ -23,8 +27,12 @@ add_library(
     rfm_ui STATIC
     app/MainWindow.cpp
     app/ConnectionDialog.cpp
+    app/TransferPanel.cpp
+    app/TransferRequestFactory.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/MainWindow.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ConnectionDialog.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferPanel.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferRequestFactory.hpp
 )
 add_library(RemoteFileManager::Ui ALIAS rfm_ui)
 
