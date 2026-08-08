@@ -3,6 +3,7 @@
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/TransferTypes.hpp"
 
 #include <QObject>
 #include <memory>
@@ -29,6 +30,11 @@ public slots:
                      QList<rfm::core::RemoteSelection> sources,
                      QString destinationDirectory);
     void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
+    void enqueueTransfer(rfm::core::TransferRequest request);
+    void pauseTransfer(quint64 id);
+    void resumeTransfer(quint64 id);
+    void cancelTransfer(quint64 id);
+    void shutdownTransfers();
     void disconnectFromHost();
 
 signals:
@@ -36,6 +42,9 @@ signals:
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(QString path, QList<rfm::core::RemoteEntry> entries);
     void operationFinished(rfm::core::RemoteOperationResult result);
+    void transferUpdated(rfm::core::TransferProgress progress);
+    void transferRejected(quint64 id, QString error);
+    void transfersShutdown();
     void failed(QString message);
     void disconnected();
 
@@ -44,6 +53,8 @@ private:
     std::unique_ptr<Impl> m_impl;
 
     void authenticateAndOpen();
+    void processTransferStep();
+    void scheduleTransferStep();
     void fail(const QString& message);
 };
 

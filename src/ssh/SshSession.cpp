@@ -1,5 +1,10 @@
 #include "remotefilemanager/ssh/SshSession.hpp"
 
+#include "SftpTransferBackend.hpp"
+#include "remotefilemanager/core/TransferDirectoryJob.hpp"
+#include "remotefilemanager/core/TransferFileJob.hpp"
+#include "remotefilemanager/core/TransferJob.hpp"
+#include "remotefilemanager/core/TransferQueue.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 
 #include <libssh/libssh.h>
@@ -9,6 +14,7 @@
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QMetaObject>
 
 #include <algorithm>
 
@@ -197,6 +203,11 @@ public:
 
     void reset()
     {
+        activeTransferJob.reset();
+        transferBackend.reset();
+        transferQueue.clear();
+        transferStepScheduled = false;
+        shuttingDown = false;
         if (sftp != nullptr) {
             sftp_free(sftp);
             sftp = nullptr;
@@ -217,6 +228,13 @@ public:
     rfm::core::ConnectionProfile profile;
     QString password;
     bool awaitingHostConfirmation{false};
+    // Declaration order is intentional: the job dies before its backend, and
+    // both are reset before the SFTP session in reset().
+    std::unique_ptr<SftpTransferBackend> transferBackend;
+    std::unique_ptr<rfm::core::TransferJob> activeTransferJob;
+    rfm::core::TransferQueue transferQueue;
+    bool transferStepScheduled{false};
+    bool shuttingDown{false};
 };
 
 SshSession::SshSession(QObject* parent)
@@ -473,6 +491,151 @@ void SshSession::removeEntries(
     SftpBackend backend(m_impl->session, m_impl->sftp);
     rfm::core::RemoteFileOperations operations(backend);
     emit operationFinished(operations.remove(id, sources, recursive));
+}
+
+void SshSession::enqueueTransfer(rfm::core::TransferRequest request)
+{
+    request.source = request.source.trimmed();
+    request.destination = request.destination.trimmed();
+    if (m_impl->sftp == nullptr || request.id == 0 || request.source.isEmpty() ||
+        request.destination.isEmpty()) {
+        emit transferRejected(request.id,
+                              tr("Invalid transfer request or no active SFTP connection."));
+        return;
+    }
+    if ((m_impl->activeTransferJob != nullptr &&
+         m_impl->activeTransferJob->progress().id == request.id) ||
+        !m_impl->transferQueue.enqueue(request)) {
+        emit transferRejected(request.id, tr("A transfer with this identifier already exists."));
+        return;
+    }
+    emit transferUpdated({request.id,
+                          rfm::core::TransferState::Queued,
+                          request.source,
+                          request.destination,
+                          0,
+                          0,
+                          0,
+                          {},
+                          0,
+                          0,
+                          {},
+                          request.direction,
+                          request.directory});
+    scheduleTransferStep();
+}
+
+void SshSession::pauseTransfer(quint64 id)
+{
+    if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id &&
+        m_impl->activeTransferJob->requestPause()) {
+        emit transferUpdated(m_impl->activeTransferJob->progress());
+        return;
+    }
+    emit transferRejected(id, tr("Only the active transfer can be paused."));
+}
+
+void SshSession::resumeTransfer(quint64 id)
+{
+    if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id &&
+        m_impl->activeTransferJob->resume()) {
+        emit transferUpdated(m_impl->activeTransferJob->progress());
+        scheduleTransferStep();
+        return;
+    }
+    emit transferRejected(id, tr("Only a paused active transfer can be resumed."));
+}
+
+void SshSession::cancelTransfer(quint64 id)
+{
+    if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id) {
+        if (m_impl->activeTransferJob->requestCancel()) {
+            emit transferUpdated(m_impl->activeTransferJob->progress());
+            scheduleTransferStep();
+        }
+        return;
+    }
+
+    rfm::core::TransferRequest cancelled;
+    if (m_impl->transferQueue.cancel(id, cancelled)) {
+        emit transferUpdated({cancelled.id,
+                              rfm::core::TransferState::Cancelled,
+                              cancelled.source,
+                              cancelled.destination,
+                              0,
+                              0,
+                              0,
+                              {},
+                              0,
+                              0,
+                              {},
+                              cancelled.direction,
+                              cancelled.directory});
+        return;
+    }
+    emit transferRejected(id, tr("The transfer was not found or is already terminal."));
+}
+
+void SshSession::shutdownTransfers()
+{
+    m_impl->transferQueue.clear();
+    if (m_impl->activeTransferJob == nullptr || m_impl->activeTransferJob->isFinished()) {
+        m_impl->reset();
+        emit transfersShutdown();
+        return;
+    }
+    m_impl->shuttingDown = true;
+    static_cast<void>(m_impl->activeTransferJob->requestCancel());
+    scheduleTransferStep();
+}
+
+void SshSession::scheduleTransferStep()
+{
+    if (!m_impl->transferStepScheduled) {
+        m_impl->transferStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processTransferStep, Qt::QueuedConnection);
+    }
+}
+
+void SshSession::processTransferStep()
+{
+    m_impl->transferStepScheduled = false;
+    if (m_impl->activeTransferJob != nullptr) {
+        if (m_impl->activeTransferJob->isPaused()) {
+            return;
+        }
+        m_impl->activeTransferJob->step();
+        emit transferUpdated(m_impl->activeTransferJob->progress());
+        if (m_impl->activeTransferJob->isFinished()) {
+            m_impl->activeTransferJob.reset();
+            m_impl->transferBackend.reset();
+            if (m_impl->shuttingDown) {
+                m_impl->reset();
+                emit transfersShutdown();
+                return;
+            }
+            if (!m_impl->transferQueue.isEmpty()) {
+                scheduleTransferStep();
+            }
+        } else {
+            scheduleTransferStep();
+        }
+        return;
+    }
+    const std::optional<rfm::core::TransferRequest> next = m_impl->transferQueue.takeNext();
+    if (!next.has_value()) {
+        return;
+    }
+
+    m_impl->transferBackend = std::make_unique<SftpTransferBackend>(m_impl->sftp);
+    if (next->directory) {
+        m_impl->activeTransferJob =
+            std::make_unique<rfm::core::TransferDirectoryJob>(*m_impl->transferBackend, *next);
+    } else {
+        m_impl->activeTransferJob =
+            std::make_unique<rfm::core::TransferFileJob>(*m_impl->transferBackend, *next);
+    }
+    scheduleTransferStep();
 }
 
 void SshSession::disconnectFromHost()
