@@ -29,7 +29,7 @@ rfm::core::OperationProgress operation(quint64 id, rfm::core::OperationKind kind
     result.error = state == rfm::core::OperationState::Failed
                        ? QStringLiteral("permission denied")
                        : QString{};
-    result.finishedAt = QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::UTC);
+    result.finishedAt = QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::utc());
     return result;
 }
 
