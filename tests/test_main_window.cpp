@@ -136,6 +136,8 @@ class MainWindowTest final : public QObject
     void keepsConnectionDialogOpenAcrossFailureAndRetry();
     void loadsSavedServersAndPrefillsQuickConnection();
     void placesButtonTracksActiveAndSelectedProfiles();
+    void matchesSavedProfileAgainstLiveConnectionSettings_data();
+    void matchesSavedProfileAgainstLiveConnectionSettings();
     void addsEditsAndRemovesSavedServers();
     void savesManualServerOnlyAfterSuccessAndAvoidsDuplicates();
     void disconnectActionFollowsSessionLifecycle();
@@ -427,6 +429,90 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QSignalSpy secondConnection(&window, &rfm::app::MainWindow::connectionRequested);
     button->click();
     QCOMPARE(secondConnection.size(), 0);
+}
+
+void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings_data()
+{
+    QTest::addColumn<QString>("host");
+    QTest::addColumn<QString>("username");
+    QTest::addColumn<int>("port");
+    QTest::addColumn<bool>("savedProfileIsConnected");
+
+    QTest::newRow("saved profile without edits") << QStringLiteral("saved.example.test")
+                                                  << QStringLiteral("alice") << 22 << true;
+    QTest::newRow("edited host") << QStringLiteral("other.example.test")
+                                  << QStringLiteral("alice") << 22 << false;
+    QTest::newRow("edited username") << QStringLiteral("saved.example.test")
+                                      << QStringLiteral("bob") << 22 << false;
+    QTest::newRow("edited port") << QStringLiteral("saved.example.test")
+                                  << QStringLiteral("alice") << 2222 << false;
+}
+
+void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings()
+{
+    QFETCH(QString, host);
+    QFETCH(QString, username);
+    QFETCH(int, port);
+    QFETCH(bool, savedProfileIsConnected);
+
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerProfileStore store(temporary.path());
+    const rfm::core::ConnectionProfile saved{
+        QStringLiteral("Saved server"), QStringLiteral("saved.example.test"),
+        QStringLiteral("alice"), 22, QStringLiteral("stable-profile-id")};
+    QString error;
+    QVERIFY2(store.save({saved}, &error), qPrintable(error));
+
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    QSignalSpy connectionRequested(&window, &rfm::app::MainWindow::connectionRequested);
+    auto* const list = window.findChild<QListWidget*>(QStringLiteral("serverProfileList"));
+    auto* const profileButton =
+        window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton"));
+    auto* const disconnectAction =
+        window.findChild<QAction*>(QStringLiteral("disconnectAction"));
+    QVERIFY(list != nullptr);
+    QVERIFY(profileButton != nullptr);
+    QVERIFY(disconnectAction != nullptr);
+
+    list->setCurrentRow(0);
+    profileButton->click();
+    auto* const dialog = window.findChild<rfm::app::ConnectionDialog*>();
+    QVERIFY(dialog != nullptr);
+    dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))->setText(host);
+    dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))->setText(username);
+    dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->setValue(port);
+    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+
+    QCOMPARE(connectionRequested.size(), 1);
+    const auto liveProfile =
+        qvariant_cast<rfm::core::ConnectionProfile>(connectionRequested.constFirst().constFirst());
+    QCOMPARE(liveProfile.id, saved.id);
+    QCOMPARE(liveProfile.host, host);
+    QCOMPARE(liveProfile.username, username);
+    QCOMPARE(liveProfile.port, static_cast<quint16>(port));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+
+    QCOMPARE(list->item(0)->data(Qt::UserRole + 1).toBool(), savedProfileIsConnected);
+    QCOMPARE(list->item(0)->text().contains(QStringLiteral("Connected")),
+             savedProfileIsConnected);
+    QCOMPARE(profileButton->text(),
+             savedProfileIsConnected ? QStringLiteral("Disconnect") : QStringLiteral("Connect"));
+    QCOMPARE(profileButton->isEnabled(), savedProfileIsConnected);
+
+    QObject::disconnect(&window, &rfm::app::MainWindow::disconnectionRequested, nullptr, nullptr);
+    QSignalSpy disconnectionRequested(&window, &rfm::app::MainWindow::disconnectionRequested);
+    profileButton->click();
+    QCOMPARE(disconnectionRequested.size(), savedProfileIsConnected ? 1 : 0);
+    if (!savedProfileIsConnected) {
+        QVERIFY(disconnectAction->isEnabled());
+        disconnectAction->trigger();
+        QCOMPARE(disconnectionRequested.size(), 1);
+    }
 }
 
 void MainWindowTest::addsEditsAndRemovesSavedServers()

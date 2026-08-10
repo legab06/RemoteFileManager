@@ -136,7 +136,10 @@ action `disconnectionRequested` que le menu et la barre d'outils. Un autre profi
 sélectionné pendant la session conserve le libellé Connect mais reste désactivé
 avec une explication. Le serveur actif porte le suffixe textuel « Connected » et
 une graisse renforcée, afin que l'état ne dépende pas uniquement d'une couleur ni
-de la sélection courante.
+de la sélection courante. Ce marqueur et le bouton Disconnect exigent que l'hôte,
+l'utilisateur et le port de la session active correspondent encore au profil ;
+l'identifiant stable du profil ne suffit pas si ces réglages ont été modifiés dans
+le dialogue pour la connexion courante.
 
 L'action partagée Disconnect est disponible dans le menu File, la barre d'outils
 et le menu contextuel du serveur actif dans Places. Elle émet uniquement
