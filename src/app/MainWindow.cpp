@@ -1379,7 +1379,7 @@ void MainWindow::showAboutDialog()
     QMessageBox::about(
         this, tr("About RemoteFileManager"),
         tr("RemoteFileManager %1\n\nA native file manager for standard SSH/SFTP servers.\n"
-           "Sprint 3: queued file and folder transfers.")
+           "Sprint 4: dual-pane navigation and persistent operation history.")
             .arg(QApplication::applicationVersion()));
 }
 

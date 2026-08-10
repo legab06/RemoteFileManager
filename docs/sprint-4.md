@@ -295,33 +295,34 @@ Tous les tests automatisés restent indépendants d’un serveur SSH externe.
 
 ## Étapes d’implémentation
 
-1. Extraire le navigateur dans `FileBrowserPane` sans changer le comportement.
-2. Corréler les listings et distinguer erreurs localisées et erreurs de session.
-3. Introduire le split optionnel et le panneau actif sans abstraction de source
+1. [x] Extraire le navigateur dans `FileBrowserPane` sans changer le comportement.
+2. [x] Corréler les listings et distinguer erreurs localisées et erreurs de session.
+3. [x] Introduire le split optionnel et le panneau actif sans abstraction de source
    inutilisée.
-4. Ajouter les opérations vers l’autre panneau et les refreshs ciblés.
-5. Généraliser le panneau inférieur avec un modèle d’opérations commun.
-6. Ajouter l’historique persistant et ses commandes de nettoyage seulement si les
-   étapes précédentes sont stabilisées.
-7. Exécuter la compilation stricte, les tests et la validation manuelle SSH/SFTP.
+4. [x] Ajouter les opérations vers l’autre panneau et les refreshs ciblés.
+5. [x] Généraliser le panneau inférieur avec un modèle d’opérations commun.
+6. [x] Ajouter l’historique persistant et ses commandes de nettoyage.
+7. [x] Exécuter la compilation stricte, les tests et la validation manuelle SSH/SFTP.
 
 ## Critères d’acceptation
 
-- [ ] L’application démarre en vue simple et peut activer ou fermer la vue scindée.
-- [ ] Chaque panneau conserve indépendamment chemin, sélection, historique et refresh.
-- [ ] Le panneau actif et la destination d’une opération sont sans ambiguïté.
-- [ ] Copier ou déplacer vers l’autre panneau ne demande pas de chemin manuel.
-- [ ] Une copie ou un déplacement sur la même connexion reste exécuté côté serveur.
-- [ ] Les réponses asynchrones ne peuvent pas être appliquées au mauvais panneau.
-- [ ] Uploads, downloads et navigation du Sprint 3 ne régressent pas.
+- [x] L’application démarre en vue simple et peut activer ou fermer la vue scindée.
+- [x] Chaque panneau conserve indépendamment chemin, sélection, historique et refresh.
+- [x] Le panneau actif et la destination d’une opération sont sans ambiguïté.
+- [x] Copier ou déplacer vers l’autre panneau ne demande pas de chemin manuel.
+- [x] Une copie ou un déplacement sur la même connexion reste exécuté côté serveur.
+- [x] Les réponses asynchrones ne peuvent pas être appliquées au mauvais panneau.
+- [x] Uploads, downloads et navigation du Sprint 3 ne régressent pas.
 - [x] La vue d’opérations suit upload, download, copie et déplacement.
 - [x] L’historique terminal est persistant et nettoyable.
 - [x] Les opérations triviales n’encombrent pas l’historique principal.
 - [x] Les tests automatisés ne nécessitent aucun serveur externe.
 - [x] La compilation stricte et toute la suite CTest réussissent.
 
-Les critères dépendant d’un vrai serveur restent non cochés jusqu’à une validation
-manuelle sur une installation SSH/SFTP standard.
+La validation manuelle sur un serveur SSH/SFTP standard est réussie : navigation,
+vue simple et scindée, copie et déplacement distants côté serveur, upload/download,
+gestionnaire d’opérations, persistance, suppression individuelle et nettoyage de
+l’historique ont été vérifiés en conditions réelles.
 
 ## État d’avancement
 
@@ -367,6 +368,7 @@ Les étapes 1 à 6 sont implémentées. À l’issue de l’étape 6 :
 - les tests du stockage injectent `QTemporaryDir` et la suite UI utilise le mode
   de chemins de test de Qt, sans écrire dans le profil utilisateur réel.
 
-Une nouvelle validation visuelle manuelle reste nécessaire sur les thèmes clairs
-et sombres réellement ciblés ; les tests automatisés vérifient les palettes et les
-transitions d’état, mais ne remplacent pas cette appréciation visuelle.
+L’appréciation visuelle approfondie des thèmes clair et sombre n’a pas pu être
+réalisée correctement sous WSL. Elle est explicitement différée à un environnement
+natif Linux, Windows ou macOS ; les tests de palette et de transitions restent
+valides et ce contrôle visuel différé ne bloque pas la release 0.5.0.
