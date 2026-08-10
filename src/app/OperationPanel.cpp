@@ -272,17 +272,27 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
                     : tr("%1 / %2").arg(formatBytes(progress.transferredBytes),
                                          formatBytes(progress.totalBytes)));
         }
+    } else if (!rfm::core::isTerminal(progress.state)) {
+        auto* progressBar =
+            qobject_cast<QProgressBar*>(m_table->cellWidget(row, ProgressColumn));
+        if (progressBar == nullptr) {
+            progressBar = new QProgressBar(m_table);
+            progressBar->setObjectName(QStringLiteral("operationProgressBar"));
+            m_table->setCellWidget(row, ProgressColumn, progressBar);
+        }
+        progressBar->setRange(0, 0);
+        progressBar->setFormat(progress.state == rfm::core::OperationState::Cancelling
+                                   ? tr("Cancelling")
+                                   : tr("Working"));
     } else {
         m_table->removeCellWidget(row, ProgressColumn);
         m_table->item(row, ProgressColumn)
-            ->setText(progress.totalItems == 0 || !rfm::core::isTerminal(progress.state)
-                          ? QStringLiteral("—")
-                          : tr("%1 / %2 completed")
-                                .arg(progress.completedItems)
-                                .arg(progress.totalItems));
+            ->setText(tr("%1 / %2 completed")
+                          .arg(progress.completedItems)
+                          .arg(progress.totalItems));
     }
 
-    if (isTransfer(progress.kind)) {
+    if (isTransfer(progress.kind) || progress.cancellationSupported) {
         QWidget* actions = m_table->cellWidget(row, ActionsColumn);
         if (actions == nullptr) {
             actions = new QWidget(m_table);
@@ -325,9 +335,9 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
             actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
         auto* const cancel =
             actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
-        const bool canPause = progress.pauseResumeSupported &&
+        const bool canPause = isTransfer(progress.kind) && progress.pauseResumeSupported &&
                               progress.state == rfm::core::OperationState::Running;
-        const bool canResume = progress.pauseResumeSupported &&
+        const bool canResume = isTransfer(progress.kind) && progress.pauseResumeSupported &&
                                progress.state == rfm::core::OperationState::Paused;
         pauseResume->setVisible(canPause || canResume);
         pauseResume->setEnabled(canPause || canResume);

@@ -15,7 +15,7 @@ class TransferRequestFactory final
     upload(quint64 id, const QString& localPath, const QString& remoteDirectory);
     [[nodiscard]] static std::optional<rfm::core::TransferRequest>
     download(quint64 id, const rfm::core::RemoteSelection& remoteEntry,
-             const QString& localDirectory);
+             const QString& localDirectory, QString* error = nullptr);
 };
 
 } // namespace rfm::app

@@ -13,7 +13,9 @@ Le Sprint 2 transforme la navigation SFTP en première expérience de gestion de
 - Un backend abstrait sépare ces règles de libssh et permet des doubles de test sans serveur.
 - `mkdir`, `rename`, `unlink`, `rmdir`, l’inspection et le parcours utilisent SFTP.
 - Le déplacement repose sur le renommage SFTP, donc reste entièrement distant.
-- Faute d’API de copie serveur dans SFTP/libssh, la copie appelle `cp` dans un canal SSH. La commande est construite dans un composant unique avec arguments échappés, mode sans écrasement `-n` et séparateur `--`; aucun glob n’est employé.
+- Faute d’API de copie serveur dans SFTP/libssh, la copie appelle `cp` dans un canal SSH.
+  La commande est construite dans un composant unique avec arguments échappés,
+  préservation des liens `-P`, mode sans écrasement `-n` et séparateur `--`; aucun glob n’est employé.
 - Chaque lot possède un identifiant et retourne un résultat par élément afin de représenter les réussites partielles.
 
 ## Mesures de sécurité
@@ -50,7 +52,8 @@ Le Sprint 2 transforme la navigation SFTP en première expérience de gestion de
 - Un déplacement SFTP entre systèmes de fichiers distants peut être refusé par le serveur ; aucun repli par copie puis suppression n’est tenté.
 - Les collisions sont contrôlées avant l’opération et la copie emploie en plus le mode sans écrasement. Le protocole SFTP v3 ne fournit pas de renommage atomique « no-clobber » portable face à une modification concurrente externe.
 - Les suppressions sont définitives : aucune corbeille ou récupération distante n’est encore disponible.
-- Les opérations ne publient pas de progression et ne sont pas annulables dans ce sprint.
+- Un durcissement ultérieur exécute `cp` par sondages non bloquants, publie une progression
+  indéterminée et permet l'annulation du processus distant et l'arrêt propre du worker.
 - La CI couvre les règles avec un double de backend ; création, copie, déplacement et suppression doivent encore être validés manuellement sur de vrais serveurs OpenSSH/SFTP.
 
 ## Report explicite au Sprint 3

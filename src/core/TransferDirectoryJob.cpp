@@ -1,5 +1,6 @@
 #include "remotefilemanager/core/TransferDirectoryJob.hpp"
 
+#include "remotefilemanager/core/LocalDownloadPath.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 
 #include <QDir>
@@ -33,9 +34,42 @@ bool remoteMissing(const TransferStatResult& result)
            (result.result.succeeded() && !result.node.exists);
 }
 
+QString backendErrorText(const TransferBackendResult& result)
+{
+    if (!result.detail.isEmpty()) {
+        return result.detail;
+    }
+    switch (result.error) {
+    case TransferBackendError::NotFound:
+        return QStringLiteral("The remote path was not found.");
+    case TransferBackendError::AlreadyExists:
+        return QStringLiteral("The remote path already exists.");
+    case TransferBackendError::PermissionDenied:
+        return QStringLiteral("Permission was denied by the server.");
+    case TransferBackendError::ConnectionLost:
+        return QStringLiteral("The SSH/SFTP connection was lost.");
+    case TransferBackendError::Unsupported:
+        return QStringLiteral("The server does not support this operation.");
+    case TransferBackendError::Io:
+        return QStringLiteral("The server reported an I/O error.");
+    case TransferBackendError::Failure:
+        return QStringLiteral("The remote operation failed.");
+    case TransferBackendError::None:
+        return {};
+    }
+    return QStringLiteral("The remote operation failed.");
+}
+
+QString backendFailure(const QString& operation, const QString& path,
+                       const TransferBackendResult& result)
+{
+    return QStringLiteral("%1 %2: %3").arg(operation, path, backendErrorText(result));
+}
+
 } // namespace
 
-TransferDirectoryJob::TransferDirectoryJob(RemoteTransferBackend& backend, TransferRequest request)
+TransferDirectoryJob::TransferDirectoryJob(RemoteTransferBackend& backend, TransferRequest request,
+                                           LocalPathFlavor localPathFlavor)
     : m_backend(backend), m_request(std::move(request)), m_progress{m_request.id,
                                                                     TransferState::Queued,
                                                                     m_request.source,
@@ -48,7 +82,8 @@ TransferDirectoryJob::TransferDirectoryJob(RemoteTransferBackend& backend, Trans
                                                                     0,
                                                                     {},
                                                                     m_request.direction,
-                                                                    true}
+                                                                    true},
+      m_localPathFlavor(localPathFlavor)
 {}
 
 void TransferDirectoryJob::appendCleanupError(const QString& error)
@@ -100,7 +135,8 @@ void TransferDirectoryJob::prepare()
         if (!remoteMissing(target)) {
             fail(target.node.exists
                      ? QStringLiteral("The destination directory already exists.")
-                     : QStringLiteral("Unable to inspect the destination directory."),
+                     : backendFailure(QStringLiteral("Unable to inspect remote destination"),
+                                      destination, target.result),
                  destination);
             return;
         }
@@ -113,9 +149,18 @@ void TransferDirectoryJob::prepare()
     }
 
     const TransferStatResult source = m_backend.stat(m_request.source);
-    if (!source.result.succeeded() || !source.node.exists || !source.node.directory ||
-        source.node.symbolicLink) {
-        fail(QStringLiteral("The remote directory is missing, invalid, or symbolic."),
+    if (!source.result.succeeded()) {
+        fail(backendFailure(QStringLiteral("Unable to inspect remote source"), m_request.source,
+                            source.result),
+             m_request.source);
+        return;
+    }
+    if (!source.node.exists) {
+        fail(QStringLiteral("The remote directory was not found."), m_request.source);
+        return;
+    }
+    if (!source.node.isDirectory() || source.node.isSymbolicLink()) {
+        fail(QStringLiteral("The remote source is not a transferable directory."),
              m_request.source);
         return;
     }
@@ -130,6 +175,9 @@ void TransferDirectoryJob::prepare()
              m_request.destination);
         return;
     }
+    m_localDestinationRoot = QDir::cleanPath(destination.absoluteFilePath());
+    m_request.destination = m_localDestinationRoot;
+    m_progress.destination = m_localDestinationRoot;
     m_pendingRemoteDirectories.enqueue({m_request.source, m_request.destination});
     m_phase = Phase::DiscoverRemoteOpen;
 }
@@ -176,7 +224,8 @@ void TransferDirectoryJob::openRemoteDirectory()
     const TransferBackendResult result =
         m_backend.openDirectory(m_currentRemoteDirectory.source, m_remoteDirectoryHandle);
     if (!result.succeeded()) {
-        fail(QStringLiteral("Unable to list the remote directory."),
+        fail(backendFailure(QStringLiteral("Unable to open remote directory"),
+                            m_currentRemoteDirectory.source, result),
              m_currentRemoteDirectory.source);
         return;
     }
@@ -188,7 +237,8 @@ void TransferDirectoryJob::readRemoteDirectoryEntry()
     std::optional<TransferDirectoryEntry> entry;
     const TransferBackendResult result = m_backend.readDirectory(m_remoteDirectoryHandle, entry);
     if (!result.succeeded()) {
-        fail(QStringLiteral("Unable to read the remote directory."),
+        fail(backendFailure(QStringLiteral("Unable to read remote directory"),
+                            m_currentRemoteDirectory.source, result),
              m_currentRemoteDirectory.source);
         return;
     }
@@ -204,18 +254,27 @@ void TransferDirectoryJob::readRemoteDirectoryEntry()
         return;
     }
     const QString remoteSource = RemotePath::join(m_currentRemoteDirectory.source, entry->name);
-    const QString localDestination =
-        QDir(m_currentRemoteDirectory.destination).filePath(entry->name);
-    if (entry->node.symbolicLink) {
+    const LocalDownloadPathResult localDestination = LocalDownloadPath::child(
+        m_localDestinationRoot, m_currentRemoteDirectory.destination, entry->name,
+        m_localPathFlavor);
+    if (!localDestination.succeeded()) {
+        fail(localDestination.error, remoteSource);
+        return;
+    }
+    if (entry->node.isSymbolicLink()) {
         fail(QStringLiteral("Symbolic links are not transferred."), remoteSource);
         return;
     }
-    if (entry->node.directory) {
-        m_directories.push_back(localDestination);
-        m_pendingRemoteDirectories.enqueue({remoteSource, localDestination});
+    if (entry->node.isDirectory()) {
+        m_directories.push_back(localDestination.path);
+        m_pendingRemoteDirectories.enqueue({remoteSource, localDestination.path});
         return;
     }
-    m_files.push_back({remoteSource, localDestination});
+    if (!entry->node.isRegularFile()) {
+        fail(QStringLiteral("The remote entry is not a regular file or directory."), remoteSource);
+        return;
+    }
+    m_files.push_back({remoteSource, localDestination.path});
     m_progress.totalBytes += entry->node.size;
 }
 
@@ -224,7 +283,8 @@ void TransferDirectoryJob::closeRemoteDirectory()
     const TransferBackendResult result = m_backend.closeDirectory(m_remoteDirectoryHandle);
     m_remoteDirectoryHandle = 0;
     if (!result.succeeded()) {
-        fail(QStringLiteral("Unable to close the remote directory."),
+        fail(backendFailure(QStringLiteral("Unable to close remote directory"),
+                            m_currentRemoteDirectory.source, result),
              m_currentRemoteDirectory.source);
         return;
     }
@@ -244,13 +304,19 @@ void TransferDirectoryJob::finishDiscovery()
 void TransferDirectoryJob::createRootDirectory()
 {
     bool created = false;
+    TransferBackendResult remoteResult;
     if (m_request.direction == TransferDirection::Upload) {
-        created = m_backend.createDirectory(m_request.destination).succeeded();
+        remoteResult = m_backend.createDirectory(m_request.destination);
+        created = remoteResult.succeeded();
     } else {
         created = QDir().mkdir(m_request.destination);
     }
     if (!created) {
-        fail(QStringLiteral("Unable to create the destination directory."), m_request.destination);
+        fail(m_request.direction == TransferDirection::Upload
+                 ? backendFailure(QStringLiteral("Unable to create remote destination directory"),
+                                  m_request.destination, remoteResult)
+                 : QStringLiteral("Unable to create local destination directory."),
+             m_request.destination);
         return;
     }
     m_phase = Phase::CreateDirectories;
@@ -263,11 +329,16 @@ void TransferDirectoryJob::createNextDirectory()
         return;
     }
     const QString path = m_directories.at(m_directoryIndex);
+    TransferBackendResult remoteResult;
     const bool created = m_request.direction == TransferDirection::Upload
-                             ? m_backend.createDirectory(path).succeeded()
+                             ? (remoteResult = m_backend.createDirectory(path)).succeeded()
                              : QDir().mkdir(path);
     if (!created) {
-        fail(QStringLiteral("Unable to create a destination subdirectory."), path);
+        fail(m_request.direction == TransferDirection::Upload
+                 ? backendFailure(QStringLiteral("Unable to create remote subdirectory"), path,
+                                  remoteResult)
+                 : QStringLiteral("Unable to create local destination subdirectory."),
+             path);
         return;
     }
     ++m_directoryIndex;

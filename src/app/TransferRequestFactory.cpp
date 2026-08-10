@@ -1,5 +1,6 @@
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 
+#include "remotefilemanager/core/LocalDownloadPath.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 
 #include <QDir>
@@ -23,14 +24,28 @@ TransferRequestFactory::upload(quint64 id, const QString& localPath, const QStri
 
 std::optional<rfm::core::TransferRequest>
 TransferRequestFactory::download(quint64 id, const rfm::core::RemoteSelection& remoteEntry,
-                                 const QString& localDirectory)
+                                 const QString& localDirectory, QString* error)
 {
+    if (error != nullptr) {
+        error->clear();
+    }
     const QString name = rfm::core::RemotePath::fileName(remoteEntry.path);
     if (id == 0 || name.isEmpty() || localDirectory.isEmpty()) {
+        if (error != nullptr) {
+            *error = QStringLiteral("The download request is invalid.");
+        }
+        return std::nullopt;
+    }
+    const rfm::core::LocalDownloadPathResult destination =
+        rfm::core::LocalDownloadPath::child(localDirectory, localDirectory, name);
+    if (!destination.succeeded()) {
+        if (error != nullptr) {
+            *error = destination.error;
+        }
         return std::nullopt;
     }
     return rfm::core::TransferRequest{id, rfm::core::TransferDirection::Download, remoteEntry.path,
-                                      QDir(localDirectory).filePath(name), remoteEntry.directory};
+                                      destination.path, remoteEntry.directory};
 }
 
 } // namespace rfm::app

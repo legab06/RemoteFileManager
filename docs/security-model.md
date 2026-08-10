@@ -8,6 +8,10 @@
 4. **Respecter les droits distants.** Toutes les opérations héritent uniquement des permissions du compte SSH connecté. Aucun mécanisme de contournement ou d’élévation automatique n’est prévu.
 5. **Traiter les chemins comme des données.** Les noms de fichiers ne doivent jamais devenir du code shell par simple concaténation.
 6. **Rester compatible avec un serveur standard.** Aucun démon, agent ou compte privilégié supplémentaire ne sera demandé côté serveur.
+7. **Confiner les téléchargements.** Un nom distant est validé comme composant local selon la
+   plateforme cliente et ne peut jamais sortir du dossier local explicitement choisi.
+8. **Ne pas ouvrir les nœuds spéciaux.** Les téléchargements acceptent uniquement fichiers
+   réguliers et dossiers ; liens, FIFO, sockets et périphériques sont refusés avant lecture.
 
 ## Menaces couvertes en priorité
 

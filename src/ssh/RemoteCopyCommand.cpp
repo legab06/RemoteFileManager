@@ -21,7 +21,7 @@ QString RemoteCopyCommand::build(
         || quotedDestination.isEmpty()) {
         return {};
     }
-    return QStringLiteral("cp %1-n -- %2 %3")
+    return QStringLiteral("cp -P %1-n -- %2 %3")
         .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedSource, quotedDestination);
 }
 

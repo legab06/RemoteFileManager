@@ -1,6 +1,7 @@
 #pragma once
 
 #include "remotefilemanager/core/ConnectionProfile.hpp"
+#include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
@@ -34,6 +35,7 @@ public slots:
     void pauseTransfer(quint64 id);
     void resumeTransfer(quint64 id);
     void cancelTransfer(quint64 id);
+    void cancelRemoteOperation(quint64 id);
     void shutdownTransfers();
     void disconnectFromHost();
 
@@ -44,6 +46,7 @@ signals:
                          QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
     void operationFinished(rfm::core::RemoteOperationResult result);
+    void operationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
     void transferRejected(quint64 id, QString error);
     void transfersShutdown();
@@ -57,6 +60,9 @@ private:
     void authenticateAndOpen();
     void processTransferStep();
     void scheduleTransferStep();
+    void processCopyStep();
+    void scheduleCopyStep();
+    void completeShutdownIfReady();
     void fail(const QString& message);
 };
 

@@ -77,6 +77,7 @@ OperationProgress beginRemoteOperation(quint64 id, OperationKind kind,
     operation.id = id;
     operation.kind = kind;
     operation.state = OperationState::Running;
+    operation.cancellationSupported = kind == OperationKind::RemoteCopy;
     operation.destination = destinationDirectory;
     operation.totalItems = static_cast<quint64>(sources.size());
     operation.sources.reserve(sources.size());
@@ -92,7 +93,10 @@ OperationProgress finishRemoteOperation(const RemoteOperationResult& result,
     OperationProgress operation = started;
     operation.id = result.id;
     operation.kind = operationKind(result.kind);
-    operation.state = result.allSucceeded() ? OperationState::Completed : OperationState::Failed;
+    operation.state = started.state == OperationState::Cancelled
+                          ? OperationState::Cancelled
+                          : (result.allSucceeded() ? OperationState::Completed
+                                                   : OperationState::Failed);
     operation.completedItems = static_cast<quint64>(
         std::ranges::count(result.items, true, &RemoteItemResult::success));
     operation.totalItems = static_cast<quint64>(result.items.size());

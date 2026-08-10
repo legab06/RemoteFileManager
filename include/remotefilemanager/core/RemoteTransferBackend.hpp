@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QList>
+#include <QMetaType>
 #include <QString>
 #include <QtGlobal>
 
@@ -10,7 +11,28 @@
 namespace rfm::core
 {
 
-enum class TransferBackendError { None, NotFound, AlreadyExists, PermissionDenied, Io, Failure };
+enum class TransferBackendError {
+    None,
+    NotFound,
+    AlreadyExists,
+    PermissionDenied,
+    ConnectionLost,
+    Unsupported,
+    Io,
+    Failure,
+};
+
+enum class TransferNodeType {
+    Unknown,
+    RegularFile,
+    Directory,
+    SymbolicLink,
+    Fifo,
+    Socket,
+    CharacterDevice,
+    BlockDevice,
+    Other,
+};
 
 struct TransferBackendResult {
     TransferBackendError error{TransferBackendError::None};
@@ -20,9 +42,12 @@ struct TransferBackendResult {
 
 struct TransferNodeInfo {
     bool exists{false};
-    bool directory{false};
-    bool symbolicLink{false};
+    TransferNodeType type{TransferNodeType::Unknown};
     quint64 size{0};
+
+    [[nodiscard]] bool isDirectory() const { return type == TransferNodeType::Directory; }
+    [[nodiscard]] bool isSymbolicLink() const { return type == TransferNodeType::SymbolicLink; }
+    [[nodiscard]] bool isRegularFile() const { return type == TransferNodeType::RegularFile; }
 };
 struct TransferStatResult {
     TransferBackendResult result;
@@ -58,3 +83,6 @@ class RemoteTransferBackend
 };
 
 } // namespace rfm::core
+
+Q_DECLARE_METATYPE(rfm::core::TransferBackendError)
+Q_DECLARE_METATYPE(rfm::core::TransferNodeType)

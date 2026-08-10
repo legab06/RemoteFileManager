@@ -1,5 +1,6 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
+#include "remotefilemanager/core/ServerSideCopyJob.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
@@ -92,6 +93,51 @@ public:
     QStringList calls;
 };
 
+class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
+{
+  public:
+    rfm::core::RemoteProbeResult probe(const QString& path) override
+    {
+        probed.push_back(path);
+        return {{rfm::core::RemoteBackendError::NotFound, {}}, {}};
+    }
+
+    rfm::core::RemoteBackendResult startCopy(const QString& source, const QString& destination,
+                                             bool recursive) override
+    {
+        started.push_back(QStringLiteral("%1:%2:%3")
+                              .arg(source, destination,
+                                   recursive ? QStringLiteral("recursive")
+                                             : QStringLiteral("file")));
+        active = true;
+        return {};
+    }
+
+    std::optional<rfm::core::RemoteBackendResult> pollCopy() override
+    {
+        ++pollCalls;
+        if (completeAfterPolls > 0 && pollCalls >= completeAfterPolls) {
+            active = false;
+            return rfm::core::RemoteBackendResult{};
+        }
+        return std::nullopt;
+    }
+
+    rfm::core::RemoteBackendResult cancelCopy() override
+    {
+        ++cancelCalls;
+        active = false;
+        return {};
+    }
+
+    QStringList probed;
+    QStringList started;
+    int pollCalls{0};
+    int cancelCalls{0};
+    int completeAfterPolls{0};
+    bool active{false};
+};
+
 class RemoteFileOperationsTest final : public QObject {
     Q_OBJECT
 
@@ -102,6 +148,7 @@ private slots:
     void renamesWithoutOverwriting();
     void movesSelectionAndReportsPartialFailure();
     void copiesOnServerOrReportsUnsupported();
+    void serverSideCopyRunsCooperativelyAndCancellationIsShutdownSafe();
     void removesFileAndRecursiveTreeWithGuards();
     void emitsWorkerOperationErrors();
     void treatsListingWithoutSessionAsFatal();
@@ -137,10 +184,57 @@ void RemoteFileOperationsTest::quotesCopyCommandWithoutInjection()
     QCOMPARE(rfm::ssh::RemoteCopyCommand::build(
                  QStringLiteral("./a'; touch /tmp/pwned; '"),
                  QStringLiteral("./target/file"), false),
-             QStringLiteral("cp -n -- './a'\\''; touch /tmp/pwned; '\\''' './target/file'"));
+             QStringLiteral("cp -P -n -- './a'\\''; touch /tmp/pwned; '\\''' './target/file'"));
     QCOMPARE(rfm::ssh::RemoteCopyCommand::build(
                  QStringLiteral("./folder"), QStringLiteral("/backup/folder"), true),
-             QStringLiteral("cp -R -n -- './folder' '/backup/folder'"));
+             QStringLiteral("cp -P -R -n -- './folder' '/backup/folder'"));
+}
+
+void RemoteFileOperationsTest::serverSideCopyRunsCooperativelyAndCancellationIsShutdownSafe()
+{
+    FakeCopyBackend backend;
+    rfm::core::ServerSideCopyJob job(
+        backend, 72,
+        {{QStringLiteral("/source/link"), false}, {QStringLiteral("/source/tree"), true}},
+        QStringLiteral("/destination"));
+
+    job.step();
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Running);
+    job.step();
+    QCOMPARE(backend.started.size(), 1);
+    QCOMPARE(backend.started.constFirst(),
+             QStringLiteral("/source/link:/destination/link:file"));
+    for (int step = 0; step < 5; ++step) {
+        const int previousPolls = backend.pollCalls;
+        job.step();
+        QCOMPARE(backend.pollCalls, previousPolls + 1);
+        QVERIFY(!job.isFinished());
+    }
+
+    QVERIFY(job.requestCancel());
+    QCOMPARE(backend.cancelCalls, 1);
+    QVERIFY(!backend.active);
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelled);
+    QCOMPARE(job.result().items.size(), 2);
+    QVERIFY(job.result().items.at(0).error.contains(QStringLiteral("cancelled")));
+    QVERIFY(job.result().items.at(1).error.contains(QStringLiteral("cancelled")));
+    const int pollsAfterCancellation = backend.pollCalls;
+    job.step();
+    QCOMPARE(backend.pollCalls, pollsAfterCancellation);
+
+    FakeCopyBackend completingBackend;
+    completingBackend.completeAfterPolls = 2;
+    rfm::core::ServerSideCopyJob completing(
+        completingBackend, 73, {{QStringLiteral("/source/tree"), true}},
+        QStringLiteral("/destination"));
+    while (!completing.isFinished()) {
+        completing.step();
+    }
+    QCOMPARE(completingBackend.started.constFirst(),
+             QStringLiteral("/source/tree:/destination/tree:recursive"));
+    QCOMPARE(completing.progress().state, rfm::core::OperationState::Completed);
+    QCOMPARE(completing.progress().completedItems, quint64{1});
 }
 
 void RemoteFileOperationsTest::createsDirectoryAndReportsCollisionOrPermission()

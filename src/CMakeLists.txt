@@ -2,11 +2,13 @@ add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
     core/InternalTransfer.cpp
+    core/LocalDownloadPath.cpp
     core/OperationHistoryStore.cpp
     core/OperationProgress.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp
     core/ServerProfileStore.cpp
+    core/ServerSideCopyJob.cpp
     core/TransferDirectoryJob.cpp
     core/TransferFileJob.cpp
     core/TransferQueue.cpp

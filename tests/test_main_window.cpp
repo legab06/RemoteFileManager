@@ -158,6 +158,7 @@ class MainWindowTest final : public QObject
     void distinguishesRequestsForSamePath();
     void newNavigationMakesActiveResultObsolete();
     void handlesOnlyExpectedListingErrorWithoutDisconnecting();
+    void symbolicLinkNavigationFailureDoesNotDisconnect();
     void splitRoutesSerializedListingsPerPane();
     void activePaneOwnsNavigationRefreshAndUploadTargets();
     void splitListingErrorLeavesOtherPaneUntouched();
@@ -741,6 +742,22 @@ void MainWindowTest::buildsPortableTransferRequests()
     QVERIFY(download.has_value());
     QCOMPARE(download->destination, QDir(temporary.path()).filePath(QStringLiteral("photos")));
     QVERIFY(download->directory);
+
+    const QString spacedFilePath = temporary.filePath(QStringLiteral("trailing-space "));
+    QFile spacedFile(spacedFilePath);
+    QVERIFY(spacedFile.open(QIODevice::WriteOnly));
+    spacedFile.close();
+    const auto spacedUpload = rfm::app::TransferRequestFactory::upload(
+        104, spacedFilePath, QStringLiteral("/srv/uploads "));
+    QVERIFY(spacedUpload.has_value());
+    QCOMPARE(spacedUpload->source, spacedFilePath);
+    QCOMPARE(spacedUpload->destination, QStringLiteral("/srv/uploads /trailing-space "));
+    const auto spacedDownload = rfm::app::TransferRequestFactory::download(
+        105, {QStringLiteral("/srv/remote-name "), false}, temporary.path());
+    QVERIFY(spacedDownload.has_value());
+    QCOMPARE(spacedDownload->source, QStringLiteral("/srv/remote-name "));
+    QCOMPARE(spacedDownload->destination,
+             QDir(temporary.path()).filePath(QStringLiteral("remote-name ")));
 }
 
 void MainWindowTest::queuesFilesAndFoldersAsSeparateUploads()
@@ -896,11 +913,18 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     QCOMPARE(table->item(copyRow, 1)->text(), QStringLiteral("first.txt (+1)"));
     QCOMPARE(table->item(copyRow, 2)->text(), QStringLiteral("/destination"));
     QCOMPARE(table->item(copyRow, 3)->text(), QStringLiteral("Running"));
-    QCOMPARE(table->item(copyRow, 4)->text(), QStringLiteral("—"));
     QCOMPARE(table->item(copyRow, 5)->text(), QStringLiteral("—"));
-    QCOMPARE(table->item(copyRow, 6)->text(), QStringLiteral("—"));
-    QVERIFY(table->cellWidget(copyRow, 4) == nullptr);
-    QVERIFY(table->cellWidget(copyRow, 6) == nullptr);
+    auto* const indeterminate =
+        qobject_cast<QProgressBar*>(table->cellWidget(copyRow, 4));
+    QVERIFY(indeterminate != nullptr);
+    QCOMPARE(indeterminate->minimum(), 0);
+    QCOMPARE(indeterminate->maximum(), 0);
+    auto* const copyActions = table->cellWidget(copyRow, 6);
+    QVERIFY(copyActions != nullptr);
+    auto* const cancelCopy =
+        copyActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    QVERIFY(cancelCopy != nullptr);
+    QVERIFY(cancelCopy->isVisible());
 
     const rfm::core::RemoteOperationResult completedCopy{
         701,
@@ -1259,6 +1283,36 @@ void MainWindowTest::handlesOnlyExpectedListingErrorWithoutDisconnecting()
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->isEnabled());
 }
 
+void MainWindowTest::symbolicLinkNavigationFailureDoesNotDisconnect()
+{
+    rfm::app::MainWindow window;
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("broken-link"), 0, {}, false, true}};
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showRemoteDirectory", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::disconnectionRequested, nullptr, nullptr);
+    QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
+    QSignalSpy disconnections(&window, &rfm::app::MainWindow::disconnectionRequested);
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(pane->fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QCOMPARE(listings.size(), 1);
+    const quint64 requestId = listings.constFirst().constFirst().toULongLong();
+    QCOMPARE(listings.constFirst().at(1).toString(), QStringLiteral("/srv/broken-link"));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListingError", Qt::DirectConnection, Q_ARG(quint64, requestId),
+        Q_ARG(QString, QStringLiteral("/srv/broken-link")),
+        Q_ARG(QString, QStringLiteral("Not a directory"))));
+
+    QCOMPARE(pane->currentPath(), QStringLiteral("/srv"));
+    QCOMPARE(disconnections.size(), 0);
+    QVERIFY(pane->fileTable()->isEnabled());
+}
+
 void MainWindowTest::splitRoutesSerializedListingsPerPane()
 {
     rfm::app::MainWindow window;
@@ -1564,8 +1618,19 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QVERIFY(copyRow >= 0);
     QCOMPARE(operationTable->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
     QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Running"));
-    QVERIFY(operationTable->cellWidget(copyRow, 4) == nullptr);
-    QVERIFY(operationTable->cellWidget(copyRow, 6) == nullptr);
+    QVERIFY(operationTable->cellWidget(copyRow, 4) != nullptr);
+    auto* const copyActions = operationTable->cellWidget(copyRow, 6);
+    QVERIFY(copyActions != nullptr);
+    auto* const cancelCopy =
+        copyActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    QVERIFY(cancelCopy != nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::cancelRemoteOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy copyCancellations(&window,
+                                 &rfm::app::MainWindow::cancelRemoteOperationRequested);
+    cancelCopy->click();
+    QCOMPARE(copyCancellations.size(), 1);
+    QCOMPARE(copyCancellations.constFirst().constFirst().toULongLong(), copyId);
     const rfm::core::RemoteOperationResult copyResult{
         copyId,
         rfm::core::RemoteOperationKind::Copy,
