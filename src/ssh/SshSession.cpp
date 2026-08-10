@@ -10,12 +10,13 @@
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 
 #include <libssh/libssh.h>
-#include <libssh/libssh_version.h>
+#include <libssh/callbacks.h>
 #include <libssh/sftp.h>
 
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QMetaObject>
 #include <QTimer>
 
@@ -170,6 +171,23 @@ public:
                     QCoreApplication::translate("SshServerSideCopyBackend",
                                                 "Unable to open an SSH channel.")};
         }
+        m_errorOutput.clear();
+        m_exitStatePolls = 0;
+        m_exitStateReceived = false;
+        m_exitCode = UINT32_MAX;
+        m_cancellationPhase = CancellationPhase::NotRequested;
+        m_cancellationTimer.invalidate();
+        m_channelCallbacks = {};
+        ssh_callbacks_init(&m_channelCallbacks);
+        m_channelCallbacks.userdata = this;
+        m_channelCallbacks.channel_exit_status_function = &handleExitStatus;
+        m_channelCallbacks.channel_exit_signal_function = &handleExitSignal;
+        if (ssh_set_channel_callbacks(m_channel, &m_channelCallbacks) != SSH_OK) {
+            closeChannel();
+            return {rfm::core::RemoteBackendError::Failure,
+                    QCoreApplication::translate("SshServerSideCopyBackend",
+                                                "Unable to monitor the remote copy channel.")};
+        }
         if (ssh_channel_open_session(m_channel) != SSH_OK) {
             closeChannel();
             return {rfm::core::RemoteBackendError::Unsupported,
@@ -183,9 +201,6 @@ public:
                     QCoreApplication::translate("SshServerSideCopyBackend",
                                                 "Remote copy is not supported by this server.")};
         }
-        ssh_channel_set_blocking(m_channel, 0);
-        m_errorOutput.clear();
-        m_exitStatePolls = 0;
         return {};
     }
 
@@ -223,22 +238,14 @@ public:
             return std::nullopt;
         }
 
-        uint32_t exitCode = UINT32_MAX;
-#if LIBSSH_VERSION_INT >= SSH_VERSION_INT(0, 11, 0)
-        const int exitState = ssh_channel_get_exit_state(m_channel, &exitCode, nullptr, nullptr);
-#else
-        const int legacyExitCode = ssh_channel_get_exit_status(m_channel);
-        const int exitState = legacyExitCode >= 0 ? SSH_OK : SSH_ERROR;
-        if (legacyExitCode >= 0) {
-            exitCode = static_cast<uint32_t>(legacyExitCode);
-        }
-#endif
-        if (exitState != SSH_OK && ++m_exitStatePolls < 100) {
+        if (!m_exitStateReceived && ++m_exitStatePolls < 100) {
             return std::nullopt;
         }
         const QString detail = QString::fromUtf8(m_errorOutput).trimmed();
+        const bool exitStateReceived = m_exitStateReceived;
+        const uint32_t exitCode = m_exitCode;
         closeChannel();
-        if (exitState == SSH_OK && exitCode == 0) {
+        if (exitStateReceived && exitCode == 0) {
             return rfm::core::RemoteBackendResult{};
         }
         if (exitCode == 126 || exitCode == 127) {
@@ -254,24 +261,96 @@ public:
                 : detail};
     }
 
-    rfm::core::RemoteBackendResult cancelCopy() override
+    std::optional<rfm::core::RemoteBackendResult> requestCopyCancellation() override
     {
         if (m_channel == nullptr) {
-            return {};
+            return rfm::core::RemoteBackendResult{};
         }
-        const int signalResult = ssh_channel_request_send_signal(m_channel, "TERM");
-        static_cast<void>(ssh_channel_send_eof(m_channel));
+
+        if (m_cancellationPhase == CancellationPhase::NotRequested) {
+            m_cancellationPhase = CancellationPhase::RequestingTermination;
+            m_cancellationTimer.start();
+        }
+        if (m_cancellationPhase == CancellationPhase::RequestingTermination) {
+            if (ssh_channel_is_eof(m_channel) != 0 || ssh_channel_is_closed(m_channel) != 0) {
+                m_cancellationPhase = CancellationPhase::AwaitingTermination;
+                m_cancellationTimer.restart();
+                return rfm::core::RemoteBackendResult{};
+            }
+            const int signalResult = ssh_channel_request_send_signal(m_channel, "TERM");
+            if (signalResult == SSH_OK) {
+                m_cancellationPhase = CancellationPhase::AwaitingTermination;
+                m_cancellationTimer.restart();
+                return rfm::core::RemoteBackendResult{};
+            }
+            if (m_cancellationTimer.elapsed() < terminationRequestTimeoutMs) {
+                return std::nullopt;
+            }
+            closeChannel();
+            return rfm::core::RemoteBackendResult{
+                rfm::core::RemoteBackendError::Failure,
+                QCoreApplication::translate(
+                    "SshServerSideCopyBackend",
+                    "Timed out while requesting termination of the remote copy.")};
+        }
+        return rfm::core::RemoteBackendResult{};
+    }
+
+    std::optional<rfm::core::RemoteBackendResult> pollCopyCancellation() override
+    {
+        if (m_channel == nullptr) {
+            return rfm::core::RemoteBackendResult{};
+        }
+        char buffer[512];
+        const int errorBytes =
+            ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 1);
+        const int outputBytes =
+            ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 0);
+        if (errorBytes == SSH_ERROR || outputBytes == SSH_ERROR) {
+            closeChannel();
+            return rfm::core::RemoteBackendResult{
+                rfm::core::RemoteBackendError::Failure,
+                QCoreApplication::translate(
+                    "SshServerSideCopyBackend",
+                    "Unable to confirm termination of the remote copy.")};
+        }
+        if (ssh_channel_is_eof(m_channel) != 0 || ssh_channel_is_closed(m_channel) != 0) {
+            closeChannel();
+            return rfm::core::RemoteBackendResult{};
+        }
+        if (m_cancellationTimer.elapsed() < terminationCompletionTimeoutMs) {
+            return std::nullopt;
+        }
+
         closeChannel();
-        return signalResult == SSH_OK
-                   ? rfm::core::RemoteBackendResult{}
-                   : rfm::core::RemoteBackendResult{
-                         rfm::core::RemoteBackendError::Failure,
-                         QCoreApplication::translate(
-                             "SshServerSideCopyBackend",
-                             "The server did not acknowledge remote copy cancellation.")};
+        return rfm::core::RemoteBackendResult{
+            rfm::core::RemoteBackendError::Failure,
+            QCoreApplication::translate(
+                "SshServerSideCopyBackend",
+                "The remote copy did not terminate within the cancellation timeout.")};
     }
 
 private:
+    enum class CancellationPhase { NotRequested, RequestingTermination, AwaitingTermination };
+
+    static constexpr qint64 terminationRequestTimeoutMs = 1000;
+    static constexpr qint64 terminationCompletionTimeoutMs = 5000;
+
+    static void handleExitStatus(ssh_session, ssh_channel, int exitStatus, void* userData)
+    {
+        auto* backend = static_cast<SshServerSideCopyBackend*>(userData);
+        backend->m_exitStateReceived = true;
+        backend->m_exitCode = exitStatus >= 0 ? static_cast<uint32_t>(exitStatus) : UINT32_MAX;
+    }
+
+    static void handleExitSignal(ssh_session, ssh_channel, const char*, int, const char*,
+                                 const char*, void* userData)
+    {
+        auto* backend = static_cast<SshServerSideCopyBackend*>(userData);
+        backend->m_exitStateReceived = true;
+        backend->m_exitCode = UINT32_MAX;
+    }
+
     void closeChannel()
     {
         if (m_channel == nullptr) {
@@ -287,6 +366,11 @@ private:
     ssh_channel m_channel{nullptr};
     QByteArray m_errorOutput;
     int m_exitStatePolls{0};
+    bool m_exitStateReceived{false};
+    uint32_t m_exitCode{UINT32_MAX};
+    ssh_channel_callbacks_struct m_channelCallbacks{};
+    CancellationPhase m_cancellationPhase{CancellationPhase::NotRequested};
+    QElapsedTimer m_cancellationTimer;
 };
 
 }  // namespace
@@ -313,6 +397,7 @@ public:
         transferStepScheduled = false;
         copyStepScheduled = false;
         shuttingDown = false;
+        disconnecting = false;
         if (sftp != nullptr) {
             sftp_free(sftp);
             sftp = nullptr;
@@ -343,6 +428,7 @@ public:
     bool transferStepScheduled{false};
     bool copyStepScheduled{false};
     bool shuttingDown{false};
+    bool disconnecting{false};
 };
 
 SshSession::SshSession(QObject* parent)
@@ -829,18 +915,34 @@ void SshSession::processCopyStep()
 
 void SshSession::completeShutdownIfReady()
 {
-    if (!m_impl->shuttingDown || m_impl->activeTransferJob != nullptr ||
-        m_impl->activeCopyJob != nullptr) {
+    if ((!m_impl->shuttingDown && !m_impl->disconnecting) ||
+        m_impl->activeTransferJob != nullptr || m_impl->activeCopyJob != nullptr) {
         return;
     }
+    const bool emitTransfersShutdown = m_impl->shuttingDown;
+    const bool emitDisconnected = m_impl->disconnecting;
     m_impl->reset();
-    emit transfersShutdown();
+    if (emitTransfersShutdown) {
+        emit transfersShutdown();
+    }
+    if (emitDisconnected) {
+        emit disconnected();
+    }
 }
 
 void SshSession::disconnectFromHost()
 {
-    m_impl->reset();
-    emit disconnected();
+    m_impl->transferQueue.clear();
+    m_impl->disconnecting = true;
+    if (m_impl->activeTransferJob != nullptr && !m_impl->activeTransferJob->isFinished()) {
+        static_cast<void>(m_impl->activeTransferJob->requestCancel());
+        scheduleTransferStep();
+    }
+    if (m_impl->activeCopyJob != nullptr && !m_impl->activeCopyJob->isFinished()) {
+        static_cast<void>(m_impl->activeCopyJob->requestCancel());
+        scheduleCopyStep();
+    }
+    completeShutdownIfReady();
 }
 
 void SshSession::fail(const QString& message)

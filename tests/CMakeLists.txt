@@ -10,6 +10,9 @@ add_test(NAME unit.server_profile_store COMMAND rfm_server_profile_store_tests)
 
 qt_add_executable(rfm_remote_operations_tests test_remote_file_operations.cpp)
 target_link_libraries(rfm_remote_operations_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+target_compile_definitions(
+    rfm_remote_operations_tests PRIVATE RFM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
 rfm_set_project_warnings(rfm_remote_operations_tests)
 add_test(NAME unit.remote_file_operations COMMAND rfm_remote_operations_tests)
 

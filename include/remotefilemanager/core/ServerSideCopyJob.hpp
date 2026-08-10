@@ -16,7 +16,10 @@ class ServerSideCopyBackend
                                                         const QString& destination,
                                                         bool recursive) = 0;
     [[nodiscard]] virtual std::optional<RemoteBackendResult> pollCopy() = 0;
-    [[nodiscard]] virtual RemoteBackendResult cancelCopy() = 0;
+    // A missing result means the termination request should be retried later.
+    [[nodiscard]] virtual std::optional<RemoteBackendResult> requestCopyCancellation() = 0;
+    // A missing result means the remote process/channel is not terminal yet.
+    [[nodiscard]] virtual std::optional<RemoteBackendResult> pollCopyCancellation() = 0;
 };
 
 class ServerSideCopyJob final
@@ -32,10 +35,18 @@ class ServerSideCopyJob final
     [[nodiscard]] const RemoteOperationResult& result() const;
 
   private:
-    enum class Phase { Prepare, StartItem, PollItem, Finished };
+    enum class Phase {
+        Prepare,
+        StartItem,
+        PollItem,
+        RequestCancellation,
+        PollCancellation,
+        Finished
+    };
 
     void prepareItem();
     void finishItem(const RemoteBackendResult& result);
+    void finishCancellation(const RemoteBackendResult& result);
     void finish();
     void appendCancelledItems();
     [[nodiscard]] QString describeError(const RemoteBackendResult& result) const;

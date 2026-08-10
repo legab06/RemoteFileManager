@@ -100,7 +100,11 @@ void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
     }
     m_copyActive = false;
     ++m_sourceIndex;
-    m_phase = Phase::Prepare;
+    if (m_sourceIndex == m_sources.size()) {
+        finish();
+    } else {
+        m_phase = Phase::Prepare;
+    }
 }
 
 void ServerSideCopyJob::finish()
@@ -146,6 +150,26 @@ void ServerSideCopyJob::step()
         if (polled.has_value()) {
             finishItem(*polled);
         }
+        return;
+    }
+    if (m_phase == Phase::RequestCancellation) {
+        const std::optional<RemoteBackendResult> requested =
+            m_backend.requestCopyCancellation();
+        if (requested.has_value()) {
+            if (requested->succeeded()) {
+                m_phase = Phase::PollCancellation;
+            } else {
+                finishCancellation(*requested);
+            }
+        }
+        return;
+    }
+    if (m_phase == Phase::PollCancellation) {
+        const std::optional<RemoteBackendResult> cancellation =
+            m_backend.pollCopyCancellation();
+        if (cancellation.has_value()) {
+            finishCancellation(*cancellation);
+        }
     }
 }
 
@@ -175,26 +199,40 @@ bool ServerSideCopyJob::requestCancel()
     if (isFinished() || m_progress.state == OperationState::Cancelling) {
         return false;
     }
+    if (m_sourceIndex == m_sources.size() && !m_copyActive) {
+        finish();
+        return false;
+    }
     m_progress.state = OperationState::Cancelling;
-    RemoteBackendResult cancellation;
     if (m_copyActive) {
-        cancellation = m_backend.cancelCopy();
-        m_copyActive = false;
+        m_phase = Phase::RequestCancellation;
+        return true;
     }
     appendCancelledItems();
     m_progress.currentItem.clear();
     m_progress.state = OperationState::Cancelled;
-    if (!cancellation.succeeded()) {
-        m_progress.error = describeError(cancellation);
-        if (!m_result.items.isEmpty()) {
-            m_result.items.last().error =
-                QStringLiteral("Remote copy cancelled. %1").arg(m_progress.error);
-        }
-    } else {
-        m_progress.error = QStringLiteral("Remote copy cancelled.");
-    }
+    m_progress.error = QStringLiteral("Remote copy cancelled.");
     m_phase = Phase::Finished;
     return true;
+}
+
+void ServerSideCopyJob::finishCancellation(const RemoteBackendResult& result)
+{
+    m_copyActive = false;
+    appendCancelledItems();
+    m_progress.currentItem.clear();
+    if (result.succeeded()) {
+        m_progress.state = OperationState::Cancelled;
+        m_progress.error = QStringLiteral("Remote copy cancelled.");
+    } else {
+        m_progress.state = OperationState::Failed;
+        m_progress.error = describeError(result);
+        if (!m_result.items.isEmpty()) {
+            m_result.items.last().error =
+                QStringLiteral("Remote copy cancellation failed. %1").arg(m_progress.error);
+        }
+    }
+    m_phase = Phase::Finished;
 }
 
 bool ServerSideCopyJob::isFinished() const { return m_phase == Phase::Finished; }
