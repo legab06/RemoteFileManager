@@ -76,6 +76,17 @@ QString displaySource(const rfm::core::OperationProgress& progress)
     return name;
 }
 
+QString displayServer(const rfm::core::OperationProgress& progress)
+{
+    if (progress.serverHost.isEmpty() || progress.serverPort == 0) {
+        return {};
+    }
+    const QString host = progress.serverHost.contains(QChar{':'})
+                             ? QStringLiteral("[%1]").arg(progress.serverHost)
+                             : progress.serverHost;
+    return QStringLiteral("%1:%2").arg(host, QString::number(progress.serverPort));
+}
+
 } // namespace
 
 OperationPanel::OperationPanel(QWidget* parent) : QWidget(parent)
@@ -213,6 +224,8 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
     QTableWidgetItem* const kindItem = m_table->item(row, KindColumn);
     kindItem->setText(kindText(progress.kind));
     kindItem->setData(Qt::UserRole, progress.id);
+    const QString server = displayServer(progress);
+    kindItem->setToolTip(server.isEmpty() ? QString{} : tr("Server: %1").arg(server));
     QTableWidgetItem* const sourceItem = m_table->item(row, SourceColumn);
     sourceItem->setText(displaySource(progress));
     sourceItem->setToolTip(progress.sources.join(QChar{'\n'}));

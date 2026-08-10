@@ -43,6 +43,8 @@ struct OperationProgress {
     bool pauseResumeSupported{false};
     bool cancellationSupported{false};
     QDateTime finishedAt;
+    QString serverHost;
+    quint16 serverPort{0};
 };
 
 [[nodiscard]] bool isTerminal(OperationState state);

@@ -938,6 +938,17 @@ void MainWindow::beginTrackedRemoteOperation(
 void MainWindow::updateTrackedOperation(rfm::core::OperationProgress operation)
 {
     const auto existing = m_operations.constFind(operation.id);
+    operation.serverHost = operation.serverHost.trimmed();
+    if ((operation.serverHost.isEmpty() || operation.serverPort == 0) &&
+        existing != m_operations.cend() && !existing->serverHost.isEmpty() &&
+        existing->serverPort != 0) {
+        operation.serverHost = existing->serverHost;
+        operation.serverPort = existing->serverPort;
+    }
+    if (operation.serverHost.isEmpty() || operation.serverPort == 0) {
+        operation.serverHost = m_activeProfile.host.trimmed();
+        operation.serverPort = m_activeProfile.port;
+    }
     if (rfm::core::isTerminal(operation.state)) {
         if (!operation.finishedAt.isValid()) {
             operation.finishedAt =

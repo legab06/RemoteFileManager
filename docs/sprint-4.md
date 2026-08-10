@@ -198,10 +198,12 @@ JSON porte explicitement la version `1` et les identifiants ainsi que les compte
 `QSaveFile` assure une écriture atomique.
 
 Le schéma limite chaque entrée aux champs utiles : identifiant, type d’opération,
-sources, destination, état terminal, erreur éventuelle, octets transférés,
-compteurs de résultat et date de terminaison UTC. Il ne sérialise ni état interne
-du moteur, ni vitesse instantanée, ni capacité d’action, ni donnée de connexion,
-d’authentification ou commande SSH.
+identité non secrète du serveur (hôte et port), sources, destination, état terminal,
+erreur éventuelle, octets transférés, compteurs de résultat et date de terminaison
+UTC. Il ne sérialise ni nom d’utilisateur, ni état interne du moteur, ni vitesse
+instantanée, ni capacité d’action, ni donnée d’authentification ou commande SSH.
+Le serveur est rappelé discrètement dans l’infobulle de la catégorie d’opération,
+sans ajouter de colonne à la table.
 
 Seuls les états `Completed`, `Failed` et `Cancelled` sont enregistrés et acceptés
 au chargement. Un fichier absent ou vide représente un historique vide. Un JSON
@@ -266,6 +268,7 @@ lignes terminales. Ces commandes ne retirent jamais une opération active.
 - suppression d’une entrée terminale ;
 - nettoyage complet ;
 - chargement et sauvegarde atomique ;
+- sérialisation, restauration et affichage de l’identité serveur non secrète ;
 - fichier absent, corrompu ou d’une version inconnue ;
 - aucune persistance des opérations triviales ou de données sensibles.
 
@@ -358,6 +361,8 @@ Les étapes 1 à 6 sont implémentées. À l’issue de l’étape 6 :
 - les opérations `Completed`, `Failed` et `Cancelled` sont restaurées au prochain
   démarrage depuis le document JSON v1 écrit atomiquement dans le répertoire de
   données applicatives Qt ;
+- chaque opération mémorise l’hôte et le port SSH auxquels elle se rapporte, sans
+  nom d’utilisateur ni donnée d’authentification, et les affiche en infobulle ;
 - les états actifs ne sont ni sauvegardés ni restaurés ;
 - l’historique est limité aux 200 terminaisons les plus récentes et les écritures
   rapprochées sont regroupées ;

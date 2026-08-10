@@ -98,6 +98,23 @@ void acceptNextQuestion()
     });
 }
 
+void setConnectionIdentity(rfm::app::MainWindow& window)
+{
+    QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    QTimer::singleShot(0, [] {
+        auto* const dialog =
+            qobject_cast<rfm::app::ConnectionDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))
+            ->setText(QStringLiteral("history.example.test"));
+        dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))
+            ->setText(QStringLiteral("test-user"));
+        dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->setValue(2222);
+        dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    });
+    window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->trigger();
+}
+
 } // namespace
 
 class MainWindowTest final : public QObject
@@ -417,12 +434,16 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     const QList<rfm::core::RemoteSelection> copySources{
         {QStringLiteral("/source/first.txt"), false},
         {QStringLiteral("/source/second.txt"), false}};
-    const auto copy = rfm::core::beginRemoteOperation(
+    auto copy = rfm::core::beginRemoteOperation(
         701, rfm::core::OperationKind::RemoteCopy, copySources, QStringLiteral("/destination"));
+    copy.serverHost = QStringLiteral("files.example.test");
+    copy.serverPort = 2222;
     panel.updateOperation(copy);
     const int copyRow = rowForId(table, 701);
     QVERIFY(copyRow >= 0);
     QCOMPARE(table->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
+    QCOMPARE(table->item(copyRow, 0)->toolTip(),
+             QStringLiteral("Server: files.example.test:2222"));
     QCOMPARE(table->item(copyRow, 1)->text(), QStringLiteral("first.txt (+1)"));
     QCOMPARE(table->item(copyRow, 2)->text(), QStringLiteral("/destination"));
     QCOMPARE(table->item(copyRow, 3)->text(), QStringLiteral("Running"));
@@ -1512,6 +1533,7 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
     QVERIFY(directory.isValid());
     {
         rfm::app::MainWindow window(nullptr, directory.path());
+        setConnectionIdentity(window);
         auto completed = progress(901, rfm::core::TransferState::Completed, 10, 10);
         auto failed = progress(902, rfm::core::TransferState::Failed, 3, 10);
         failed.error = QStringLiteral("permission denied");
@@ -1543,6 +1565,8 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         QCOMPARE(table->rowCount(), 2);
         QCOMPARE(table->item(rowForId(table, 901), 3)->text(), QStringLiteral("Completed"));
         QCOMPARE(table->item(rowForId(table, 902), 3)->text(), QStringLiteral("Failed"));
+        QCOMPARE(table->item(rowForId(table, 901), 0)->toolTip(),
+                 QStringLiteral("Server: history.example.test:2222"));
 
         table->selectRow(rowForId(table, 901));
         QVERIFY(remove->isEnabled());

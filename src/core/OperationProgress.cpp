@@ -64,7 +64,9 @@ OperationProgress operationProgress(const TransferProgress& transfer)
             true,
             true,
             true,
-            {}};
+            {},
+            {},
+            0};
 }
 
 OperationProgress beginRemoteOperation(quint64 id, OperationKind kind,

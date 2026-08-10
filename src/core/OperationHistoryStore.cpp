@@ -10,6 +10,7 @@
 #include <QStandardPaths>
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 #include <utility>
 
@@ -95,14 +96,23 @@ std::optional<quint64> parseNumber(const QJsonValue& value)
     return result;
 }
 
+bool hasValidServerIdentity(const OperationProgress& operation)
+{
+    return !operation.serverHost.trimmed().isEmpty() && operation.serverPort != 0;
+}
+
 QJsonObject serialize(const OperationProgress& operation)
 {
     QJsonArray sources;
     for (const QString& source : operation.sources) {
         sources.push_back(source);
     }
+    const QJsonObject server{{QStringLiteral("host"), operation.serverHost.trimmed()},
+                             {QStringLiteral("port"),
+                              static_cast<int>(operation.serverPort)}};
     return {{QStringLiteral("id"), numberString(operation.id)},
             {QStringLiteral("kind"), kindName(operation.kind)},
+            {QStringLiteral("server"), server},
             {QStringLiteral("sources"), sources},
             {QStringLiteral("destination"), operation.destination},
             {QStringLiteral("state"), stateName(operation.state)},
@@ -125,10 +135,14 @@ std::optional<OperationProgress> deserialize(const QJsonValue& value)
     const auto kind = parseKind(object.value(QStringLiteral("kind")).toString());
     const auto state =
         parseTerminalState(object.value(QStringLiteral("state")).toString());
+    const QJsonObject server = object.value(QStringLiteral("server")).toObject();
+    const QString serverHost = server.value(QStringLiteral("host")).toString().trimmed();
+    const int serverPort = server.value(QStringLiteral("port")).toInt(0);
     const QDateTime finishedAt = QDateTime::fromString(
         object.value(QStringLiteral("finishedAt")).toString(), Qt::ISODateWithMs);
     if (!id.has_value() || *id == 0 || !kind.has_value() || !state.has_value() ||
-        !finishedAt.isValid()) {
+        serverHost.isEmpty() || serverPort <= 0 ||
+        serverPort > std::numeric_limits<quint16>::max() || !finishedAt.isValid()) {
         return std::nullopt;
     }
 
@@ -136,6 +150,8 @@ std::optional<OperationProgress> deserialize(const QJsonValue& value)
     operation.id = *id;
     operation.kind = *kind;
     operation.state = *state;
+    operation.serverHost = serverHost;
+    operation.serverPort = static_cast<quint16>(serverPort);
     const QJsonArray sources = object.value(QStringLiteral("sources")).toArray();
     for (const QJsonValue& source : sources) {
         if (source.isString()) {
@@ -239,7 +255,8 @@ QList<OperationProgress> OperationHistoryStore::retainedTerminalOperations(
 {
     QList<OperationProgress> retained;
     for (const OperationProgress& operation : operations) {
-        if (operation.id != 0 && isTerminal(operation.state)) {
+        if (operation.id != 0 && isTerminal(operation.state) &&
+            hasValidServerIdentity(operation)) {
             retained.push_back(operation);
         }
     }

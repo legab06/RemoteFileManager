@@ -30,6 +30,8 @@ rfm::core::OperationProgress operation(quint64 id, rfm::core::OperationKind kind
                        ? QStringLiteral("permission denied")
                        : QString{};
     result.finishedAt = QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::utc());
+    result.serverHost = QStringLiteral("files.example.test");
+    result.serverPort = 2222;
     return result;
 }
 
@@ -72,6 +74,10 @@ void OperationHistoryTest::missingEmptyCorruptAndUnknownFilesAreIgnored()
 
     const QJsonObject active{{QStringLiteral("id"), QStringLiteral("12")},
                              {QStringLiteral("kind"), QStringLiteral("remote-copy")},
+                             {QStringLiteral("server"),
+                              QJsonObject{{QStringLiteral("host"),
+                                           QStringLiteral("files.example.test")},
+                                          {QStringLiteral("port"), 2222}}},
                              {QStringLiteral("sources"),
                               QJsonArray{QStringLiteral("/source/item")}},
                              {QStringLiteral("destination"), QStringLiteral("/destination")},
@@ -116,6 +122,8 @@ void OperationHistoryTest::savesAndLoadsOnlyTerminalOperations()
     QCOMPARE(restored.size(), 4);
     QCOMPARE(restored.at(0).kind, rfm::core::OperationKind::Upload);
     QCOMPARE(restored.at(0).state, rfm::core::OperationState::Completed);
+    QCOMPARE(restored.at(0).serverHost, QStringLiteral("files.example.test"));
+    QCOMPARE(restored.at(0).serverPort, quint16{2222});
     QCOMPARE(restored.at(1).kind, rfm::core::OperationKind::Download);
     QCOMPARE(restored.at(1).state, rfm::core::OperationState::Failed);
     QCOMPARE(restored.at(1).error, QStringLiteral("permission denied"));
@@ -173,6 +181,11 @@ void OperationHistoryTest::serializesOnlyTheDocumentedFields()
     QVERIFY(!contents.contains("pauseResumeSupported"));
     QVERIFY(!contents.contains("cancellationSupported"));
     QVERIFY(!contents.contains("sshCommand"));
+    QVERIFY(!contents.contains("username"));
+    QVERIFY(!contents.contains("password"));
+    QVERIFY(!contents.contains("privateKey"));
+    QVERIFY(!contents.contains("token"));
+    QVERIFY(contents.contains("\"server\":{\"host\":\"files.example.test\",\"port\":2222}"));
     QVERIFY(contents.contains("\"version\":1"));
 }
 
