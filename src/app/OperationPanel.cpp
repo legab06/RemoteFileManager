@@ -34,13 +34,6 @@ enum Column {
     ColumnCount,
 };
 
-bool isTerminal(rfm::core::OperationState state)
-{
-    return state == rfm::core::OperationState::Completed ||
-           state == rfm::core::OperationState::Cancelled ||
-           state == rfm::core::OperationState::Failed;
-}
-
 bool isTransfer(rfm::core::OperationKind kind)
 {
     return kind == rfm::core::OperationKind::Upload ||
@@ -91,6 +84,18 @@ OperationPanel::OperationPanel(QWidget* parent) : QWidget(parent)
     auto* const layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
+    auto* const historyActions = new QHBoxLayout;
+    historyActions->addStretch();
+    m_removeButton = new QPushButton(tr("Remove selected"), this);
+    m_removeButton->setObjectName(QStringLiteral("removeOperationButton"));
+    m_removeButton->setEnabled(false);
+    m_clearButton = new QPushButton(tr("Clear history"), this);
+    m_clearButton->setObjectName(QStringLiteral("clearOperationHistoryButton"));
+    m_clearButton->setEnabled(false);
+    historyActions->addWidget(m_removeButton);
+    historyActions->addWidget(m_clearButton);
+    layout->addLayout(historyActions);
+
     m_table = new QTableWidget(this);
     m_table->setObjectName(QStringLiteral("operationTable"));
     m_table->setColumnCount(ColumnCount);
@@ -115,6 +120,17 @@ OperationPanel::OperationPanel(QWidget* parent) : QWidget(parent)
     header->setSectionResizeMode(ActionsColumn, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(ErrorColumn, QHeaderView::Stretch);
     layout->addWidget(m_table);
+
+    connect(m_table, &QTableWidget::itemSelectionChanged, this,
+            &OperationPanel::updateHistoryActions);
+    connect(m_removeButton, &QPushButton::clicked, this, [this] {
+        const quint64 id = selectedOperationId();
+        if (id != 0) {
+            emit removeTerminalRequested(id);
+        }
+    });
+    connect(m_clearButton, &QPushButton::clicked, this,
+            &OperationPanel::clearTerminalRequested);
 }
 
 QString OperationPanel::formatBytes(quint64 bytes)
@@ -181,6 +197,17 @@ int OperationPanel::ensureRow(const rfm::core::OperationProgress& progress)
     return row;
 }
 
+quint64 OperationPanel::selectedOperationId() const
+{
+    const QList<QTableWidgetItem*> selected = m_table->selectedItems();
+    if (selected.isEmpty()) {
+        return 0;
+    }
+    return m_table->item(selected.constFirst()->row(), KindColumn)
+        ->data(Qt::UserRole)
+        .toULongLong();
+}
+
 void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& progress)
 {
     QTableWidgetItem* const kindItem = m_table->item(row, KindColumn);
@@ -214,7 +241,7 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
                 progressBar->style()->pixelMetric(QStyle::PM_ProgressBarChunkWidth) * 2);
             m_table->setCellWidget(row, ProgressColumn, progressBar);
         }
-        if (progress.totalBytes == 0 && !isTerminal(progress.state)) {
+        if (progress.totalBytes == 0 && !rfm::core::isTerminal(progress.state)) {
             progressBar->setRange(0, 0);
             progressBar->setFormat(tr("Calculating size"));
         } else {
@@ -235,7 +262,7 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
     } else {
         m_table->removeCellWidget(row, ProgressColumn);
         m_table->item(row, ProgressColumn)
-            ->setText(progress.totalItems == 0 || !isTerminal(progress.state)
+            ->setText(progress.totalItems == 0 || !rfm::core::isTerminal(progress.state)
                           ? QStringLiteral("—")
                           : tr("%1 / %2 completed")
                                 .arg(progress.completedItems)
@@ -292,7 +319,8 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
         pauseResume->setVisible(canPause || canResume);
         pauseResume->setEnabled(canPause || canResume);
         pauseResume->setText(canResume ? tr("Resume") : tr("Pause"));
-        cancel->setVisible(progress.cancellationSupported && !isTerminal(progress.state));
+        cancel->setVisible(progress.cancellationSupported &&
+                           !rfm::core::isTerminal(progress.state));
         cancel->setEnabled(progress.state != rfm::core::OperationState::Cancelling);
     } else {
         m_table->removeCellWidget(row, ActionsColumn);
@@ -307,6 +335,56 @@ void OperationPanel::updateOperation(rfm::core::OperationProgress progress)
     }
     m_progress.insert(progress.id, progress);
     updateRow(ensureRow(progress), progress);
+    updateHistoryActions();
+}
+
+bool OperationPanel::removeTerminalOperation(quint64 id)
+{
+    const auto progress = m_progress.constFind(id);
+    const auto row = m_rows.constFind(id);
+    if (progress == m_progress.cend() || row == m_rows.cend() ||
+        !rfm::core::isTerminal(progress->state)) {
+        return false;
+    }
+    const int removedRow = row.value();
+    m_table->removeRow(removedRow);
+    m_progress.remove(id);
+    m_rows.remove(id);
+    for (auto iterator = m_rows.begin(); iterator != m_rows.end(); ++iterator) {
+        if (iterator.value() > removedRow) {
+            --iterator.value();
+        }
+    }
+    updateHistoryActions();
+    return true;
+}
+
+void OperationPanel::clearTerminalOperations()
+{
+    for (int row = m_table->rowCount() - 1; row >= 0; --row) {
+        const quint64 id = m_table->item(row, KindColumn)->data(Qt::UserRole).toULongLong();
+        if (rfm::core::isTerminal(m_progress.value(id).state)) {
+            m_table->removeRow(row);
+            m_progress.remove(id);
+            m_rows.remove(id);
+        }
+    }
+    m_rows.clear();
+    for (int row = 0; row < m_table->rowCount(); ++row) {
+        const quint64 id = m_table->item(row, KindColumn)->data(Qt::UserRole).toULongLong();
+        m_rows.insert(id, row);
+    }
+    updateHistoryActions();
+}
+
+void OperationPanel::updateHistoryActions()
+{
+    const quint64 selectedId = selectedOperationId();
+    m_removeButton->setEnabled(selectedId != 0 && m_progress.contains(selectedId) &&
+                               rfm::core::isTerminal(m_progress.value(selectedId).state));
+    m_clearButton->setEnabled(std::ranges::any_of(m_progress, [](const auto& operation) {
+        return rfm::core::isTerminal(operation.state);
+    }));
 }
 
 } // namespace rfm::app

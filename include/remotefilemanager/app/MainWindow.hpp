@@ -13,6 +13,8 @@
 #include <QSet>
 #include <QStringList>
 
+#include <memory>
+
 class QAction;
 class QPoint;
 class QThread;
@@ -21,6 +23,11 @@ class QTimer;
 namespace rfm::ssh
 {
 class SshSession;
+}
+
+namespace rfm::core
+{
+class OperationHistoryStore;
 }
 
 namespace rfm::app
@@ -34,7 +41,7 @@ class MainWindow final : public QMainWindow
     Q_OBJECT
 
   public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(QWidget* parent = nullptr, QString operationHistoryDirectory = {});
     ~MainWindow() override;
 
   signals:
@@ -92,6 +99,12 @@ class MainWindow final : public QMainWindow
     void beginTrackedRemoteOperation(quint64 id, rfm::core::OperationKind kind,
                                      const QList<rfm::core::RemoteSelection>& sources,
                                      const QString& destination);
+    void updateTrackedOperation(rfm::core::OperationProgress operation);
+    void loadOperationHistory();
+    void scheduleOperationHistorySave();
+    void saveOperationHistory();
+    void removeTerminalOperation(quint64 id);
+    void clearTerminalOperations();
     void updateOperationActions();
     void updateConnectionAction();
     void requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
@@ -132,6 +145,7 @@ class MainWindow final : public QMainWindow
     OperationPanel* m_operationPanel{nullptr};
     QTimer* m_autoRefreshTimer{nullptr};
     QTimer* m_refreshDebounceTimer{nullptr};
+    QTimer* m_historySaveTimer{nullptr};
     QThread* m_sshThread{nullptr};
     rfm::ssh::SshSession* m_sshSession{nullptr};
     rfm::core::ConnectionProfile m_activeProfile;
@@ -156,7 +170,9 @@ class MainWindow final : public QMainWindow
     };
     QHash<quint64, OperationContext> m_operationContexts;
     QHash<quint64, rfm::core::OperationProgress> m_remoteOperations;
+    QHash<quint64, rfm::core::OperationProgress> m_operations;
     QHash<quint64, quint64> m_transferPanes;
+    std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
     quint64 m_activeDirectoryRequestId{0};
     quint64 m_nextOperationId{1};
     quint64 m_connectionGeneration{0};

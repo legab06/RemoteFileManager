@@ -5,6 +5,7 @@
 #include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
+#include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/ssh/LibsshRuntime.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
@@ -12,6 +13,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCursor>
+#include <QDateTime>
 #include <QDialog>
 #include <QDir>
 #include <QDockWidget>
@@ -39,6 +41,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <limits>
 #include <utility>
 
 namespace rfm::app
@@ -106,7 +109,10 @@ class UploadSelectionDialog final : public QFileDialog
 
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
+MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
+    : QMainWindow(parent),
+      m_operationHistoryStore(std::make_unique<rfm::core::OperationHistoryStore>(
+          std::move(operationHistoryDirectory)))
 {
     setObjectName(QStringLiteral("mainWindow"));
     setWindowTitle(tr("RemoteFileManager"));
@@ -121,6 +127,13 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     createPlacesDock();
     createOperationDock();
     createEmptyState();
+
+    m_historySaveTimer = new QTimer(this);
+    m_historySaveTimer->setObjectName(QStringLiteral("operationHistorySaveTimer"));
+    m_historySaveTimer->setInterval(300);
+    m_historySaveTimer->setSingleShot(true);
+    connect(m_historySaveTimer, &QTimer::timeout, this, &MainWindow::saveOperationHistory);
+    loadOperationHistory();
 
     m_autoRefreshTimer = new QTimer(this);
     m_autoRefreshTimer->setObjectName(QStringLiteral("autoRefreshTimer"));
@@ -229,6 +242,10 @@ MainWindow::~MainWindow()
         shutdownLoop.exec(QEventLoop::ExcludeUserInputEvents);
         m_sshThread->quit();
         m_sshThread->wait();
+    }
+    if (m_historySaveTimer->isActive()) {
+        m_historySaveTimer->stop();
+        saveOperationHistory();
     }
 }
 
@@ -462,6 +479,10 @@ void MainWindow::createOperationDock()
             &MainWindow::resumeTransferRequested);
     connect(m_operationPanel, &OperationPanel::cancelRequested, this,
             &MainWindow::cancelTransferRequested);
+    connect(m_operationPanel, &OperationPanel::removeTerminalRequested, this,
+            &MainWindow::removeTerminalOperation);
+    connect(m_operationPanel, &OperationPanel::clearTerminalRequested, this,
+            &MainWindow::clearTerminalOperations);
 }
 
 void MainWindow::createEmptyState()
@@ -612,7 +633,7 @@ void MainWindow::showConnectionError(const QString& message)
     for (auto operation : std::as_const(m_remoteOperations)) {
         operation.state = rfm::core::OperationState::Failed;
         operation.error = message;
-        m_operationPanel->updateOperation(operation);
+        updateTrackedOperation(operation);
     }
     m_remoteOperations.clear();
     m_transferPanes.clear();
@@ -911,7 +932,77 @@ void MainWindow::beginTrackedRemoteOperation(
     const rfm::core::OperationProgress operation =
         rfm::core::beginRemoteOperation(id, kind, sources, destination);
     m_remoteOperations.insert(id, operation);
+    updateTrackedOperation(operation);
+}
+
+void MainWindow::updateTrackedOperation(rfm::core::OperationProgress operation)
+{
+    const auto existing = m_operations.constFind(operation.id);
+    if (rfm::core::isTerminal(operation.state)) {
+        if (!operation.finishedAt.isValid()) {
+            operation.finishedAt =
+                existing != m_operations.cend() && existing->finishedAt.isValid()
+                    ? existing->finishedAt
+                    : QDateTime::currentDateTimeUtc();
+        }
+    } else {
+        operation.finishedAt = {};
+    }
+    m_operations.insert(operation.id, operation);
     m_operationPanel->updateOperation(operation);
+    if (rfm::core::isTerminal(operation.state)) {
+        scheduleOperationHistorySave();
+    }
+}
+
+void MainWindow::loadOperationHistory()
+{
+    const QList<rfm::core::OperationProgress> operations = m_operationHistoryStore->load();
+    for (const rfm::core::OperationProgress& operation : operations) {
+        m_operations.insert(operation.id, operation);
+        m_operationPanel->updateOperation(operation);
+        if (operation.id >= m_nextOperationId &&
+            operation.id != std::numeric_limits<quint64>::max()) {
+            m_nextOperationId = operation.id + 1;
+        }
+    }
+}
+
+void MainWindow::scheduleOperationHistorySave()
+{
+    m_historySaveTimer->start();
+}
+
+void MainWindow::saveOperationHistory()
+{
+    QString error;
+    if (!m_operationHistoryStore->save(m_operations.values(), &error)) {
+        statusBar()->showMessage(error, 8000);
+    }
+}
+
+void MainWindow::removeTerminalOperation(quint64 id)
+{
+    const auto operation = m_operations.constFind(id);
+    if (operation == m_operations.cend() || !rfm::core::isTerminal(operation->state) ||
+        !m_operationPanel->removeTerminalOperation(id)) {
+        return;
+    }
+    m_operations.remove(id);
+    scheduleOperationHistorySave();
+}
+
+void MainWindow::clearTerminalOperations()
+{
+    for (auto iterator = m_operations.begin(); iterator != m_operations.end();) {
+        if (rfm::core::isTerminal(iterator->state)) {
+            iterator = m_operations.erase(iterator);
+        } else {
+            ++iterator;
+        }
+    }
+    m_operationPanel->clearTerminalOperations();
+    scheduleOperationHistorySave();
 }
 
 void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& result)
@@ -920,7 +1011,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
     if (result.kind == rfm::core::RemoteOperationKind::Copy ||
         result.kind == rfm::core::RemoteOperationKind::Move) {
         const rfm::core::OperationProgress started = m_remoteOperations.take(result.id);
-        m_operationPanel->updateOperation(rfm::core::finishRemoteOperation(result, started));
+        updateTrackedOperation(rfm::core::finishRemoteOperation(result, started));
     }
     QStringList failures;
     bool anySuccess = false;
@@ -995,7 +1086,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
 
 void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progress)
 {
-    m_operationPanel->updateOperation(rfm::core::operationProgress(progress));
+    updateTrackedOperation(rfm::core::operationProgress(progress));
     m_pendingTransferRequests.remove(progress.id);
     const bool terminal = progress.state == rfm::core::TransferState::Completed ||
                           progress.state == rfm::core::TransferState::Cancelled ||
@@ -1236,7 +1327,17 @@ QString MainWindow::askDestination(const QString& title)
     return normalized;
 }
 
-quint64 MainWindow::nextOperationId() { return m_nextOperationId++; }
+quint64 MainWindow::nextOperationId()
+{
+    while (m_nextOperationId == 0 || m_operations.contains(m_nextOperationId)) {
+        ++m_nextOperationId;
+    }
+    const quint64 id = m_nextOperationId++;
+    if (m_nextOperationId == 0) {
+        m_nextOperationId = 1;
+    }
+    return id;
+}
 
 void MainWindow::requestParentDirectory()
 {

@@ -3,6 +3,7 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 
+#include <QDateTime>
 #include <QMetaType>
 #include <QString>
 #include <QStringList>
@@ -41,8 +42,10 @@ struct OperationProgress {
     bool byteProgressAvailable{false};
     bool pauseResumeSupported{false};
     bool cancellationSupported{false};
+    QDateTime finishedAt;
 };
 
+[[nodiscard]] bool isTerminal(OperationState state);
 [[nodiscard]] OperationProgress operationProgress(const TransferProgress& transfer);
 [[nodiscard]] OperationProgress beginRemoteOperation(
     quint64 id, OperationKind kind, const QList<RemoteSelection>& sources,

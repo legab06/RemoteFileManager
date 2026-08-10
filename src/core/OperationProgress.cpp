@@ -40,6 +40,12 @@ OperationKind operationKind(RemoteOperationKind kind)
 
 } // namespace
 
+bool isTerminal(OperationState state)
+{
+    return state == OperationState::Completed || state == OperationState::Cancelled ||
+           state == OperationState::Failed;
+}
+
 OperationProgress operationProgress(const TransferProgress& transfer)
 {
     return {transfer.id,
@@ -57,7 +63,8 @@ OperationProgress operationProgress(const TransferProgress& transfer)
             transfer.error,
             true,
             true,
-            true};
+            true,
+            {}};
 }
 
 OperationProgress beginRemoteOperation(quint64 id, OperationKind kind,

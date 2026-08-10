@@ -8,6 +8,11 @@ target_link_libraries(rfm_remote_operations_tests PRIVATE Qt6::Test RemoteFileMa
 rfm_set_project_warnings(rfm_remote_operations_tests)
 add_test(NAME unit.remote_file_operations COMMAND rfm_remote_operations_tests)
 
+qt_add_executable(rfm_operation_history_tests test_operation_history.cpp)
+target_link_libraries(rfm_operation_history_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_operation_history_tests)
+add_test(NAME unit.operation_history COMMAND rfm_operation_history_tests)
+
 qt_add_executable(rfm_transfer_tests test_transfer_file_job.cpp)
 target_link_libraries(rfm_transfer_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_transfer_tests)

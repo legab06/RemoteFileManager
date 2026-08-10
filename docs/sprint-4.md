@@ -191,22 +191,29 @@ les éléments en erreur.
 
 ## Historique persistant
 
-Cette fonctionnalité constitue la dernière étape du Sprint 4. Elle n’est abordée
-qu’après stabilisation du double panneau et du gestionnaire d’opérations.
+`OperationHistoryStore`, indépendant de l’UI, conserve les opérations terminales
+dans `operation-history.json` sous `QStandardPaths::AppDataLocation`. Le document
+JSON porte explicitement la version `1` et les identifiants ainsi que les compteurs
+64 bits sont encodés comme chaînes décimales pour éviter toute perte de précision.
+`QSaveFile` assure une écriture atomique.
 
-Les opérations terminales seront persistées dans un format local versionné et
-écrit atomiquement sous le répertoire de données applicatives fourni par Qt. Les
-opérations actives ne seront jamais restaurées comme encore en cours après un
-redémarrage.
+Le schéma limite chaque entrée aux champs utiles : identifiant, type d’opération,
+sources, destination, état terminal, erreur éventuelle, octets transférés,
+compteurs de résultat et date de terminaison UTC. Il ne sérialise ni état interne
+du moteur, ni vitesse instantanée, ni capacité d’action, ni donnée de connexion,
+d’authentification ou commande SSH.
 
-L’historique :
+Seuls les états `Completed`, `Failed` et `Cancelled` sont enregistrés et acceptés
+au chargement. Un fichier absent ou vide représente un historique vide. Un JSON
+corrompu, trop volumineux ou d’une version inconnue est ignoré sans empêcher le
+démarrage. Les 200 opérations terminales les plus récentes sont conservées,
+ordonnées par leur date de terminaison ; cette limite borne durablement le fichier.
 
-- est borné par une politique de rétention documentée ;
-- peut être nettoyé entrée par entrée ;
-- peut être vidé complètement ;
-- tolère un fichier absent, ancien ou corrompu ;
-- ne contient aucun mot de passe, clé, jeton ou commande SSH ;
-- limite les informations enregistrées aux données utiles à l’utilisateur.
+`MainWindow` agrège les changements terminaux et diffère l’écriture de 300 ms afin
+de regrouper les mises à jour rapprochées. Une écriture encore planifiée est
+finalisée à la fermeture. `OperationPanel` reste sans accès disque : il expose une
+suppression de la ligne terminale sélectionnée et un nettoyage de toutes les
+lignes terminales. Ces commandes ne retirent jamais une opération active.
 
 ## Sécurité et fiabilité
 
@@ -308,17 +315,17 @@ Tous les tests automatisés restent indépendants d’un serveur SSH externe.
 - [ ] Les réponses asynchrones ne peuvent pas être appliquées au mauvais panneau.
 - [ ] Uploads, downloads et navigation du Sprint 3 ne régressent pas.
 - [x] La vue d’opérations suit upload, download, copie et déplacement.
-- [ ] L’historique terminal est persistant et nettoyable.
-- [ ] Les opérations triviales n’encombrent pas l’historique principal.
-- [ ] Les tests automatisés ne nécessitent aucun serveur externe.
-- [ ] La compilation stricte et toute la suite CTest réussissent.
+- [x] L’historique terminal est persistant et nettoyable.
+- [x] Les opérations triviales n’encombrent pas l’historique principal.
+- [x] Les tests automatisés ne nécessitent aucun serveur externe.
+- [x] La compilation stricte et toute la suite CTest réussissent.
 
 Les critères dépendant d’un vrai serveur restent non cochés jusqu’à une validation
 manuelle sur une installation SSH/SFTP standard.
 
 ## État d’avancement
 
-Les étapes 1 à 5 sont implémentées. À l’issue de l’étape 5 :
+Les étapes 1 à 6 sont implémentées. À l’issue de l’étape 6 :
 
 - chaque `FileBrowserPane` conserve un historique arrière/avant indépendant,
   modifié seulement lorsqu’un listing attendu réussit ;
@@ -346,11 +353,19 @@ Les étapes 1 à 5 sont implémentées. À l’issue de l’étape 5 :
   « Completed » ou « Failed », sans progression ou contrôle non pris en charge ;
 - les résultats partiels indiquent le nombre d’éléments réussis et conservent le
   détail contextualisé des échecs ;
-- création de dossier, renommage et suppression restent exclus de la vue.
-
-L’historique persistant de l’étape 6 n’est pas commencé. Les lignes du panneau ne
-sont conservées que pendant l’exécution courante de l’application et aucune
-commande de nettoyage n’est encore proposée.
+- création de dossier, renommage et suppression restent exclus de la vue ;
+- les opérations `Completed`, `Failed` et `Cancelled` sont restaurées au prochain
+  démarrage depuis le document JSON v1 écrit atomiquement dans le répertoire de
+  données applicatives Qt ;
+- les états actifs ne sont ni sauvegardés ni restaurés ;
+- l’historique est limité aux 200 terminaisons les plus récentes et les écritures
+  rapprochées sont regroupées ;
+- la ligne terminale sélectionnée peut être supprimée et tout l’historique
+  terminal peut être vidé sans retirer les opérations actives ;
+- les fichiers absents, vides, corrompus, trop volumineux ou d’une version inconnue
+  sont traités comme un historique vide ;
+- les tests du stockage injectent `QTemporaryDir` et la suite UI utilise le mode
+  de chemins de test de Qt, sans écrire dans le profil utilisateur réel.
 
 Une nouvelle validation visuelle manuelle reste nécessaire sur les thèmes clairs
 et sombres réellement ciblés ; les tests automatisés vérifient les palettes et les

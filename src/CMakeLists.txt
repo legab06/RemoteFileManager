@@ -1,6 +1,7 @@
 add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
+    core/OperationHistoryStore.cpp
     core/OperationProgress.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp

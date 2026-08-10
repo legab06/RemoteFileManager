@@ -1,12 +1,13 @@
 #include "remotefilemanager/app/ConnectionDialog.hpp"
 #include "remotefilemanager/app/FileBrowserPane.hpp"
 #include "remotefilemanager/app/MainWindow.hpp"
-#include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/OperationPanel.hpp"
+#include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
+#include "remotefilemanager/core/OperationHistoryStore.hpp"
 
-#include <QAction>
 #include <QAbstractButton>
+#include <QAction>
 #include <QApplication>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -20,6 +21,7 @@
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTableWidget>
 #include <QTemporaryDir>
@@ -112,6 +114,7 @@ class MainWindowTest final : public QObject
     void displaysTransferProgressAndMultipleEntries();
     void displaysTransferStatesInEnglish();
     void displaysRemoteCopyAndMoveOperations();
+    void removesOnlyTerminalOperationsFromPanel();
     void exposesPauseResumeAndCancelIntentions();
     void displaysTerminalTransferStatesAndErrors();
     void formatsTransferSizesAndSpeeds();
@@ -130,6 +133,7 @@ class MainWindowTest final : public QObject
     void buildsCanonicalInterPanePathsThroughTheRealUiChain();
     void rejectsOtherPaneOperationsForSameDirectory();
     void refreshesAllVisiblePanesAffectedByOperationsAndUploads();
+    void persistsRemovesAndClearsTerminalOperationHistory();
 };
 
 void MainWindowTest::exposesInitialDisconnectedShell()
@@ -459,6 +463,53 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     QVERIFY(table->item(moveRow, 7)->text().contains(QStringLiteral("permission denied")));
     QVERIFY(table->cellWidget(moveRow, 4) == nullptr);
     QVERIFY(table->cellWidget(moveRow, 6) == nullptr);
+}
+
+void MainWindowTest::removesOnlyTerminalOperationsFromPanel()
+{
+    rfm::app::OperationPanel panel;
+    panel.show();
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    auto* const remove =
+        panel.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
+    auto* const clear =
+        panel.findChild<QPushButton*>(QStringLiteral("clearOperationHistoryButton"));
+    QVERIFY(table != nullptr);
+    QVERIFY(remove != nullptr);
+    QVERIFY(clear != nullptr);
+    QSignalSpy removals(&panel, &rfm::app::OperationPanel::removeTerminalRequested);
+    QSignalSpy clears(&panel, &rfm::app::OperationPanel::clearTerminalRequested);
+
+    panel.updateOperation(rfm::core::beginRemoteOperation(
+        801, rfm::core::OperationKind::RemoteCopy,
+        {{QStringLiteral("/source/active"), false}}, QStringLiteral("/destination")));
+    auto completed = progress(802, rfm::core::TransferState::Completed, 10, 10);
+    panel.updateOperation(rfm::core::operationProgress(completed));
+    auto failed = progress(803, rfm::core::TransferState::Failed, 4, 10);
+    failed.error = QStringLiteral("failure");
+    panel.updateOperation(rfm::core::operationProgress(failed));
+    QCOMPARE(table->rowCount(), 3);
+
+    table->selectRow(rowForId(table, 801));
+    QVERIFY(!remove->isEnabled());
+    QVERIFY(clear->isEnabled());
+    QVERIFY(!panel.removeTerminalOperation(801));
+    QCOMPARE(table->rowCount(), 3);
+
+    table->selectRow(rowForId(table, 802));
+    QVERIFY(remove->isEnabled());
+    QTest::mouseClick(remove, Qt::LeftButton);
+    QCOMPARE(removals.size(), 1);
+    QCOMPARE(removals.constFirst().constFirst().toULongLong(), quint64{802});
+    QVERIFY(panel.removeTerminalOperation(802));
+    QCOMPARE(table->rowCount(), 2);
+
+    QTest::mouseClick(clear, Qt::LeftButton);
+    QCOMPARE(clears.size(), 1);
+    panel.clearTerminalOperations();
+    QCOMPARE(table->rowCount(), 1);
+    QCOMPARE(rowForId(table, 801), 0);
+    QVERIFY(!clear->isEnabled());
 }
 
 void MainWindowTest::exposesPauseResumeAndCancelIntentions()
@@ -1455,6 +1506,84 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     QCOMPARE(requested.size(), 0);
 }
 
-QTEST_MAIN(MainWindowTest)
+void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    {
+        rfm::app::MainWindow window(nullptr, directory.path());
+        auto completed = progress(901, rfm::core::TransferState::Completed, 10, 10);
+        auto failed = progress(902, rfm::core::TransferState::Failed, 3, 10);
+        failed.error = QStringLiteral("permission denied");
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "handleTransferProgress", Qt::DirectConnection,
+            Q_ARG(rfm::core::TransferProgress, completed)));
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                          Q_ARG(rfm::core::TransferProgress, failed)));
+        auto* const saveTimer =
+            window.findChild<QTimer*>(QStringLiteral("operationHistorySaveTimer"));
+        QVERIFY(saveTimer != nullptr);
+        QVERIFY(saveTimer->isActive());
+        saveTimer->stop();
+        QVERIFY(QMetaObject::invokeMethod(saveTimer, "timeout", Qt::DirectConnection));
+    }
+
+    {
+        rfm::app::MainWindow window(nullptr, directory.path());
+        auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+        auto* const remove =
+            window.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
+        auto* const clear =
+            window.findChild<QPushButton*>(QStringLiteral("clearOperationHistoryButton"));
+        auto* const saveTimer =
+            window.findChild<QTimer*>(QStringLiteral("operationHistorySaveTimer"));
+        QVERIFY(table != nullptr);
+        QVERIFY(remove != nullptr);
+        QVERIFY(clear != nullptr);
+        QCOMPARE(table->rowCount(), 2);
+        QCOMPARE(table->item(rowForId(table, 901), 3)->text(), QStringLiteral("Completed"));
+        QCOMPARE(table->item(rowForId(table, 902), 3)->text(), QStringLiteral("Failed"));
+
+        table->selectRow(rowForId(table, 901));
+        QVERIFY(remove->isEnabled());
+        QTest::mouseClick(remove, Qt::LeftButton);
+        QCOMPARE(table->rowCount(), 1);
+        QCOMPARE(rowForId(table, 901), -1);
+
+        auto active = progress(903, rfm::core::TransferState::Transferring, 1, 10);
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                          Q_ARG(rfm::core::TransferProgress, active)));
+        QCOMPARE(table->rowCount(), 2);
+        table->selectRow(rowForId(table, 903));
+        QVERIFY(!remove->isEnabled());
+        QVERIFY(clear->isEnabled());
+        QTest::mouseClick(clear, Qt::LeftButton);
+        QCOMPARE(table->rowCount(), 1);
+        QCOMPARE(rowForId(table, 903), 0);
+        QVERIFY(!clear->isEnabled());
+
+        saveTimer->stop();
+        QVERIFY(QMetaObject::invokeMethod(saveTimer, "timeout", Qt::DirectConnection));
+    }
+
+    rfm::app::MainWindow restored(nullptr, directory.path());
+    auto* const table = restored.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->rowCount(), 0);
+}
+
+int main(int argc, char* argv[])
+{
+    QApplication application(argc, argv);
+    QStandardPaths::setTestModeEnabled(true);
+    QCoreApplication::setOrganizationName(QStringLiteral("RemoteFileManagerTests"));
+    QCoreApplication::setApplicationName(QStringLiteral("rfm_ui_tests"));
+    const rfm::core::OperationHistoryStore history;
+    QFile::remove(history.filePath());
+    MainWindowTest test;
+    const int result = QTest::qExec(&test, argc, argv);
+    QFile::remove(history.filePath());
+    return result;
+}
 
 #include "test_main_window.moc"
