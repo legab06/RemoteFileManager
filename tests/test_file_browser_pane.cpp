@@ -1,9 +1,14 @@
 #include "remotefilemanager/app/FileBrowserPane.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
+#include "remotefilemanager/core/InternalTransfer.hpp"
 
+#include <QApplication>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QMimeData>
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QTableWidget>
@@ -25,6 +30,10 @@ class FileBrowserPaneTest final : public QObject
     void navigationHistorySupportsBackForwardAndBranching();
     void parentAndRefreshHaveCorrectHistorySemantics();
     void workspaceHistoriesAreIndependent();
+    void constructsAndAcceptsOnlyInternalDragPayloads();
+    void resolvesDropOnCurrentDirectoryAndSubfolder();
+    void cutAppearanceSurvivesRefreshAndClearsCleanly();
+    void focusesLocationAndSwitchesVisiblePane();
 };
 
 void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
@@ -103,6 +112,17 @@ void FileBrowserPaneTest::preparesContextSelectionBeforeEmittingIntent()
     const auto selection = pane.selectedEntries();
     QCOMPARE(selection.size(), 1);
     QCOMPARE(selection.constFirst().path, QStringLiteral("/srv/second.txt"));
+
+    pane.fileTable()->selectAll();
+    const QPoint firstRow = pane.fileTable()->visualItemRect(pane.fileTable()->item(0, 0)).center();
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "customContextMenuRequested",
+                                      Qt::DirectConnection, Q_ARG(QPoint, firstRow)));
+    QCOMPARE(pane.selectedEntries().size(), 2);
+
+    const QPoint emptyArea(8, pane.fileTable()->viewport()->height() - 2);
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "customContextMenuRequested",
+                                      Qt::DirectConnection, Q_ARG(QPoint, emptyArea)));
+    QVERIFY(pane.selectedEntries().isEmpty());
 }
 
 void FileBrowserPaneTest::restoresSelectionAndScrollOnRefresh()
@@ -340,6 +360,120 @@ void FileBrowserPaneTest::workspaceHistoriesAreIndependent()
 
     QVERIFY(primary->canGoBack());
     QVERIFY(!secondary->canGoBack());
+}
+
+void FileBrowserPaneTest::constructsAndAcceptsOnlyInternalDragPayloads()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.setTransferContext(QStringLiteral("instance"),
+                            {QStringLiteral("server.example.test"), 22, 4}, 9);
+    pane.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"),
+                       {{QStringLiteral("a.txt"), 1, {}, false, false},
+                        {QStringLiteral("folder"), 0, {}, true, false}});
+    pane.fileTable()->selectAll();
+
+    const QByteArray data = pane.createInternalDragData();
+    const auto decoded = rfm::core::decodeInternalTransfer(data);
+    QVERIFY(decoded.has_value());
+    QCOMPARE(decoded->sourcePaneId, quint64{9});
+    QCOMPARE(decoded->sources.size(), 2);
+
+    QSignalSpy drops(&pane, &rfm::app::FileBrowserPane::internalDropRequested);
+    QMimeData external;
+    external.setText(QStringLiteral("file:///tmp/external.txt"));
+    QDropEvent externalDrop(QPointF(10, 10), Qt::CopyAction, &external, Qt::LeftButton,
+                            Qt::NoModifier);
+    QApplication::sendEvent(pane.fileTable()->viewport(), &externalDrop);
+    QCOMPARE(drops.size(), 0);
+    QVERIFY(!externalDrop.isAccepted());
+}
+
+void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
+{
+    const rfm::core::RemoteConnectionIdentity connection{
+        QStringLiteral("server.example.test"), 22, 4};
+    rfm::app::FileBrowserPane source;
+    source.setTransferContext(QStringLiteral("instance"), connection, 1);
+    source.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"),
+                         {{QStringLiteral("a.txt"), 1, {}, false, false}});
+    source.fileTable()->selectRow(0);
+
+    rfm::app::FileBrowserPane destination;
+    destination.resize(640, 320);
+    destination.show();
+    destination.setTransferContext(QStringLiteral("instance"), connection, 2);
+    destination.showDirectory(QStringLiteral("/target"), QStringLiteral("/target"),
+                              {{QStringLiteral("child"), 0, {}, true, false},
+                               {QStringLiteral("plain.txt"), 1, {}, false, false}});
+    QApplication::processEvents();
+
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, source.createInternalDragData());
+    QSignalSpy drops(&destination, &rfm::app::FileBrowserPane::internalDropRequested);
+
+    const QPoint childPosition =
+        destination.fileTable()->visualItemRect(destination.fileTable()->item(0, 0)).center();
+    QDragEnterEvent childEnter(childPosition, Qt::CopyAction, &mime, Qt::LeftButton,
+                               Qt::NoModifier);
+    QApplication::sendEvent(destination.fileTable()->viewport(), &childEnter);
+    QVERIFY(childEnter.isAccepted());
+    QDropEvent childDrop(QPointF(childPosition), Qt::CopyAction, &mime, Qt::LeftButton,
+                         Qt::NoModifier);
+    QApplication::sendEvent(destination.fileTable()->viewport(), &childDrop);
+    QVERIFY(childDrop.isAccepted());
+    QCOMPARE(drops.size(), 1);
+    QCOMPARE(drops.takeFirst().at(1).toString(), QStringLiteral("/target/child"));
+
+    const QPoint emptyPosition(10, destination.fileTable()->viewport()->height() - 2);
+    QDragEnterEvent emptyEnter(emptyPosition, Qt::CopyAction, &mime, Qt::LeftButton,
+                               Qt::NoModifier);
+    QApplication::sendEvent(destination.fileTable()->viewport(), &emptyEnter);
+    QVERIFY(emptyEnter.isAccepted());
+    QDropEvent emptyDrop(QPointF(emptyPosition), Qt::CopyAction, &mime, Qt::LeftButton,
+                         Qt::NoModifier);
+    QApplication::sendEvent(destination.fileTable()->viewport(), &emptyDrop);
+    QVERIFY(emptyDrop.isAccepted());
+    QCOMPARE(drops.size(), 1);
+    QCOMPARE(drops.takeFirst().at(1).toString(), QStringLiteral("/target"));
+}
+
+void FileBrowserPaneTest::cutAppearanceSurvivesRefreshAndClearsCleanly()
+{
+    rfm::app::FileBrowserPane pane;
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("file.txt"), 1, {}, false, false}};
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+    pane.setCutPaths({QStringLiteral("/srv/file.txt")});
+    QVERIFY(pane.fileTable()->item(0, 0)->font().italic());
+    QVERIFY(pane.fileTable()->item(0, 0)->foreground().style() != Qt::NoBrush);
+
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+    QVERIFY(pane.fileTable()->item(0, 0)->font().italic());
+
+    pane.setCutPaths({});
+    QVERIFY(!pane.fileTable()->item(0, 0)->font().italic());
+    QCOMPARE(pane.fileTable()->item(0, 0)->foreground().style(), Qt::NoBrush);
+}
+
+void FileBrowserPaneTest::focusesLocationAndSwitchesVisiblePane()
+{
+    rfm::app::PaneWorkspace workspace;
+    workspace.setSplit(true);
+    rfm::app::FileBrowserPane* const primary = workspace.primaryPane();
+    rfm::app::FileBrowserPane* const secondary = workspace.otherVisiblePane();
+    primary->showDirectory(QStringLiteral("/one"), QStringLiteral("sftp://host/one"), {});
+    primary->focusLocation();
+    QCOMPARE(primary->pathEdit()->selectedText(), QStringLiteral("sftp://host/one"));
+
+    QCOMPARE(workspace.activePane(), primary);
+    workspace.activateOtherPane();
+    QCOMPARE(workspace.activePane(), secondary);
+    workspace.activateOtherPane();
+    QCOMPARE(workspace.activePane(), primary);
+
+    workspace.setSplit(false);
+    workspace.activateOtherPane();
+    QCOMPARE(workspace.activePane(), primary);
 }
 
 QTEST_MAIN(FileBrowserPaneTest)

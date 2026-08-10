@@ -2,6 +2,7 @@
 
 #include "remotefilemanager/app/FileBrowserPane.hpp"
 #include "remotefilemanager/core/ConnectionProfile.hpp"
+#include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
@@ -81,6 +82,7 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleDirectoryListingError(quint64 requestId, const QString& path,
                                                  const QString& error);
     void showConnectionError(const QString& message);
+    Q_INVOKABLE void handleDisconnected();
     void requestParentDirectory();
     void showFileContextMenu(const QPoint& globalPosition);
     void createRemoteDirectory();
@@ -89,6 +91,15 @@ class MainWindow final : public QMainWindow
     void copySelectedEntries();
     void moveSelectedToOtherPane();
     void copySelectedToOtherPane();
+    void copySelectionToClipboard();
+    void cutSelectionToClipboard();
+    void pasteClipboard();
+    void cancelPendingCut();
+    void selectAllInActivePane();
+    void focusActiveLocation();
+    Q_INVOKABLE void handleInternalDrop(rfm::core::InternalTransferPayload payload,
+                                        quint64 destinationPaneId,
+                                        QString destinationDirectory);
     void removeSelectedEntries();
     void chooseUploads();
     void chooseDownloadDirectory();
@@ -107,6 +118,18 @@ class MainWindow final : public QMainWindow
     void clearTerminalOperations();
     void updateOperationActions();
     void updateConnectionAction();
+    void updatePaneTransferContexts();
+    void updateCutAppearance();
+    void clearInternalClipboard();
+    [[nodiscard]] rfm::core::RemoteConnectionIdentity currentConnectionIdentity() const;
+    [[nodiscard]] rfm::core::InternalTransferPayload transferPayload(
+        quint64 paneId, const QList<rfm::core::RemoteSelection>& sources) const;
+    bool startRemoteTransfer(
+        rfm::core::InternalTransferAction action,
+        const rfm::core::InternalTransferPayload& payload, quint64 destinationPaneId,
+        const QString& destinationDirectory, bool clipboardMove = false);
+    [[nodiscard]] QString transferValidationMessage(
+        rfm::core::InternalTransferValidationError error) const;
     void requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
                                  bool coalesceIfPending,
                                  PaneNavigation navigation = PaneNavigation::Refresh);
@@ -141,6 +164,13 @@ class MainWindow final : public QMainWindow
     QAction* m_uploadAction{nullptr};
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_clipboardCopyAction{nullptr};
+    QAction* m_clipboardCutAction{nullptr};
+    QAction* m_clipboardPasteAction{nullptr};
+    QAction* m_selectAllAction{nullptr};
+    QAction* m_focusLocationAction{nullptr};
+    QAction* m_switchPaneAction{nullptr};
+    QAction* m_cancelCutAction{nullptr};
     PaneWorkspace* m_paneWorkspace{nullptr};
     OperationPanel* m_operationPanel{nullptr};
     QTimer* m_autoRefreshTimer{nullptr};
@@ -172,7 +202,10 @@ class MainWindow final : public QMainWindow
     QHash<quint64, rfm::core::OperationProgress> m_remoteOperations;
     QHash<quint64, rfm::core::OperationProgress> m_operations;
     QHash<quint64, quint64> m_transferPanes;
+    rfm::core::InternalClipboard m_internalClipboard;
+    QSet<quint64> m_clipboardMoveOperations;
     std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
+    QString m_applicationInstanceId;
     quint64 m_activeDirectoryRequestId{0};
     quint64 m_nextOperationId{1};
     quint64 m_connectionGeneration{0};

@@ -4,6 +4,7 @@
 
 #include <QSplitter>
 #include <QStyle>
+#include <QTableWidget>
 #include <QVBoxLayout>
 
 namespace rfm::app
@@ -70,6 +71,8 @@ QList<PaneWorkspace::PaneId> PaneWorkspace::visiblePaneIds() const
     return ids;
 }
 
+QList<PaneWorkspace::PaneId> PaneWorkspace::paneIds() const { return m_panes.keys(); }
+
 bool PaneWorkspace::isSplit() const { return m_split; }
 
 void PaneWorkspace::setSplit(bool enabled)
@@ -97,6 +100,16 @@ void PaneWorkspace::setSplit(bool enabled)
     paneToHide->hide();
     emit paneVisibilityChanged(hiddenId, false);
     updateActiveAppearance();
+}
+
+void PaneWorkspace::activateOtherPane()
+{
+    FileBrowserPane* const otherPane = otherVisiblePane();
+    if (otherPane == nullptr) {
+        return;
+    }
+    setActivePane(otherPane);
+    otherPane->fileTable()->setFocus(Qt::ShortcutFocusReason);
 }
 
 FileBrowserPane* PaneWorkspace::createPane(PaneId id)
