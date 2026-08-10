@@ -26,3 +26,10 @@ Les opérations libssh et SFTP sont confinées dans un thread dédié. L’inter
 - authentification interactive keyboard-interactive et clé privée chiffrée avec demande de passphrase ;
 - transferts, renommage, suppression et opérations distantes ;
 - reconnexion automatique et annulation d’une connexion en cours.
+
+## Durcissement ultérieur
+
+Le dossier de connexion est maintenant canonicalisé par SFTP en chemin absolu, ce qui permet de
+remonter jusqu'à `/`. L'activation d'un lien symbolique tente une ouverture de dossier : un lien de
+dossier fonctionne et un lien cassé ou non-dossier produit une erreur de navigation locale sans
+déconnecter la session.

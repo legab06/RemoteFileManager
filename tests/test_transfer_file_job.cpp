@@ -1,3 +1,4 @@
+#include "remotefilemanager/core/LocalDownloadPath.hpp"
 #include "remotefilemanager/core/TransferDirectoryJob.hpp"
 #include "remotefilemanager/core/TransferFileJob.hpp"
 #include "remotefilemanager/core/TransferJob.hpp"
@@ -30,11 +31,21 @@ class FakeBackend final : public rfm::core::RemoteTransferBackend
     rfm::core::TransferStatResult stat(const QString& path) override
     {
         ++statCalls;
+        if (forcedStats.contains(path)) {
+            return forcedStats.value(path);
+        }
         const bool symbolic = symbolicLinks.contains(path);
         const bool directory = directories.contains(path);
         const bool file = files.contains(path);
+        const auto special = specialNodes.constFind(path);
+        const rfm::core::TransferNodeType type =
+            symbolic     ? rfm::core::TransferNodeType::SymbolicLink
+            : directory  ? rfm::core::TransferNodeType::Directory
+            : file       ? rfm::core::TransferNodeType::RegularFile
+            : special != specialNodes.cend() ? special.value()
+                                             : rfm::core::TransferNodeType::Unknown;
         return {{},
-                {symbolic || directory || file, directory, symbolic,
+                {symbolic || directory || file || special != specialNodes.cend(), type,
                  static_cast<quint64>(files.value(path).size())}};
     }
 
@@ -147,15 +158,23 @@ class FakeBackend final : public rfm::core::RemoteTransferBackend
         collect(files.keys());
         collect(directories.values());
         collect(symbolicLinks.values());
+        collect(specialNodes.keys());
         QStringList sorted = names.values();
         sorted.sort();
         DirectoryCursor cursor;
         for (const QString& name : sorted) {
             const QString child = prefix + name;
+            const bool directory = directories.contains(child);
+            const bool symbolic = symbolicLinks.contains(child);
+            const bool file = files.contains(child);
+            const rfm::core::TransferNodeType type =
+                directory    ? rfm::core::TransferNodeType::Directory
+                : symbolic   ? rfm::core::TransferNodeType::SymbolicLink
+                : file       ? rfm::core::TransferNodeType::RegularFile
+                : specialNodes.contains(child) ? specialNodes.value(child)
+                                               : rfm::core::TransferNodeType::Unknown;
             cursor.entries.push_back(
-                {name,
-                 {true, directories.contains(child), symbolicLinks.contains(child),
-                  static_cast<quint64>(files.value(child).size())}});
+                {name, {true, type, static_cast<quint64>(files.value(child).size())}});
         }
         handle = nextHandle++;
         directoryHandles.insert(handle, cursor);
@@ -189,6 +208,8 @@ class FakeBackend final : public rfm::core::RemoteTransferBackend
     QHash<QString, QByteArray> files;
     QSet<QString> directories{QStringLiteral("/")};
     QSet<QString> symbolicLinks;
+    QHash<QString, rfm::core::TransferNodeType> specialNodes;
+    QHash<QString, rfm::core::TransferStatResult> forcedStats;
     QHash<quint64, DirectoryCursor> directoryHandles;
     QString openPath;
     qsizetype offset{0};
@@ -324,6 +345,12 @@ class TransferFileJobTest final : public QObject
     void reportsPartialDirectoryFailure();
     void readsOneRemoteDirectoryEntryPerStep();
     void eventLoopRunsDirectoryIncrementally();
+    void constructsSafeLocalDownloadDestinations();
+    void preservesTrailingWhitespaceInTransferPaths();
+    void rejectsUnsupportedRemoteNodeTypes_data();
+    void rejectsUnsupportedRemoteNodeTypes();
+    void reportsDistinctRemoteStatErrors_data();
+    void reportsDistinctRemoteStatErrors();
 };
 
 void TransferFileJobTest::uploadsIncrementally()
@@ -1005,6 +1032,156 @@ void TransferFileJobTest::eventLoopRunsDirectoryIncrementally()
     QVERIFY(driver.callbacks() > backend.readCalls + backend.readDirectoryCalls);
     QCOMPARE(readLocalFile(temporary.filePath(QStringLiteral("event-tree/large.bin"))),
              QByteArray(testSize, 'e'));
+}
+
+void TransferFileJobTest::constructsSafeLocalDownloadDestinations()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString root = temporary.filePath(QStringLiteral("downloads"));
+    QVERIFY(QDir().mkdir(root));
+
+    const auto normal = rfm::core::LocalDownloadPath::child(
+        root, root, QStringLiteral("report.txt"), rfm::core::LocalPathFlavor::Posix);
+    QVERIFY(normal.succeeded());
+    QCOMPARE(normal.path, QDir(root).filePath(QStringLiteral("report.txt")));
+
+    QVERIFY(!rfm::core::LocalDownloadPath::child(
+                 root, root, QStringLiteral(".."), rfm::core::LocalPathFlavor::Posix)
+                 .succeeded());
+    QVERIFY(!rfm::core::LocalDownloadPath::child(
+                 root, temporary.path(), QStringLiteral("escape.txt"),
+                 rfm::core::LocalPathFlavor::Posix)
+                 .succeeded());
+    QVERIFY(!rfm::core::LocalDownloadPath::child(
+                 root, root, QStringLiteral("..\\escape.txt"),
+                 rfm::core::LocalPathFlavor::Windows)
+                 .succeeded());
+    QVERIFY(!rfm::core::LocalDownloadPath::child(
+                 root, root, QStringLiteral("C:escape.txt"),
+                 rfm::core::LocalPathFlavor::Windows)
+                 .succeeded());
+    QVERIFY(!rfm::core::LocalDownloadPath::child(
+                 root, root, QStringLiteral("CON.txt"), rfm::core::LocalPathFlavor::Windows)
+                 .succeeded());
+
+    const auto legalPosixName = rfm::core::LocalDownloadPath::child(
+        root, root, QStringLiteral("..\\legal-on-posix "), rfm::core::LocalPathFlavor::Posix);
+    QVERIFY(legalPosixName.succeeded());
+
+    FakeBackend recursiveBackend;
+    recursiveBackend.directories.insert(QStringLiteral("/tree"));
+    recursiveBackend.files.insert(QStringLiteral("/tree/..\\escape.txt"), QByteArray("escape"));
+    const QString recursiveDestination = temporary.filePath(QStringLiteral("tree"));
+    rfm::core::TransferDirectoryJob recursiveDownload(
+        recursiveBackend,
+        {80, rfm::core::TransferDirection::Download, QStringLiteral("/tree"),
+         recursiveDestination, true},
+        rfm::core::LocalPathFlavor::Windows);
+    QVERIFY(runDirectoryToEnd(recursiveDownload) > 0);
+    QCOMPARE(recursiveDownload.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY(recursiveDownload.progress().error.contains(QStringLiteral("safely")));
+    QCOMPARE(recursiveBackend.openReadCalls, 0);
+    QVERIFY(!QFileInfo::exists(recursiveDestination));
+}
+
+void TransferFileJobTest::preservesTrailingWhitespaceInTransferPaths()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    FakeBackend backend;
+    const QString remoteSource = QStringLiteral("/remote/file ");
+    const QString localDestination = temporary.filePath(QStringLiteral("downloaded "));
+    backend.files.insert(remoteSource, QByteArray("content"));
+    rfm::core::TransferFileJob download(
+        backend, {81, rfm::core::TransferDirection::Download, remoteSource, localDestination});
+
+    QVERIFY(runToEnd(download) > 0);
+    QCOMPARE(download.progress().state, rfm::core::TransferState::Completed);
+    QCOMPARE(download.progress().source, remoteSource);
+    QCOMPARE(download.progress().destination, localDestination);
+    QCOMPARE(readLocalFile(localDestination), QByteArray("content"));
+
+    const QString localSource = temporary.filePath(QStringLiteral("upload-source "));
+    writeLocalFile(localSource, QByteArray("upload"));
+    const QString remoteDestination = QStringLiteral("/remote/uploaded ");
+    rfm::core::TransferFileJob upload(
+        backend, {82, rfm::core::TransferDirection::Upload, localSource, remoteDestination});
+    QVERIFY(runToEnd(upload) > 0);
+    QCOMPARE(upload.progress().state, rfm::core::TransferState::Completed);
+    QCOMPARE(backend.files.value(remoteDestination), QByteArray("upload"));
+}
+
+void TransferFileJobTest::rejectsUnsupportedRemoteNodeTypes_data()
+{
+    QTest::addColumn<rfm::core::TransferNodeType>("nodeType");
+    QTest::newRow("fifo") << rfm::core::TransferNodeType::Fifo;
+    QTest::newRow("socket") << rfm::core::TransferNodeType::Socket;
+    QTest::newRow("character device") << rfm::core::TransferNodeType::CharacterDevice;
+    QTest::newRow("block device") << rfm::core::TransferNodeType::BlockDevice;
+}
+
+void TransferFileJobTest::rejectsUnsupportedRemoteNodeTypes()
+{
+    QFETCH(rfm::core::TransferNodeType, nodeType);
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+
+    FakeBackend fileBackend;
+    fileBackend.specialNodes.insert(QStringLiteral("/special"), nodeType);
+    rfm::core::TransferFileJob file(
+        fileBackend, {83, rfm::core::TransferDirection::Download, QStringLiteral("/special"),
+                      temporary.filePath(QStringLiteral("special"))});
+    QVERIFY(runToEnd(file) > 0);
+    QCOMPARE(file.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY(file.progress().error.contains(QStringLiteral("not a regular file")));
+    QCOMPARE(fileBackend.openReadCalls, 0);
+
+    FakeBackend directoryBackend;
+    directoryBackend.directories.insert(QStringLiteral("/tree"));
+    directoryBackend.specialNodes.insert(QStringLiteral("/tree/special"), nodeType);
+    rfm::core::TransferDirectoryJob directory(
+        directoryBackend,
+        {84, rfm::core::TransferDirection::Download, QStringLiteral("/tree"),
+         temporary.filePath(QStringLiteral("tree")), true});
+    QVERIFY(runDirectoryToEnd(directory) > 0);
+    QCOMPARE(directory.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY(directory.progress().error.contains(QStringLiteral("not a regular file")));
+    QCOMPARE(directoryBackend.openReadCalls, 0);
+    QVERIFY(!QFileInfo::exists(temporary.filePath(QStringLiteral("tree"))));
+}
+
+void TransferFileJobTest::reportsDistinctRemoteStatErrors_data()
+{
+    QTest::addColumn<rfm::core::TransferBackendError>("backendError");
+    QTest::addColumn<QString>("expectedText");
+    QTest::newRow("permission") << rfm::core::TransferBackendError::PermissionDenied
+                                 << QStringLiteral("Permission was denied");
+    QTest::newRow("io") << rfm::core::TransferBackendError::Io
+                         << QStringLiteral("I/O error");
+    QTest::newRow("connection lost") << rfm::core::TransferBackendError::ConnectionLost
+                                      << QStringLiteral("connection was lost");
+    QTest::newRow("not found") << rfm::core::TransferBackendError::NotFound
+                                << QStringLiteral("not found");
+}
+
+void TransferFileJobTest::reportsDistinctRemoteStatErrors()
+{
+    QFETCH(rfm::core::TransferBackendError, backendError);
+    QFETCH(QString, expectedText);
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    FakeBackend backend;
+    backend.forcedStats.insert(QStringLiteral("/source"), {{backendError, {}}, {}});
+    rfm::core::TransferFileJob job(
+        backend, {85, rfm::core::TransferDirection::Download, QStringLiteral("/source"),
+                  temporary.filePath(QStringLiteral("destination"))});
+
+    QVERIFY(runToEnd(job) > 0);
+    QCOMPARE(job.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY2(job.progress().error.contains(expectedText), qPrintable(job.progress().error));
+    QVERIFY(job.progress().error.contains(QStringLiteral("/source")));
+    QCOMPARE(backend.openReadCalls, 0);
 }
 
 QTEST_GUILESS_MAIN(TransferFileJobTest)

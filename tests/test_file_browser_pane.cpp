@@ -29,6 +29,8 @@ class FileBrowserPaneTest final : public QObject
     void workspaceKeepsPanePathsAndSelectionsIndependent();
     void navigationHistorySupportsBackForwardAndBranching();
     void parentAndRefreshHaveCorrectHistorySemantics();
+    void navigatesFromCanonicalLoginDirectoryToRemoteRoot();
+    void activatesDirectoryAndBrokenSymbolicLinksForBackendResolution();
     void workspaceHistoriesAreIndependent();
     void constructsAndAcceptsOnlyInternalDragPayloads();
     void resolvesDropOnCurrentDirectoryAndSubfolder();
@@ -89,6 +91,51 @@ void FileBrowserPaneTest::emitsNavigationIntentions()
 
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
                                       Q_ARG(int, 1), Q_ARG(int, 0)));
+    QCOMPARE(navigation.size(), 0);
+}
+
+void FileBrowserPaneTest::navigatesFromCanonicalLoginDirectoryToRemoteRoot()
+{
+    rfm::app::FileBrowserPane pane;
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
+    pane.showDirectory(QStringLiteral("/home/alice"), QStringLiteral("sftp://host/home/alice"), {},
+                       rfm::app::PaneNavigation::Initial);
+
+    pane.requestParentDirectory();
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/home"));
+    pane.showDirectory(QStringLiteral("/home"), QStringLiteral("sftp://host/home"), {},
+                       rfm::app::PaneNavigation::Normal);
+    pane.requestParentDirectory();
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/"));
+    pane.showDirectory(QStringLiteral("/"), QStringLiteral("sftp://host/"), {},
+                       rfm::app::PaneNavigation::Normal);
+    pane.requestParentDirectory();
+
+    QCOMPARE(navigation.size(), 0);
+    QVERIFY(pane.canGoBack());
+}
+
+void FileBrowserPaneTest::activatesDirectoryAndBrokenSymbolicLinksForBackendResolution()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 240);
+    pane.show();
+    pane.showDirectory(
+        QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+        {{QStringLiteral("directory-link"), 0, {}, false, true},
+         {QStringLiteral("broken-link"), 0, {}, false, true},
+         {QStringLiteral("regular-file"), 1, {}, false, false}});
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
+
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QCOMPARE(navigation.takeFirst().constFirst().toString(),
+             QStringLiteral("/srv/directory-link"));
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 1), Q_ARG(int, 0)));
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/srv/broken-link"));
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 2), Q_ARG(int, 0)));
     QCOMPARE(navigation.size(), 0);
 }
 

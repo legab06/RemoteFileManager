@@ -66,6 +66,14 @@ utilise les métadonnées métier fournies par `RemoteTransferBackend`. Un lien
 symbolique sélectionné ou rencontré provoque un échec contextualisé et sa cible
 n’est jamais parcourue.
 
+Chaque nom distant destiné au poste local est désormais validé selon les règles de la plateforme
+cliente, puis le chemin construit est vérifié sous la racine choisie. Les espaces de début et de fin
+restent intacts lorsqu'ils sont représentables ; un nom POSIX légal mais non représentable sous
+Windows échoue clairement sans modifier le nom distant. Le backend conserve le type SFTP complet :
+seuls les fichiers réguliers et dossiers sont transférés, avant toute ouverture susceptible de
+bloquer sur une FIFO ou un autre nœud spécial. Les erreurs de stat et d'I/O conservent leur classe,
+l'opération et le chemin concernés.
+
 Pause et reprise conservent la phase de parcours, les listes découvertes et le
 fichier enfant actif. Une annulation demande d’abord au fichier enfant de nettoyer
 son temporaire, ferme un éventuel handle de listing, puis termine le job de dossier

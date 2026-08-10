@@ -70,6 +70,7 @@ class MainWindow final : public QMainWindow
     void pauseTransferRequested(quint64 id);
     void resumeTransferRequested(quint64 id);
     void cancelTransferRequested(quint64 id);
+    void cancelRemoteOperationRequested(quint64 id);
     void shutdownRequested();
     void disconnectionRequested();
 
@@ -133,6 +134,7 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void queueUploads(QStringList localPaths);
     Q_INVOKABLE void queueDownloads(QString localDirectory);
     Q_INVOKABLE void handleOperationResult(const rfm::core::RemoteOperationResult& result);
+    Q_INVOKABLE void handleRemoteOperationProgress(rfm::core::OperationProgress progress);
     Q_INVOKABLE void handleTransferProgress(const rfm::core::TransferProgress& progress);
     void beginTrackedRemoteOperation(quint64 id, rfm::core::OperationKind kind,
                                      const QList<rfm::core::RemoteSelection>& sources,

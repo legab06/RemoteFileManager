@@ -11,6 +11,38 @@ namespace
 
 constexpr qsizetype transferBlockSize = 65'536;
 
+QString backendErrorText(const TransferBackendResult& result)
+{
+    if (!result.detail.isEmpty()) {
+        return result.detail;
+    }
+    switch (result.error) {
+    case TransferBackendError::NotFound:
+        return QStringLiteral("The remote path was not found.");
+    case TransferBackendError::AlreadyExists:
+        return QStringLiteral("The remote path already exists.");
+    case TransferBackendError::PermissionDenied:
+        return QStringLiteral("Permission was denied by the server.");
+    case TransferBackendError::ConnectionLost:
+        return QStringLiteral("The SSH/SFTP connection was lost.");
+    case TransferBackendError::Unsupported:
+        return QStringLiteral("The server does not support this operation.");
+    case TransferBackendError::Io:
+        return QStringLiteral("The server reported an I/O error.");
+    case TransferBackendError::Failure:
+        return QStringLiteral("The remote operation failed.");
+    case TransferBackendError::None:
+        return {};
+    }
+    return QStringLiteral("The remote operation failed.");
+}
+
+QString backendFailure(const QString& operation, const QString& path,
+                       const TransferBackendResult& result)
+{
+    return QStringLiteral("%1 %2: %3").arg(operation, path, backendErrorText(result));
+}
+
 } // namespace
 
 TransferFileJob::TransferFileJob(RemoteTransferBackend& backend, TransferRequest request)
@@ -126,14 +158,30 @@ void TransferFileJob::step()
                                        ? m_request.destination
                                        : m_request.source;
         const TransferStatResult node = m_backend.stat(remotePath);
-        const bool invalidUpload =
-            m_request.direction == TransferDirection::Upload && node.node.exists;
-        const bool invalidDownload = m_request.direction == TransferDirection::Download &&
-                                     (!node.result.succeeded() || !node.node.exists ||
-                                      node.node.directory || node.node.symbolicLink);
-        if (invalidUpload || invalidDownload) {
-            fail(QStringLiteral("Transfer collision or invalid source."));
-            return;
+        if (m_request.direction == TransferDirection::Upload) {
+            if (node.result.succeeded() && node.node.exists) {
+                fail(QStringLiteral("The remote destination already exists: %1").arg(remotePath));
+                return;
+            }
+            if (!node.result.succeeded() && node.result.error != TransferBackendError::NotFound) {
+                fail(backendFailure(QStringLiteral("Unable to inspect remote destination"),
+                                    remotePath, node.result));
+                return;
+            }
+        } else {
+            if (!node.result.succeeded()) {
+                fail(backendFailure(QStringLiteral("Unable to inspect remote source"), remotePath,
+                                    node.result));
+                return;
+            }
+            if (!node.node.exists) {
+                fail(QStringLiteral("The remote source was not found: %1").arg(remotePath));
+                return;
+            }
+            if (!node.node.isRegularFile()) {
+                fail(QStringLiteral("The remote source is not a regular file: %1").arg(remotePath));
+                return;
+            }
         }
         m_progress.totalBytes = node.node.size;
         m_phase = Phase::OpenLocal;
@@ -159,8 +207,11 @@ void TransferFileJob::step()
         if (m_phase == Phase::OpenRemote) {
             m_remoteTemporary =
                 m_request.destination + QStringLiteral(".rfm-part-%1").arg(m_request.id);
-            if (!m_backend.openWriteExclusive(m_remoteTemporary, m_handle).succeeded()) {
-                fail(QStringLiteral("Unable to create remote temporary file."));
+            const TransferBackendResult result =
+                m_backend.openWriteExclusive(m_remoteTemporary, m_handle);
+            if (!result.succeeded()) {
+                fail(backendFailure(QStringLiteral("Unable to create remote temporary file"),
+                                    m_remoteTemporary, result));
                 return;
             }
             m_ownsRemoteTemporary = true;
@@ -180,8 +231,10 @@ void TransferFileJob::step()
                 m_phase = Phase::Close;
                 return;
             }
-            if (!m_backend.write(m_handle, data).succeeded()) {
-                fail(QStringLiteral("Remote write failed."));
+            const TransferBackendResult result = m_backend.write(m_handle, data);
+            if (!result.succeeded()) {
+                fail(backendFailure(QStringLiteral("Unable to write remote temporary file"),
+                                    m_remoteTemporary, result));
                 return;
             }
             m_progress.transferredBytes += static_cast<quint64>(data.size());
@@ -204,8 +257,10 @@ void TransferFileJob::step()
             return;
         }
         if (m_phase == Phase::OpenRemote) {
-            if (!m_backend.openRead(m_request.source, m_handle).succeeded()) {
-                fail(QStringLiteral("Unable to open download."));
+            const TransferBackendResult result = m_backend.openRead(m_request.source, m_handle);
+            if (!result.succeeded()) {
+                fail(backendFailure(QStringLiteral("Unable to open remote source"),
+                                    m_request.source, result));
                 return;
             }
             m_progress.state = TransferState::Transferring;
@@ -217,7 +272,8 @@ void TransferFileJob::step()
             QByteArray data;
             const TransferBackendResult result = m_backend.read(m_handle, data, transferBlockSize);
             if (!result.succeeded()) {
-                fail(QStringLiteral("Remote read failed."));
+                fail(backendFailure(QStringLiteral("Unable to read remote source"),
+                                    m_request.source, result));
                 return;
             }
             if (data.isEmpty()) {
@@ -240,7 +296,11 @@ void TransferFileJob::step()
             const TransferBackendResult result = m_backend.close(m_handle);
             m_handle = 0;
             if (!result.succeeded()) {
-                fail(QStringLiteral("Unable to close the remote file."));
+                fail(backendFailure(QStringLiteral("Unable to close remote file"),
+                                    m_request.direction == TransferDirection::Upload
+                                        ? m_remoteTemporary
+                                        : m_request.source,
+                                    result));
                 return;
             }
         }
@@ -253,8 +313,10 @@ void TransferFileJob::step()
     }
     if (m_phase == Phase::Finalize) {
         bool promoted = false;
+        TransferBackendResult remotePromotion;
         if (m_request.direction == TransferDirection::Upload) {
-            promoted = m_backend.rename(m_remoteTemporary, m_request.destination).succeeded();
+            remotePromotion = m_backend.rename(m_remoteTemporary, m_request.destination);
+            promoted = remotePromotion.succeeded();
             if (promoted) {
                 m_ownsRemoteTemporary = false;
             }
@@ -262,7 +324,11 @@ void TransferFileJob::step()
             promoted = QFile::rename(m_temporary->fileName(), m_request.destination);
         }
         if (!promoted) {
-            fail(QStringLiteral("Unable to promote the temporary file."));
+            fail(m_request.direction == TransferDirection::Upload
+                     ? backendFailure(QStringLiteral("Unable to promote remote temporary file"),
+                                      m_request.destination, remotePromotion)
+                     : QStringLiteral("Unable to promote local temporary file: %1")
+                           .arg(m_request.destination));
             return;
         }
         updateSpeed();

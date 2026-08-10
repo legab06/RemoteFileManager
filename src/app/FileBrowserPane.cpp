@@ -417,7 +417,8 @@ void FileBrowserPane::requestRefresh()
 void FileBrowserPane::openEntry(int row)
 {
     const QTableWidgetItem* const item = m_fileTable->item(row, 0);
-    if (item == nullptr || !item->data(Qt::UserRole).toBool()) {
+    if (item == nullptr || (!item->data(Qt::UserRole).toBool() &&
+                            !item->data(Qt::UserRole + 1).toBool())) {
         return;
     }
     navigateTo(rfm::core::RemotePath::join(m_currentPath, item->text()));

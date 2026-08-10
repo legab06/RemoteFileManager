@@ -1,5 +1,6 @@
 #pragma once
 
+#include "remotefilemanager/core/LocalDownloadPath.hpp"
 #include "remotefilemanager/core/RemoteTransferBackend.hpp"
 #include "remotefilemanager/core/TransferFileJob.hpp"
 #include "remotefilemanager/core/TransferJob.hpp"
@@ -16,7 +17,8 @@ namespace rfm::core
 class TransferDirectoryJob final : public TransferJob
 {
   public:
-    TransferDirectoryJob(RemoteTransferBackend& backend, TransferRequest request);
+    TransferDirectoryJob(RemoteTransferBackend& backend, TransferRequest request,
+                         LocalPathFlavor localPathFlavor = LocalPathFlavor::Native);
 
     void step() override;
     [[nodiscard]] bool requestPause() override;
@@ -80,6 +82,8 @@ class TransferDirectoryJob final : public TransferJob
     qsizetype m_directoryIndex{0};
     qsizetype m_fileIndex{0};
     quint64 m_completedBytes{0};
+    QString m_localDestinationRoot;
+    LocalPathFlavor m_localPathFlavor{LocalPathFlavor::Native};
     std::unique_ptr<TransferFileJob> m_child;
 };
 

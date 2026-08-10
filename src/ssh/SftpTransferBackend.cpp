@@ -5,6 +5,38 @@ namespace rfm::ssh
 {
 namespace
 {
+rfm::core::TransferNodeType nodeType(const sftp_attributes attributes)
+{
+    switch (attributes->type) {
+    case SSH_FILEXFER_TYPE_REGULAR:
+        return rfm::core::TransferNodeType::RegularFile;
+    case SSH_FILEXFER_TYPE_DIRECTORY:
+        return rfm::core::TransferNodeType::Directory;
+    case SSH_FILEXFER_TYPE_SYMLINK:
+        return rfm::core::TransferNodeType::SymbolicLink;
+    default:
+        break;
+    }
+    switch (attributes->permissions & SSH_S_IFMT) {
+    case SSH_S_IFIFO:
+        return rfm::core::TransferNodeType::Fifo;
+    case SSH_S_IFSOCK:
+        return rfm::core::TransferNodeType::Socket;
+    case SSH_S_IFCHR:
+        return rfm::core::TransferNodeType::CharacterDevice;
+    case SSH_S_IFBLK:
+        return rfm::core::TransferNodeType::BlockDevice;
+    case SSH_S_IFREG:
+        return rfm::core::TransferNodeType::RegularFile;
+    case SSH_S_IFDIR:
+        return rfm::core::TransferNodeType::Directory;
+    case SSH_S_IFLNK:
+        return rfm::core::TransferNodeType::SymbolicLink;
+    default:
+        return rfm::core::TransferNodeType::Other;
+    }
+}
+
 rfm::core::TransferBackendError map(int e)
 {
     if (e == SSH_FX_NO_SUCH_FILE || e == SSH_FX_NO_SUCH_PATH)
@@ -13,6 +45,10 @@ rfm::core::TransferBackendError map(int e)
         return rfm::core::TransferBackendError::AlreadyExists;
     if (e == SSH_FX_PERMISSION_DENIED)
         return rfm::core::TransferBackendError::PermissionDenied;
+    if (e == SSH_FX_NO_CONNECTION || e == SSH_FX_CONNECTION_LOST)
+        return rfm::core::TransferBackendError::ConnectionLost;
+    if (e == SSH_FX_OP_UNSUPPORTED)
+        return rfm::core::TransferBackendError::Unsupported;
     return rfm::core::TransferBackendError::Io;
 }
 } // namespace
@@ -33,8 +69,8 @@ rfm::core::TransferStatResult SftpTransferBackend::stat(const QString& p)
     auto a = sftp_lstat(m_session, p.toUtf8().constData());
     if (!a)
         return {result(), {}};
-    rfm::core::TransferNodeInfo n{true, a->type == SSH_FILEXFER_TYPE_DIRECTORY,
-                                  a->type == SSH_FILEXFER_TYPE_SYMLINK, a->size};
+    const rfm::core::TransferNodeType type = nodeType(a);
+    rfm::core::TransferNodeInfo n{true, type, a->size};
     sftp_attributes_free(a);
     return {{}, n};
 }
@@ -127,10 +163,9 @@ SftpTransferBackend::readDirectory(quint64 id,
         entry.reset();
         return sftp_dir_eof(directory) != 0 ? rfm::core::TransferBackendResult{} : result();
     }
+    const rfm::core::TransferNodeType type = nodeType(attributes);
     entry = rfm::core::TransferDirectoryEntry{
-        QString::fromUtf8(attributes->name),
-        {true, attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
-         attributes->type == SSH_FILEXFER_TYPE_SYMLINK, attributes->size}};
+        QString::fromUtf8(attributes->name), {true, type, attributes->size}};
     sftp_attributes_free(attributes);
     return {};
 }
