@@ -1,0 +1,347 @@
+#include "remotefilemanager/app/FileBrowserPane.hpp"
+#include "remotefilemanager/app/PaneWorkspace.hpp"
+
+#include <QItemSelectionModel>
+#include <QLineEdit>
+#include <QLocale>
+#include <QScrollBar>
+#include <QSignalSpy>
+#include <QTableWidget>
+#include <QTest>
+
+class FileBrowserPaneTest final : public QObject
+{
+    Q_OBJECT
+
+  private slots:
+    void displaysDirectoryAndBuildsRemoteSelection();
+    void emitsNavigationIntentions();
+    void preparesContextSelectionBeforeEmittingIntent();
+    void restoresSelectionAndScrollOnRefresh();
+    void appliesPendingSelectionAfterOperation();
+    void workspaceStartsSingleAndTogglesSplit();
+    void workspaceTracksActivePaneFromInteraction();
+    void workspaceKeepsPanePathsAndSelectionsIndependent();
+    void navigationHistorySupportsBackForwardAndBranching();
+    void parentAndRefreshHaveCorrectHistorySemantics();
+    void workspaceHistoriesAreIndependent();
+};
+
+void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
+{
+    rfm::app::FileBrowserPane pane;
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("file.txt"), 1536, {}, false, false},
+        {QStringLiteral("folder"), 0, {}, true, false},
+    };
+    pane.showDirectory(QStringLiteral("/srv"),
+                       QStringLiteral("sftp://user@example.test:22//srv"), entries);
+
+    QCOMPARE(pane.currentPath(), QStringLiteral("/srv"));
+    QCOMPARE(pane.pathEdit()->text(), QStringLiteral("sftp://user@example.test:22//srv"));
+    QCOMPARE(pane.fileTable()->rowCount(), 2);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("file.txt"));
+    QCOMPARE(pane.fileTable()->item(0, 1)->text(), QLocale{}.formattedDataSize(1536));
+    QCOMPARE(pane.fileTable()->selectionMode(), QAbstractItemView::ExtendedSelection);
+
+    pane.fileTable()->selectionModel()->select(
+        pane.fileTable()->model()->index(0, 0),
+        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    pane.fileTable()->selectionModel()->select(
+        pane.fileTable()->model()->index(1, 0),
+        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    const auto selection = pane.selectedEntries();
+    QCOMPARE(selection.size(), 2);
+    QCOMPARE(selection.at(0).path, QStringLiteral("/srv/file.txt"));
+    QVERIFY(!selection.at(0).directory);
+    QCOMPARE(selection.at(1).path, QStringLiteral("/srv/folder"));
+    QVERIFY(selection.at(1).directory);
+}
+
+void FileBrowserPaneTest::emitsNavigationIntentions()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    pane.showDirectory(
+        QStringLiteral("/srv/current"), QStringLiteral("sftp://host/srv/current"),
+        {{QStringLiteral("child"), 0, {}, true, false},
+         {QStringLiteral("file.txt"), 1, {}, false, false}});
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
+
+    pane.requestParentDirectory();
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/srv"));
+
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/srv/current/child"));
+
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 1), Q_ARG(int, 0)));
+    QCOMPARE(navigation.size(), 0);
+}
+
+void FileBrowserPaneTest::preparesContextSelectionBeforeEmittingIntent()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    pane.showDirectory(
+        QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+        {{QStringLiteral("first.txt"), 1, {}, false, false},
+         {QStringLiteral("second.txt"), 1, {}, false, false}});
+    pane.fileTable()->selectRow(0);
+    QSignalSpy contextMenus(&pane, &rfm::app::FileBrowserPane::contextMenuRequested);
+    const QPoint secondRow = pane.fileTable()->visualItemRect(pane.fileTable()->item(1, 0)).center();
+
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "customContextMenuRequested",
+                                      Qt::DirectConnection, Q_ARG(QPoint, secondRow)));
+
+    QCOMPARE(contextMenus.size(), 1);
+    const auto selection = pane.selectedEntries();
+    QCOMPARE(selection.size(), 1);
+    QCOMPARE(selection.constFirst().path, QStringLiteral("/srv/second.txt"));
+}
+
+void FileBrowserPaneTest::restoresSelectionAndScrollOnRefresh()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 180);
+    pane.show();
+    QList<rfm::core::RemoteEntry> entries;
+    for (int index = 0; index < 80; ++index) {
+        entries.push_back({QStringLiteral("file-%1.txt").arg(index, 2, 10, QChar{'0'}),
+                           static_cast<quint64>(index), {}, false, false});
+    }
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"), entries);
+    pane.fileTable()->selectionModel()->select(
+        pane.fileTable()->model()->index(40, 0),
+        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    pane.fileTable()->verticalScrollBar()->setValue(25);
+    const int scrollPosition = pane.fileTable()->verticalScrollBar()->value();
+
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"), entries);
+
+    const QModelIndexList selected = pane.fileTable()->selectionModel()->selectedRows(0);
+    QCOMPARE(selected.size(), 1);
+    QCOMPARE(pane.fileTable()->item(selected.constFirst().row(), 0)->text(),
+             QStringLiteral("file-40.txt"));
+    QCOMPARE(pane.fileTable()->verticalScrollBar()->value(), scrollPosition);
+}
+
+void FileBrowserPaneTest::appliesPendingSelectionAfterOperation()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"), {});
+    pane.setPendingSelectionNames({QStringLiteral("created.txt")});
+    pane.showDirectory(
+        QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+        {{QStringLiteral("created.txt"), 10, {}, false, false},
+         {QStringLiteral("other.txt"), 10, {}, false, false}});
+
+    const QModelIndexList selected = pane.fileTable()->selectionModel()->selectedRows(0);
+    QCOMPARE(selected.size(), 1);
+    QCOMPARE(pane.fileTable()->item(selected.constFirst().row(), 0)->text(),
+             QStringLiteral("created.txt"));
+}
+
+void FileBrowserPaneTest::workspaceStartsSingleAndTogglesSplit()
+{
+    rfm::app::PaneWorkspace workspace;
+    QCOMPARE(workspace.visiblePaneIds().size(), 1);
+    QVERIFY(!workspace.isSplit());
+    QCOMPARE(workspace.activePane(), workspace.primaryPane());
+    const quint64 primaryId = workspace.paneId(workspace.primaryPane());
+    QVERIFY(primaryId != 0);
+
+    QSignalSpy visibility(&workspace, &rfm::app::PaneWorkspace::paneVisibilityChanged);
+    workspace.setSplit(true);
+    QCOMPARE(workspace.visiblePaneIds().size(), 2);
+    QVERIFY(workspace.isSplit());
+    QVERIFY(workspace.otherVisiblePane() != nullptr);
+    const quint64 secondaryId = workspace.paneId(workspace.otherVisiblePane());
+    QVERIFY(secondaryId != 0);
+    QVERIFY(secondaryId != primaryId);
+
+    workspace.setSplit(false);
+    QCOMPARE(workspace.visiblePaneIds().size(), 1);
+    QVERIFY(!workspace.isSplit());
+    QCOMPARE(workspace.activePane(), workspace.primaryPane());
+    QVERIFY(!workspace.primaryPane()->isHidden());
+    QVERIFY(workspace.pane(secondaryId)->isHidden());
+    QCOMPARE(workspace.primaryPane(), workspace.pane(primaryId));
+    QCOMPARE(visibility.size(), 2);
+
+    workspace.setSplit(true);
+    QCOMPARE(workspace.paneId(workspace.otherVisiblePane()), secondaryId);
+    QCOMPARE(workspace.visiblePaneIds().size(), 2);
+    QCOMPARE(workspace.paneId(workspace.primaryPane()), primaryId);
+}
+
+void FileBrowserPaneTest::workspaceTracksActivePaneFromInteraction()
+{
+    rfm::app::PaneWorkspace workspace;
+    workspace.resize(900, 400);
+    workspace.setSplit(true);
+    workspace.show();
+    rfm::app::FileBrowserPane* const secondary = workspace.otherVisiblePane();
+    rfm::app::FileBrowserPane* const primary = workspace.primaryPane();
+    const quint64 primaryId = workspace.paneId(primary);
+    const quint64 secondaryId = workspace.paneId(secondary);
+    const QColor normalWindow = workspace.palette().color(QPalette::Window);
+    primary->showDirectory(QStringLiteral("/one"), QStringLiteral("/one"), {},
+                           rfm::app::PaneNavigation::Initial);
+    primary->showDirectory(
+        QStringLiteral("/one/child"), QStringLiteral("/one/child"),
+        {{QStringLiteral("kept.txt"), 1, {}, false, false}},
+        rfm::app::PaneNavigation::Normal);
+    primary->fileTable()->selectRow(0);
+    QSignalSpy activeChanges(&workspace, &rfm::app::PaneWorkspace::activePaneChanged);
+
+    QTest::mouseClick(secondary->fileTable()->viewport(), Qt::LeftButton);
+
+    QCOMPARE(workspace.activePane(), secondary);
+    QCOMPARE(activeChanges.size(), 1);
+    QCOMPARE(workspace.otherVisiblePane(secondaryId), primary);
+    QCOMPARE(workspace.otherVisiblePane(primaryId), secondary);
+    QVERIFY(secondary->property("activePane").toBool());
+    QVERIFY(!primary->property("activePane").toBool());
+    QVERIFY(secondary->styleSheet().contains(QStringLiteral("palette(highlight)")));
+    QVERIFY(secondary->palette().color(QPalette::Window) != normalWindow);
+    QCOMPARE(primary->palette().color(QPalette::Window), normalWindow);
+    QVERIFY(secondary->pathEdit()->palette().color(QPalette::Base) !=
+            primary->pathEdit()->palette().color(QPalette::Base));
+
+    workspace.setSplit(false);
+    QCOMPARE(workspace.activePane(), secondary);
+    QVERIFY(!secondary->isHidden());
+    QVERIFY(primary->isHidden());
+    QCOMPARE(workspace.visiblePaneIds(), QList<quint64>{secondaryId});
+    QCOMPARE(primary->currentPath(), QStringLiteral("/one/child"));
+    QCOMPARE(primary->selectedEntries().size(), 1);
+    QVERIFY(primary->canGoBack());
+
+    workspace.setSplit(true);
+    QCOMPARE(workspace.activePane(), secondary);
+    QCOMPARE(workspace.visiblePaneIds().size(), 2);
+    QCOMPARE(workspace.paneId(primary), primaryId);
+    QCOMPARE(workspace.paneId(secondary), secondaryId);
+    QCOMPARE(primary->currentPath(), QStringLiteral("/one/child"));
+    QCOMPARE(primary->selectedEntries().size(), 1);
+    QVERIFY(primary->canGoBack());
+
+    QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
+    QCOMPARE(workspace.activePane(), primary);
+    QVERIFY(primary->property("activePane").toBool());
+    QVERIFY(!secondary->property("activePane").toBool());
+    QVERIFY(primary->palette().color(QPalette::Window) != normalWindow);
+    QCOMPARE(secondary->palette().color(QPalette::Window), normalWindow);
+    QVERIFY(primary->pathEdit()->palette().color(QPalette::Base) !=
+            secondary->pathEdit()->palette().color(QPalette::Base));
+}
+
+void FileBrowserPaneTest::workspaceKeepsPanePathsAndSelectionsIndependent()
+{
+    rfm::app::PaneWorkspace workspace;
+    workspace.setSplit(true);
+    rfm::app::FileBrowserPane* const primary = workspace.primaryPane();
+    rfm::app::FileBrowserPane* const secondary = workspace.otherVisiblePane();
+    primary->showDirectory(
+        QStringLiteral("/one"), QStringLiteral("sftp://host/one"),
+        {{QStringLiteral("first.txt"), 1, {}, false, false}});
+    secondary->showDirectory(
+        QStringLiteral("/two"), QStringLiteral("sftp://host/two"),
+        {{QStringLiteral("second.txt"), 1, {}, false, false}});
+    primary->fileTable()->selectRow(0);
+
+    QCOMPARE(primary->currentPath(), QStringLiteral("/one"));
+    QCOMPARE(secondary->currentPath(), QStringLiteral("/two"));
+    QCOMPARE(primary->selectedEntries().size(), 1);
+    QCOMPARE(secondary->selectedEntries().size(), 0);
+}
+
+void FileBrowserPaneTest::navigationHistorySupportsBackForwardAndBranching()
+{
+    rfm::app::FileBrowserPane pane;
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
+    pane.showDirectory(QStringLiteral("/a"), QStringLiteral("/a"), {},
+                       rfm::app::PaneNavigation::Initial);
+    pane.navigateTo(QStringLiteral("/b"));
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/b"));
+    pane.showDirectory(QStringLiteral("/b"), QStringLiteral("/b"), {},
+                       rfm::app::PaneNavigation::Normal);
+    pane.navigateTo(QStringLiteral("/c"));
+    pane.showDirectory(QStringLiteral("/c"), QStringLiteral("/c"), {},
+                       rfm::app::PaneNavigation::Normal);
+    QVERIFY(pane.canGoBack());
+    QVERIFY(!pane.canGoForward());
+
+    navigation.clear();
+    pane.requestBack();
+    QCOMPARE(navigation.constFirst().constFirst().toString(), QStringLiteral("/b"));
+    pane.showDirectory(QStringLiteral("/b"), QStringLiteral("/b"), {},
+                       rfm::app::PaneNavigation::Back);
+    QVERIFY(pane.canGoForward());
+    pane.requestForward();
+    QCOMPARE(navigation.constLast().constFirst().toString(), QStringLiteral("/c"));
+    pane.showDirectory(QStringLiteral("/c"), QStringLiteral("/c"), {},
+                       rfm::app::PaneNavigation::Forward);
+
+    pane.requestBack();
+    pane.showDirectory(QStringLiteral("/b"), QStringLiteral("/b"), {},
+                       rfm::app::PaneNavigation::Back);
+    pane.navigateTo(QStringLiteral("/d"));
+    pane.showDirectory(QStringLiteral("/d"), QStringLiteral("/d"), {},
+                       rfm::app::PaneNavigation::Normal);
+    QVERIFY(!pane.canGoForward());
+}
+
+void FileBrowserPaneTest::parentAndRefreshHaveCorrectHistorySemantics()
+{
+    rfm::app::FileBrowserPane pane;
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
+    pane.showDirectory(QStringLiteral("/one/two"), QStringLiteral("/one/two"), {},
+                       rfm::app::PaneNavigation::Initial);
+    pane.requestParentDirectory();
+    QCOMPARE(navigation.constFirst().constFirst().toString(), QStringLiteral("/one"));
+    pane.showDirectory(QStringLiteral("/one"), QStringLiteral("/one"), {},
+                       rfm::app::PaneNavigation::Normal);
+    QVERIFY(pane.canGoBack());
+
+    navigation.clear();
+    pane.requestRefresh();
+    QCOMPARE(navigation.size(), 1);
+    pane.showDirectory(QStringLiteral("/one"), QStringLiteral("/one"), {},
+                       rfm::app::PaneNavigation::Refresh);
+    pane.requestBack();
+    QCOMPARE(navigation.constLast().constFirst().toString(), QStringLiteral("/one/two"));
+
+    const qsizetype beforeFailedNavigation = navigation.size();
+    pane.navigateTo(QStringLiteral("/missing"));
+    QCOMPARE(navigation.size(), beforeFailedNavigation + 1);
+    pane.requestBack();
+    QCOMPARE(navigation.constLast().constFirst().toString(), QStringLiteral("/one/two"));
+}
+
+void FileBrowserPaneTest::workspaceHistoriesAreIndependent()
+{
+    rfm::app::PaneWorkspace workspace;
+    workspace.setSplit(true);
+    auto* const primary = workspace.primaryPane();
+    auto* const secondary = workspace.otherVisiblePane();
+    primary->showDirectory(QStringLiteral("/a"), QStringLiteral("/a"), {},
+                           rfm::app::PaneNavigation::Initial);
+    secondary->showDirectory(QStringLiteral("/x"), QStringLiteral("/x"), {},
+                             rfm::app::PaneNavigation::Initial);
+    primary->showDirectory(QStringLiteral("/b"), QStringLiteral("/b"), {},
+                           rfm::app::PaneNavigation::Normal);
+
+    QVERIFY(primary->canGoBack());
+    QVERIFY(!secondary->canGoBack());
+}
+
+QTEST_MAIN(FileBrowserPaneTest)
+
+#include "test_file_browser_pane.moc"

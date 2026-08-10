@@ -1,6 +1,8 @@
 add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
+    core/OperationHistoryStore.cpp
+    core/OperationProgress.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp
     core/TransferDirectoryJob.cpp
@@ -27,11 +29,15 @@ add_library(
     rfm_ui STATIC
     app/MainWindow.cpp
     app/ConnectionDialog.cpp
-    app/TransferPanel.cpp
+    app/FileBrowserPane.cpp
+    app/PaneWorkspace.cpp
+    app/OperationPanel.cpp
     app/TransferRequestFactory.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/MainWindow.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ConnectionDialog.hpp
-    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferPanel.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/FileBrowserPane.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PaneWorkspace.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/OperationPanel.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferRequestFactory.hpp
 )
 add_library(RemoteFileManager::Ui ALIAS rfm_ui)

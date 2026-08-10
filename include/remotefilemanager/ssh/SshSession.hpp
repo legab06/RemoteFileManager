@@ -20,7 +20,7 @@ public:
 public slots:
     void connectToHost(rfm::core::ConnectionProfile profile, QString password);
     void confirmUnknownHost(bool accepted);
-    void listDirectory(QString path);
+    void listDirectory(quint64 requestId, QString path);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
     void moveEntries(quint64 id,
@@ -40,7 +40,9 @@ public slots:
 signals:
     void hostKeyConfirmationRequired(QString host, QString fingerprint);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
-    void directoryListed(QString path, QList<rfm::core::RemoteEntry> entries);
+    void directoryListed(quint64 requestId, QString path,
+                         QList<rfm::core::RemoteEntry> entries);
+    void directoryListingFailed(quint64 requestId, QString path, QString error);
     void operationFinished(rfm::core::RemoteOperationResult result);
     void transferUpdated(rfm::core::TransferProgress progress);
     void transferRejected(quint64 id, QString error);
