@@ -2,11 +2,11 @@
 
 RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche de Dolphin sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
 
-> État actuel : **Sprint 5 — manipulation directe et ergonomie clavier,
-> version 0.6.0**. La navigation scindée accepte désormais le Drag & Drop distant
-> interne, un clipboard Copy/Cut/Paste et les principaux raccourcis d’un
-> gestionnaire de fichiers. Le DnD depuis ou vers une application externe reste
-> explicitement hors périmètre.
+> État actuel : **Sprint 6 — profils de serveurs et connexion rapide,
+> version 0.7.0**. Plusieurs serveurs SSH peuvent être enregistrés localement,
+> modifiés, supprimés et ouverts depuis le dock Places. Le dialogue de connexion
+> reste visible pendant SSH et permet de corriger puis relancer immédiatement une
+> tentative échouée.
 
 ## Principes
 
@@ -72,7 +72,7 @@ docs/                        architecture, sécurité et sprints
 
 Les choix structurants sont détaillés dans
 [l’ADR de la stack](docs/adr/0001-technical-stack.md), et les livrables de la
-version 0.6.0 dans [docs/sprint-5.md](docs/sprint-5.md).
+version 0.7.0 dans [docs/sprint-6.md](docs/sprint-6.md).
 
 ## Licence
 

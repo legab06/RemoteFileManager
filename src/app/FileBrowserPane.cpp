@@ -291,6 +291,22 @@ void FileBrowserPane::showDirectory(const QString& path, const QString& displayP
     emit historyChanged();
 }
 
+void FileBrowserPane::clear()
+{
+    m_currentPath.clear();
+    m_pendingSelectionNames.clear();
+    m_backHistory.clear();
+    m_forwardHistory.clear();
+    m_pathEdit->clear();
+    m_fileTable->clearContents();
+    m_fileTable->setRowCount(0);
+    clearTransferContext();
+    setCutPaths({});
+    updateDropAppearance(false, false);
+    setInteractionEnabled(false);
+    emit historyChanged();
+}
+
 void FileBrowserPane::setPendingSelectionNames(QStringList names)
 {
     m_pendingSelectionNames = std::move(names);

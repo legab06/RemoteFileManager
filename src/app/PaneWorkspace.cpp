@@ -75,6 +75,13 @@ QList<PaneWorkspace::PaneId> PaneWorkspace::paneIds() const { return m_panes.key
 
 bool PaneWorkspace::isSplit() const { return m_split; }
 
+void PaneWorkspace::clear()
+{
+    for (FileBrowserPane* const pane : m_panes) {
+        pane->clear();
+    }
+}
+
 void PaneWorkspace::setSplit(bool enabled)
 {
     if (enabled == isSplit()) {

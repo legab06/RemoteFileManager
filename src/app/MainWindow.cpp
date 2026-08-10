@@ -2,11 +2,14 @@
 
 #include "remotefilemanager/app/ConnectionDialog.hpp"
 #include "remotefilemanager/app/FileBrowserPane.hpp"
+#include "remotefilemanager/app/HomePage.hpp"
 #include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
+#include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
+#include "remotefilemanager/core/ServerProfileStore.hpp"
 #include "remotefilemanager/ssh/LibsshRuntime.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
@@ -21,6 +24,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
+#include <QHBoxLayout>
 #include <QIcon>
 #include <QInputDialog>
 #include <QKeySequence>
@@ -32,6 +36,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStatusBar>
+#include <QStackedWidget>
 #include <QStyle>
 #include <QTableWidget>
 #include <QThread>
@@ -74,6 +79,16 @@ bool pathsUseSameConvention(const QString& first, const QString& second)
     return first.startsWith(QChar{'/'}) == second.startsWith(QChar{'/'});
 }
 
+bool profilesReferToSameServer(const rfm::core::ConnectionProfile& first,
+                               const rfm::core::ConnectionProfile& second)
+{
+    if (!first.id.trimmed().isEmpty() && first.id == second.id) {
+        return true;
+    }
+    return first.host.trimmed().compare(second.host.trimmed(), Qt::CaseInsensitive) == 0 &&
+           first.username.trimmed() == second.username.trimmed() && first.port == second.port;
+}
+
 class UploadSelectionDialog final : public QFileDialog
 {
   public:
@@ -111,10 +126,13 @@ class UploadSelectionDialog final : public QFileDialog
 
 } // namespace
 
-MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
+MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
+                       QString serverProfileDirectory)
     : QMainWindow(parent),
       m_operationHistoryStore(std::make_unique<rfm::core::OperationHistoryStore>(
-          std::move(operationHistoryDirectory)))
+          std::move(operationHistoryDirectory))),
+      m_serverProfileStore(std::make_unique<rfm::core::ServerProfileStore>(
+          std::move(serverProfileDirectory)))
 {
     setObjectName(QStringLiteral("mainWindow"));
     m_applicationInstanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -127,9 +145,9 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
     createActions();
     createMenus();
     createNavigationBar();
+    createCentralPages();
     createPlacesDock();
     createOperationDock();
-    createEmptyState();
 
     m_historySaveTimer = new QTimer(this);
     m_historySaveTimer->setObjectName(QStringLiteral("operationHistorySaveTimer"));
@@ -200,12 +218,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
             &rfm::ssh::SshSession::disconnectFromHost);
     connect(m_sshSession, &rfm::ssh::SshSession::hostKeyConfirmationRequired, this,
             &MainWindow::showHostKeyConfirmation);
-    connect(m_sshSession, &rfm::ssh::SshSession::connected, this,
-            [this](const QString& path, const QList<rfm::core::RemoteEntry>& entries) {
-                m_connected = true;
-                showRemoteDirectory(path, entries);
-                statusBar()->showMessage(tr("Connected securely to %1").arg(m_activeProfile.host));
-            });
+    connect(m_sshSession, &rfm::ssh::SshSession::connected, this, &MainWindow::handleConnected);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListed, this,
             &MainWindow::handleDirectoryListed);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListingFailed, this,
@@ -257,6 +270,12 @@ void MainWindow::createActions()
     m_newConnectionAction->setObjectName(QStringLiteral("newConnectionAction"));
     m_newConnectionAction->setShortcut(QKeySequence::New);
     connect(m_newConnectionAction, &QAction::triggered, this, &MainWindow::showConnectionDialog);
+
+    m_disconnectAction =
+        new QAction(style()->standardIcon(QStyle::SP_DialogCloseButton), tr("Disconnect"), this);
+    m_disconnectAction->setObjectName(QStringLiteral("disconnectAction"));
+    m_disconnectAction->setEnabled(false);
+    connect(m_disconnectAction, &QAction::triggered, this, &MainWindow::requestDisconnection);
 
     m_quitAction = new QAction(tr("Quit"), this);
     m_quitAction->setShortcut(QKeySequence::Quit);
@@ -349,6 +368,7 @@ void MainWindow::createMenus()
 {
     QMenu* const fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(m_newConnectionAction);
+    fileMenu->addAction(m_disconnectAction);
     fileMenu->addSeparator();
     fileMenu->addAction(m_createDirectoryAction);
     fileMenu->addAction(m_renameAction);
@@ -387,11 +407,12 @@ void MainWindow::createPaneWorkspace()
         updateOperationActions();
         const FileBrowserPane* const pane = m_paneWorkspace->activePane();
         const quint64 paneId = m_paneWorkspace->paneId(pane);
-        m_upAction->setEnabled(!m_busy && !m_busyPanes.contains(paneId) &&
+        m_upAction->setEnabled(m_connected && !m_busy && !m_busyPanes.contains(paneId) &&
                                pane->currentPath() != QStringLiteral("."));
         m_refreshAction->setEnabled(m_connected && !m_busy && !m_busyPanes.contains(paneId));
-        m_backAction->setEnabled(!m_busy && !m_busyPanes.contains(paneId) && pane->canGoBack());
-        m_forwardAction->setEnabled(!m_busy && !m_busyPanes.contains(paneId) &&
+        m_backAction->setEnabled(m_connected && !m_busy && !m_busyPanes.contains(paneId) &&
+                                 pane->canGoBack());
+        m_forwardAction->setEnabled(m_connected && !m_busy && !m_busyPanes.contains(paneId) &&
                                     pane->canGoForward());
     });
     connect(m_paneWorkspace, &PaneWorkspace::paneVisibilityChanged, this,
@@ -433,9 +454,10 @@ void MainWindow::connectBrowserPane(quint64 paneId)
             });
     connect(pane, &FileBrowserPane::historyChanged, this, [this, paneId, pane] {
         if (pane == m_paneWorkspace->activePane()) {
-            m_backAction->setEnabled(!m_busy && !m_busyPanes.contains(paneId) &&
+            m_backAction->setEnabled(m_connected && !m_busy && !m_busyPanes.contains(paneId) &&
                                      pane->canGoBack());
-            m_forwardAction->setEnabled(!m_busy && !m_busyPanes.contains(paneId) &&
+            m_forwardAction->setEnabled(m_connected && !m_busy &&
+                                        !m_busyPanes.contains(paneId) &&
                                         pane->canGoForward());
         }
     });
@@ -506,6 +528,7 @@ void MainWindow::createNavigationBar()
     navigationBar->addSeparator();
     navigationBar->addAction(m_splitViewAction);
     navigationBar->addAction(m_newConnectionAction);
+    navigationBar->addAction(m_disconnectAction);
 }
 
 void MainWindow::createPlacesDock()
@@ -514,14 +537,268 @@ void MainWindow::createPlacesDock()
     placesDock->setObjectName(QStringLiteral("placesDock"));
     placesDock->setAllowedAreas(Qt::LeftDockWidgetArea | Qt::RightDockWidgetArea);
 
-    auto* const placesList = new QListWidget(placesDock);
-    placesList->setObjectName(QStringLiteral("placesList"));
-    auto* const remoteItem = new QListWidgetItem(style()->standardIcon(QStyle::SP_ComputerIcon),
-                                                 tr("Remote server"), placesList);
-    remoteItem->setFlags(remoteItem->flags() & ~Qt::ItemIsEnabled);
+    auto* const container = new QWidget(placesDock);
+    auto* const layout = new QVBoxLayout(container);
+    layout->setContentsMargins(6, 6, 6, 6);
+    layout->setSpacing(6);
+    auto* const heading = new QLabel(tr("Servers"), container);
+    QFont headingFont = heading->font();
+    headingFont.setBold(true);
+    heading->setFont(headingFont);
+    layout->addWidget(heading);
 
-    placesDock->setWidget(placesList);
+    m_serverProfileErrorLabel = new QLabel(container);
+    m_serverProfileErrorLabel->setObjectName(QStringLiteral("serverProfileErrorLabel"));
+    m_serverProfileErrorLabel->setWordWrap(true);
+    m_serverProfileErrorLabel->setVisible(false);
+    layout->addWidget(m_serverProfileErrorLabel);
+
+    m_serverProfileList = new QListWidget(container);
+    m_serverProfileList->setObjectName(QStringLiteral("serverProfileList"));
+    m_serverProfileList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_serverProfileList->setContextMenuPolicy(Qt::CustomContextMenu);
+    layout->addWidget(m_serverProfileList);
+
+    auto* const buttonLayout = new QHBoxLayout;
+    m_connectServerProfileButton = new QPushButton(tr("Connect"), container);
+    m_connectServerProfileButton->setObjectName(QStringLiteral("connectServerProfileButton"));
+    auto* const addButton = new QPushButton(tr("Add…"), container);
+    addButton->setObjectName(QStringLiteral("addServerProfileButton"));
+    auto* const editButton = new QPushButton(tr("Edit…"), container);
+    editButton->setObjectName(QStringLiteral("editServerProfileButton"));
+    auto* const removeButton = new QPushButton(tr("Remove"), container);
+    removeButton->setObjectName(QStringLiteral("removeServerProfileButton"));
+    m_connectServerProfileButton->setEnabled(false);
+    editButton->setEnabled(false);
+    removeButton->setEnabled(false);
+    buttonLayout->addWidget(m_connectServerProfileButton);
+    buttonLayout->addWidget(addButton);
+    buttonLayout->addWidget(editButton);
+    buttonLayout->addWidget(removeButton);
+    layout->addLayout(buttonLayout);
+
+    connect(m_connectServerProfileButton, &QPushButton::clicked, this,
+            &MainWindow::connectToSelectedServerProfile);
+    connect(addButton, &QPushButton::clicked, this, &MainWindow::addServerProfile);
+    connect(editButton, &QPushButton::clicked, this, &MainWindow::editSelectedServerProfile);
+    connect(removeButton, &QPushButton::clicked, this, &MainWindow::removeSelectedServerProfile);
+    connect(m_serverProfileList, &QListWidget::itemSelectionChanged, this,
+            [this, editButton, removeButton] {
+                const bool selected = selectedServerProfile().isValidSavedProfile();
+                editButton->setEnabled(selected);
+                removeButton->setEnabled(selected);
+                updateSelectedServerAction();
+            });
+    connect(m_serverProfileList, &QListWidget::itemDoubleClicked, this,
+            [this](QListWidgetItem*) { connectToSelectedServerProfile(); });
+    connect(m_serverProfileList, &QWidget::customContextMenuRequested, this,
+            &MainWindow::showServerProfileContextMenu);
+
+    placesDock->setWidget(container);
     addDockWidget(Qt::LeftDockWidgetArea, placesDock);
+    loadServerProfiles();
+}
+
+void MainWindow::loadServerProfiles()
+{
+    QString error;
+    m_serverProfiles = m_serverProfileStore->load(&error);
+    refreshServerProfileViews();
+    m_serverProfileErrorLabel->setText(error);
+    m_serverProfileErrorLabel->setVisible(!error.isEmpty());
+    if (!error.isEmpty()) {
+        statusBar()->showMessage(tr("Unable to load server profiles: %1").arg(error), 10000);
+    }
+}
+
+void MainWindow::refreshServerProfileViews()
+{
+    if (m_homePage != nullptr) {
+        m_homePage->setProfiles(m_serverProfiles);
+    }
+    if (m_serverProfileList == nullptr) {
+        return;
+    }
+    const QString selectedId = selectedServerProfile().id;
+    m_serverProfileList->clear();
+    if (m_serverProfiles.isEmpty()) {
+        auto* const emptyItem = new QListWidgetItem(tr("No saved servers"), m_serverProfileList);
+        emptyItem->setFlags(emptyItem->flags() & ~Qt::ItemIsEnabled & ~Qt::ItemIsSelectable);
+        updateSelectedServerAction();
+        return;
+    }
+    for (const rfm::core::ConnectionProfile& profile : std::as_const(m_serverProfiles)) {
+        auto* const item = new QListWidgetItem(style()->standardIcon(QStyle::SP_ComputerIcon),
+                                               profile.effectiveDisplayName(),
+                                               m_serverProfileList);
+        item->setData(Qt::UserRole, profile.id);
+        item->setToolTip(tr("%1@%2:%3").arg(profile.username, profile.host,
+                                             QString::number(profile.port)));
+        if (m_connected && profilesReferToSameServer(profile, m_activeProfile)) {
+            item->setText(tr("%1 — Connected").arg(profile.effectiveDisplayName()));
+            item->setData(Qt::UserRole + 1, true);
+            QFont activeFont = item->font();
+            activeFont.setBold(true);
+            item->setFont(activeFont);
+        }
+        if (profile.id == selectedId) {
+            item->setSelected(true);
+        }
+    }
+    updateSelectedServerAction();
+}
+
+void MainWindow::updateSelectedServerAction()
+{
+    if (m_connectServerProfileButton == nullptr) {
+        return;
+    }
+    const rfm::core::ConnectionProfile selected = selectedServerProfile();
+    const bool valid = selected.isValidSavedProfile();
+    const bool active = valid && m_connected &&
+                        profilesReferToSameServer(selected, m_activeProfile);
+    m_connectServerProfileButton->setText(active ? tr("Disconnect") : tr("Connect"));
+    if (!valid) {
+        m_connectServerProfileButton->setEnabled(false);
+        m_connectServerProfileButton->setToolTip({});
+    } else if (active) {
+        m_connectServerProfileButton->setEnabled(m_disconnectAction->isEnabled());
+        m_connectServerProfileButton->setToolTip(tr("Disconnect from this server"));
+    } else if (m_connected) {
+        m_connectServerProfileButton->setEnabled(false);
+        m_connectServerProfileButton->setToolTip(
+            tr("Disconnect the active server before connecting to another one."));
+    } else {
+        m_connectServerProfileButton->setEnabled(m_newConnectionAction->isEnabled());
+        m_connectServerProfileButton->setToolTip(tr("Connect to this server"));
+    }
+}
+
+rfm::core::ConnectionProfile MainWindow::selectedServerProfile() const
+{
+    if (m_serverProfileList == nullptr || m_serverProfileList->selectedItems().isEmpty()) {
+        return {};
+    }
+    const QString id =
+        m_serverProfileList->selectedItems().constFirst()->data(Qt::UserRole).toString();
+    for (const rfm::core::ConnectionProfile& profile : m_serverProfiles) {
+        if (profile.id == id) {
+            return profile;
+        }
+    }
+    return {};
+}
+
+void MainWindow::addServerProfile()
+{
+    rfm::core::ConnectionProfile initial;
+    initial.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    ServerProfileDialog dialog(this);
+    dialog.setProfile(initial);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    QString error;
+    if (!m_serverProfileStore->upsert(dialog.profile(), &error)) {
+        QMessageBox::warning(this, tr("Unable to save server"), error);
+        return;
+    }
+    loadServerProfiles();
+}
+
+void MainWindow::editSelectedServerProfile()
+{
+    const rfm::core::ConnectionProfile selected = selectedServerProfile();
+    if (!selected.isValidSavedProfile()) {
+        return;
+    }
+    ServerProfileDialog dialog(this);
+    dialog.setProfile(selected);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    QString error;
+    if (!m_serverProfileStore->upsert(dialog.profile(), &error)) {
+        QMessageBox::warning(this, tr("Unable to save server"), error);
+        return;
+    }
+    loadServerProfiles();
+}
+
+void MainWindow::removeSelectedServerProfile()
+{
+    const rfm::core::ConnectionProfile selected = selectedServerProfile();
+    if (!selected.isValidSavedProfile()) {
+        return;
+    }
+    const auto answer = QMessageBox::question(
+        this, tr("Remove server"),
+        tr("Remove “%1” from saved servers?").arg(selected.effectiveDisplayName()),
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (answer != QMessageBox::Yes) {
+        return;
+    }
+    QString error;
+    if (!m_serverProfileStore->remove(selected.id, &error)) {
+        QMessageBox::warning(this, tr("Unable to remove server"), error);
+        return;
+    }
+    loadServerProfiles();
+}
+
+void MainWindow::connectToSelectedServerProfile()
+{
+    const rfm::core::ConnectionProfile selected = selectedServerProfile();
+    if (!selected.isValidSavedProfile()) {
+        return;
+    }
+    if (m_connected && profilesReferToSameServer(selected, m_activeProfile)) {
+        requestDisconnection();
+    } else if (!m_connected) {
+        connectToServerProfile(selected.id);
+    }
+}
+
+void MainWindow::connectToServerProfile(const QString& id)
+{
+    if (m_connected || !m_newConnectionAction->isEnabled()) {
+        return;
+    }
+    const auto profile = std::ranges::find_if(m_serverProfiles, [&id](const auto& candidate) {
+        return candidate.id == id;
+    });
+    if (profile != m_serverProfiles.cend()) {
+        showConnectionDialogForProfile(*profile);
+    }
+}
+
+void MainWindow::showServerProfileContextMenu(const QPoint& position)
+{
+    QListWidgetItem* const item = m_serverProfileList->itemAt(position);
+    if (item == nullptr) {
+        return;
+    }
+    const QString id = item->data(Qt::UserRole).toString();
+    const auto profile = std::ranges::find_if(m_serverProfiles, [&id](const auto& candidate) {
+        return candidate.id == id;
+    });
+    if (profile == m_serverProfiles.cend() || !m_connected ||
+        !profilesReferToSameServer(*profile, m_activeProfile)) {
+        return;
+    }
+    m_serverProfileList->setCurrentItem(item);
+    QMenu menu(m_serverProfileList);
+    menu.addAction(m_disconnectAction);
+    menu.exec(m_serverProfileList->viewport()->mapToGlobal(position));
+}
+
+void MainWindow::requestDisconnection()
+{
+    if (!m_disconnectAction->isEnabled()) {
+        return;
+    }
+    setBusy(true, tr("Disconnecting…"));
+    emit disconnectionRequested();
 }
 
 void MainWindow::createOperationDock()
@@ -545,54 +822,96 @@ void MainWindow::createOperationDock()
             &MainWindow::clearTerminalOperations);
 }
 
-void MainWindow::createEmptyState()
+void MainWindow::createCentralPages()
 {
-    auto* const emptyState = new QWidget(this);
-    emptyState->setObjectName(QStringLiteral("emptyState"));
+    m_centralStack = new QStackedWidget(this);
+    m_centralStack->setObjectName(QStringLiteral("centralStack"));
+    m_homePage = new HomePage(m_centralStack);
+    m_centralStack->addWidget(m_homePage);
+    m_centralStack->addWidget(m_paneWorkspace);
+    m_centralStack->setCurrentWidget(m_homePage);
+    setCentralWidget(m_centralStack);
 
-    auto* const layout = new QVBoxLayout(emptyState);
-    layout->setContentsMargins(48, 48, 48, 48);
-    layout->setSpacing(12);
-    layout->addStretch();
-
-    auto* const title = new QLabel(tr("No SSH connection"), emptyState);
-    QFont titleFont = title->font();
-    titleFont.setPointSize(titleFont.pointSize() + 4);
-    titleFont.setBold(true);
-    title->setFont(titleFont);
-    title->setAlignment(Qt::AlignCenter);
-
-    auto* const description = new QLabel(
-        tr("Connect to a standard SSH server to browse and manage its files."), emptyState);
-    description->setAlignment(Qt::AlignCenter);
-    description->setWordWrap(true);
-
-    auto* const connectionButton = new QPushButton(style()->standardIcon(QStyle::SP_ComputerIcon),
-                                                   tr("New connection…"), emptyState);
-    connectionButton->setObjectName(QStringLiteral("newConnectionButton"));
-    connectionButton->setDefault(true);
-
-    layout->addWidget(title);
-    layout->addWidget(description);
-    layout->addSpacing(8);
-    layout->addWidget(connectionButton, 0, Qt::AlignHCenter);
-    layout->addStretch();
-
-    connect(connectionButton, &QPushButton::clicked, this, &MainWindow::showConnectionDialog);
-    setCentralWidget(emptyState);
+    connect(m_homePage, &HomePage::connectProfileRequested, this,
+            &MainWindow::connectToServerProfile);
+    connect(m_homePage, &HomePage::newConnectionRequested, m_newConnectionAction,
+            &QAction::trigger);
+    m_homePage->setProfiles(m_serverProfiles);
 }
 
 void MainWindow::showConnectionDialog()
 {
-    ConnectionDialog dialog(this);
-    if (dialog.exec() != QDialog::Accepted) {
+    showConnectionDialogForProfile({});
+}
+
+void MainWindow::showConnectionDialogForProfile(
+    const rfm::core::ConnectionProfile& profile)
+{
+    if (m_connectionDialog != nullptr) {
+        m_connectionDialog->raise();
+        m_connectionDialog->activateWindow();
         return;
     }
+
+    auto* const dialog = new ConnectionDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setProfile(profile);
+    m_connectionDialog = dialog;
+    connect(dialog, &ConnectionDialog::connectionRequested, this, &MainWindow::beginConnection);
+    dialog->open();
+}
+
+void MainWindow::beginConnection(const rfm::core::ConnectionProfile& profile,
+                                 const QString& password)
+{
     clearInternalClipboard();
     updatePaneTransferContexts();
-    m_activeProfile = dialog.profile();
+    stopAutomaticRefresh();
+    m_activeProfile = profile;
     setBusy(true, tr("Connecting securely to %1…").arg(m_activeProfile.host));
-    emit connectionRequested(m_activeProfile, dialog.password());
+    emit connectionRequested(m_activeProfile, password);
+}
+
+QString MainWindow::saveConnectedProfileIfRequested()
+{
+    if (m_connectionDialog == nullptr || !m_connectionDialog->saveServerRequested() ||
+        !m_activeProfile.id.trimmed().isEmpty()) {
+        return {};
+    }
+    for (const rfm::core::ConnectionProfile& existing : std::as_const(m_serverProfiles)) {
+        if (profilesReferToSameServer(existing, m_activeProfile)) {
+            m_activeProfile.id = existing.id;
+            m_activeProfile.displayName = existing.displayName;
+            return {};
+        }
+    }
+
+    rfm::core::ConnectionProfile profile = m_activeProfile;
+    profile.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QString error;
+    if (!m_serverProfileStore->upsert(profile, &error)) {
+        return error;
+    }
+    m_activeProfile = profile;
+    loadServerProfiles();
+    return {};
+}
+
+void MainWindow::handleConnected(const QString& path,
+                                 const QList<rfm::core::RemoteEntry>& entries)
+{
+    const QString profileSaveError = saveConnectedProfileIfRequested();
+    if (m_connectionDialog != nullptr) {
+        m_connectionDialog->connectionSucceeded();
+    }
+    m_connected = true;
+    showRemoteDirectory(path, entries);
+    refreshServerProfileViews();
+    statusBar()->showMessage(
+        profileSaveError.isEmpty()
+            ? tr("Connected securely to %1").arg(m_activeProfile.host)
+            : tr("Connected securely to %1, but the server profile could not be saved: %2")
+                  .arg(m_activeProfile.host, profileSaveError));
 }
 
 void MainWindow::showHostKeyConfirmation(const QString& host, const QString& fingerprint)
@@ -620,9 +939,7 @@ void MainWindow::showRemoteDirectory(const QString& path,
     m_connected = true;
     ++m_connectionGeneration;
     clearInternalClipboard();
-    if (centralWidget() != m_paneWorkspace) {
-        setCentralWidget(m_paneWorkspace);
-    }
+    m_centralStack->setCurrentWidget(m_paneWorkspace);
     FileBrowserPane* const pane = m_paneWorkspace->activePane();
     const QString displayPath = remoteDisplayUrl(m_activeProfile, path);
     pane->showDirectory(path, displayPath, entries, PaneNavigation::Initial);
@@ -689,32 +1006,51 @@ void MainWindow::handleDirectoryListingError(quint64 requestId, const QString& p
 
 void MainWindow::showConnectionError(const QString& message)
 {
-    m_connected = false;
-    clearInternalClipboard();
-    updatePaneTransferContexts();
-    stopAutomaticRefresh();
-    m_pendingTransferRequests.clear();
-    m_nonTerminalTransfers.clear();
-    m_operationContexts.clear();
+    const bool initialConnectionAttempt =
+        m_connectionDialog != nullptr &&
+        m_connectionDialog->state() == ConnectionDialog::State::Connecting;
     for (auto operation : std::as_const(m_remoteOperations)) {
         operation.state = rfm::core::OperationState::Failed;
         operation.error = message;
         updateTrackedOperation(operation);
     }
-    m_remoteOperations.clear();
-    m_transferPanes.clear();
-    setBusy(false);
-    statusBar()->showMessage(tr("Disconnected"));
-    QMessageBox::critical(this, tr("SSH connection error"), message);
+    resetDisconnectedUi();
+    if (initialConnectionAttempt && m_connectionDialog != nullptr) {
+        m_connectionDialog->showConnectionError(message);
+    } else {
+        QMessageBox::critical(this, tr("SSH connection error"), message);
+    }
 }
 
 void MainWindow::handleDisconnected()
+{
+    resetDisconnectedUi();
+}
+
+void MainWindow::resetDisconnectedUi()
 {
     m_connected = false;
     clearInternalClipboard();
     updatePaneTransferContexts();
     stopAutomaticRefresh();
+    m_refreshDebounceTimer->stop();
+    m_scheduledPaneRefreshes.clear();
+    m_directoryRequests.clear();
+    m_directoryQueue.clear();
+    m_expectedDirectoryRequests.clear();
+    m_busyPanes.clear();
+    m_activeDirectoryRequestId = 0;
+    m_pendingTransferRequests.clear();
+    m_nonTerminalTransfers.clear();
+    m_operationContexts.clear();
+    m_remoteOperations.clear();
+    m_transferPanes.clear();
+    m_paneWorkspace->clear();
+    m_centralStack->setCurrentWidget(m_homePage);
+    m_activeProfile = {};
     setBusy(false);
+    refreshServerProfileViews();
+    statusBar()->showMessage(tr("Disconnected"));
 }
 
 void MainWindow::showFileContextMenu(const QPoint& globalPosition)
@@ -1288,8 +1624,11 @@ void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progr
 
 void MainWindow::updateConnectionAction()
 {
-    m_newConnectionAction->setEnabled(!m_busy && m_busyPanes.isEmpty() &&
-                                      m_nonTerminalTransfers.isEmpty());
+    const bool enabled =
+        !m_busy && m_busyPanes.isEmpty() && m_nonTerminalTransfers.isEmpty();
+    m_newConnectionAction->setEnabled(enabled && !m_connected);
+    m_disconnectAction->setEnabled(enabled && m_connected);
+    updateSelectedServerAction();
 }
 
 rfm::core::RemoteConnectionIdentity MainWindow::currentConnectionIdentity() const
@@ -1518,8 +1857,8 @@ void MainWindow::setPaneBusy(quint64 paneId, bool busy, const QString& message)
         m_upAction->setEnabled(!busy && !m_busy && m_connected &&
                                pane->currentPath() != QStringLiteral("."));
         m_refreshAction->setEnabled(!busy && !m_busy && m_connected);
-        m_backAction->setEnabled(!busy && !m_busy && pane->canGoBack());
-        m_forwardAction->setEnabled(!busy && !m_busy && pane->canGoForward());
+        m_backAction->setEnabled(m_connected && !busy && !m_busy && pane->canGoBack());
+        m_forwardAction->setEnabled(m_connected && !busy && !m_busy && pane->canGoForward());
     }
     if (busy && !message.isEmpty()) {
         statusBar()->showMessage(message);
@@ -1621,7 +1960,7 @@ void MainWindow::updateOperationActions()
     m_clipboardPasteAction->setEnabled(pasteAvailable);
     m_selectAllAction->setEnabled(available);
     m_focusLocationAction->setEnabled(available);
-    m_switchPaneAction->setEnabled(!m_busy && m_paneWorkspace->isSplit());
+    m_switchPaneAction->setEnabled(m_connected && !m_busy && m_paneWorkspace->isSplit());
     m_cancelCutAction->setEnabled(m_internalClipboard.isCut());
 }
 
@@ -1681,12 +2020,12 @@ void MainWindow::setBusy(bool busy, const QString& message)
     m_upAction->setEnabled(!busy && m_connected && !m_busyPanes.contains(activePaneId) &&
                            m_paneWorkspace->activePane()->currentPath() != QStringLiteral("."));
     m_refreshAction->setEnabled(!busy && m_connected && !m_busyPanes.contains(activePaneId));
-    m_backAction->setEnabled(!busy && !m_busyPanes.contains(activePaneId) &&
+    m_backAction->setEnabled(m_connected && !busy && !m_busyPanes.contains(activePaneId) &&
                              m_paneWorkspace->activePane()->canGoBack());
-    m_forwardAction->setEnabled(!busy && !m_busyPanes.contains(activePaneId) &&
+    m_forwardAction->setEnabled(m_connected && !busy && !m_busyPanes.contains(activePaneId) &&
                                 m_paneWorkspace->activePane()->canGoForward());
     for (const quint64 paneId : m_paneWorkspace->visiblePaneIds()) {
-        m_paneWorkspace->pane(paneId)->setInteractionEnabled(!busy &&
+        m_paneWorkspace->pane(paneId)->setInteractionEnabled(m_connected && !busy &&
                                                               !m_busyPanes.contains(paneId));
     }
     if (busy && !message.isEmpty()) {
@@ -1701,7 +2040,7 @@ void MainWindow::showAboutDialog()
     QMessageBox::about(
         this, tr("About RemoteFileManager"),
         tr("RemoteFileManager %1\n\nA native file manager for standard SSH/SFTP servers.\n"
-           "Sprint 5: internal drag and drop, clipboard, and keyboard navigation.")
+           "Sprint 6: saved server profiles and retryable SSH connections.")
             .arg(QApplication::applicationVersion()));
 }
 
