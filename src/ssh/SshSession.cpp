@@ -258,8 +258,12 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         return;
     }
 
+    if (profile.allowPasswordFallback) {
+        m_impl->password = std::move(password);
+    }
+    password.fill(QChar{'\0'});
+    password.clear();
     m_impl->profile = std::move(profile);
-    m_impl->password = std::move(password);
     m_impl->session = ssh_new();
     if (m_impl->session == nullptr) {
         fail(tr("Unable to initialize SSH."));

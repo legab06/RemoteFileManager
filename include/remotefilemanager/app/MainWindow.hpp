@@ -10,6 +10,8 @@
 
 #include <QMainWindow>
 #include <QHash>
+#include <QList>
+#include <QPointer>
 #include <QQueue>
 #include <QSet>
 #include <QStringList>
@@ -17,7 +19,11 @@
 #include <memory>
 
 class QAction;
+class QLabel;
 class QPoint;
+class QListWidget;
+class QPushButton;
+class QStackedWidget;
 class QThread;
 class QTimer;
 
@@ -29,6 +35,7 @@ class SshSession;
 namespace rfm::core
 {
 class OperationHistoryStore;
+class ServerProfileStore;
 }
 
 namespace rfm::app
@@ -36,13 +43,16 @@ namespace rfm::app
 
 class PaneWorkspace;
 class OperationPanel;
+class ConnectionDialog;
+class HomePage;
 
 class MainWindow final : public QMainWindow
 {
     Q_OBJECT
 
   public:
-    explicit MainWindow(QWidget* parent = nullptr, QString operationHistoryDirectory = {});
+    explicit MainWindow(QWidget* parent = nullptr, QString operationHistoryDirectory = {},
+                        QString serverProfileDirectory = {});
     ~MainWindow() override;
 
   signals:
@@ -71,8 +81,13 @@ class MainWindow final : public QMainWindow
     void createNavigationBar();
     void createPlacesDock();
     void createOperationDock();
-    void createEmptyState();
+    void createCentralPages();
     void showConnectionDialog();
+    void showConnectionDialogForProfile(const rfm::core::ConnectionProfile& profile);
+    void beginConnection(const rfm::core::ConnectionProfile& profile, const QString& password);
+    [[nodiscard]] QString saveConnectedProfileIfRequested();
+    Q_INVOKABLE void handleConnected(const QString& path,
+                                     const QList<rfm::core::RemoteEntry>& entries);
     void showAboutDialog();
     void showHostKeyConfirmation(const QString& host, const QString& fingerprint);
     Q_INVOKABLE void showRemoteDirectory(const QString& path,
@@ -81,8 +96,20 @@ class MainWindow final : public QMainWindow
                                            const QList<rfm::core::RemoteEntry>& entries);
     Q_INVOKABLE void handleDirectoryListingError(quint64 requestId, const QString& path,
                                                  const QString& error);
-    void showConnectionError(const QString& message);
+    Q_INVOKABLE void showConnectionError(const QString& message);
+    void loadServerProfiles();
+    void refreshServerProfileViews();
+    void updateSelectedServerAction();
+    void addServerProfile();
+    void editSelectedServerProfile();
+    void removeSelectedServerProfile();
+    void connectToSelectedServerProfile();
+    void connectToServerProfile(const QString& id);
+    void showServerProfileContextMenu(const QPoint& position);
+    void requestDisconnection();
+    [[nodiscard]] rfm::core::ConnectionProfile selectedServerProfile() const;
     Q_INVOKABLE void handleDisconnected();
+    void resetDisconnectedUi();
     void requestParentDirectory();
     void showFileContextMenu(const QPoint& globalPosition);
     void createRemoteDirectory();
@@ -148,6 +175,7 @@ class MainWindow final : public QMainWindow
     void setBusy(bool busy, const QString& message = {});
 
     QAction* m_newConnectionAction{nullptr};
+    QAction* m_disconnectAction{nullptr};
     QAction* m_quitAction{nullptr};
     QAction* m_aboutAction{nullptr};
     QAction* m_backAction{nullptr};
@@ -172,7 +200,12 @@ class MainWindow final : public QMainWindow
     QAction* m_switchPaneAction{nullptr};
     QAction* m_cancelCutAction{nullptr};
     PaneWorkspace* m_paneWorkspace{nullptr};
+    HomePage* m_homePage{nullptr};
+    QStackedWidget* m_centralStack{nullptr};
     OperationPanel* m_operationPanel{nullptr};
+    QListWidget* m_serverProfileList{nullptr};
+    QLabel* m_serverProfileErrorLabel{nullptr};
+    QPushButton* m_connectServerProfileButton{nullptr};
     QTimer* m_autoRefreshTimer{nullptr};
     QTimer* m_refreshDebounceTimer{nullptr};
     QTimer* m_historySaveTimer{nullptr};
@@ -205,6 +238,9 @@ class MainWindow final : public QMainWindow
     rfm::core::InternalClipboard m_internalClipboard;
     QSet<quint64> m_clipboardMoveOperations;
     std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
+    std::unique_ptr<rfm::core::ServerProfileStore> m_serverProfileStore;
+    QList<rfm::core::ConnectionProfile> m_serverProfiles;
+    QPointer<ConnectionDialog> m_connectionDialog;
     QString m_applicationInstanceId;
     quint64 m_activeDirectoryRequestId{0};
     quint64 m_nextOperationId{1};

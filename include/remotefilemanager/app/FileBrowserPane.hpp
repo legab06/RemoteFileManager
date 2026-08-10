@@ -36,6 +36,7 @@ class FileBrowserPane final : public QWidget
     void showDirectory(const QString& path, const QString& displayPath,
                        const QList<rfm::core::RemoteEntry>& entries,
                        PaneNavigation navigation = PaneNavigation::Refresh);
+    void clear();
     void setPendingSelectionNames(QStringList names);
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);

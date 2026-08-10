@@ -6,6 +6,7 @@ add_library(
     core/OperationProgress.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp
+    core/ServerProfileStore.cpp
     core/TransferDirectoryJob.cpp
     core/TransferFileJob.cpp
     core/TransferQueue.cpp
@@ -31,13 +32,17 @@ add_library(
     app/MainWindow.cpp
     app/ConnectionDialog.cpp
     app/FileBrowserPane.cpp
+    app/HomePage.cpp
     app/PaneWorkspace.cpp
+    app/ServerProfileDialog.cpp
     app/OperationPanel.cpp
     app/TransferRequestFactory.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/MainWindow.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ConnectionDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/FileBrowserPane.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/HomePage.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PaneWorkspace.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/OperationPanel.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferRequestFactory.hpp
 )

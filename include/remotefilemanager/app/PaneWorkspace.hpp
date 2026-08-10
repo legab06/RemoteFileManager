@@ -30,6 +30,7 @@ class PaneWorkspace final : public QWidget
     [[nodiscard]] bool isSplit() const;
 
   public slots:
+    void clear();
     void setSplit(bool enabled);
     void activateOtherPane();
 
