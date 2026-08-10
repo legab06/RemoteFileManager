@@ -79,12 +79,9 @@ bool pathsUseSameConvention(const QString& first, const QString& second)
     return first.startsWith(QChar{'/'}) == second.startsWith(QChar{'/'});
 }
 
-bool profilesReferToSameServer(const rfm::core::ConnectionProfile& first,
-                               const rfm::core::ConnectionProfile& second)
+bool profilesHaveSameConnectionSettings(const rfm::core::ConnectionProfile& first,
+                                        const rfm::core::ConnectionProfile& second)
 {
-    if (!first.id.trimmed().isEmpty() && first.id == second.id) {
-        return true;
-    }
     return first.host.trimmed().compare(second.host.trimmed(), Qt::CaseInsensitive) == 0 &&
            first.username.trimmed() == second.username.trimmed() && first.port == second.port;
 }
@@ -634,7 +631,7 @@ void MainWindow::refreshServerProfileViews()
         item->setData(Qt::UserRole, profile.id);
         item->setToolTip(tr("%1@%2:%3").arg(profile.username, profile.host,
                                              QString::number(profile.port)));
-        if (m_connected && profilesReferToSameServer(profile, m_activeProfile)) {
+        if (m_connected && profilesHaveSameConnectionSettings(profile, m_activeProfile)) {
             item->setText(tr("%1 — Connected").arg(profile.effectiveDisplayName()));
             item->setData(Qt::UserRole + 1, true);
             QFont activeFont = item->font();
@@ -656,7 +653,7 @@ void MainWindow::updateSelectedServerAction()
     const rfm::core::ConnectionProfile selected = selectedServerProfile();
     const bool valid = selected.isValidSavedProfile();
     const bool active = valid && m_connected &&
-                        profilesReferToSameServer(selected, m_activeProfile);
+                        profilesHaveSameConnectionSettings(selected, m_activeProfile);
     m_connectServerProfileButton->setText(active ? tr("Disconnect") : tr("Connect"));
     if (!valid) {
         m_connectServerProfileButton->setEnabled(false);
@@ -752,7 +749,7 @@ void MainWindow::connectToSelectedServerProfile()
     if (!selected.isValidSavedProfile()) {
         return;
     }
-    if (m_connected && profilesReferToSameServer(selected, m_activeProfile)) {
+    if (m_connected && profilesHaveSameConnectionSettings(selected, m_activeProfile)) {
         requestDisconnection();
     } else if (!m_connected) {
         connectToServerProfile(selected.id);
@@ -783,7 +780,7 @@ void MainWindow::showServerProfileContextMenu(const QPoint& position)
         return candidate.id == id;
     });
     if (profile == m_serverProfiles.cend() || !m_connected ||
-        !profilesReferToSameServer(*profile, m_activeProfile)) {
+        !profilesHaveSameConnectionSettings(*profile, m_activeProfile)) {
         return;
     }
     m_serverProfileList->setCurrentItem(item);
@@ -879,7 +876,7 @@ QString MainWindow::saveConnectedProfileIfRequested()
         return {};
     }
     for (const rfm::core::ConnectionProfile& existing : std::as_const(m_serverProfiles)) {
-        if (profilesReferToSameServer(existing, m_activeProfile)) {
+        if (profilesHaveSameConnectionSettings(existing, m_activeProfile)) {
             m_activeProfile.id = existing.id;
             m_activeProfile.displayName = existing.displayName;
             return {};
