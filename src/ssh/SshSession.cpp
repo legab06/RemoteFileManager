@@ -39,6 +39,11 @@ rfm::core::RemoteBackendError backendError(int sftpError)
     }
 }
 
+bool isFatalSftpError(int sftpError)
+{
+    return sftpError == SSH_FX_NO_CONNECTION || sftpError == SSH_FX_CONNECTION_LOST;
+}
+
 class SftpBackend final : public rfm::core::RemoteFileBackend {
 public:
     SftpBackend(ssh_session session, sftp_session sftp)
@@ -398,7 +403,7 @@ void SshSession::authenticateAndOpen()
     emit connected(initialPath, entries);
 }
 
-void SshSession::listDirectory(QString path)
+void SshSession::listDirectory(quint64 requestId, QString path)
 {
     if (m_impl->sftp == nullptr) {
         fail(tr("No active SFTP connection."));
@@ -407,7 +412,13 @@ void SshSession::listDirectory(QString path)
     const QByteArray encodedPath = path.toUtf8();
     sftp_dir directory = sftp_opendir(m_impl->sftp, encodedPath.constData());
     if (directory == nullptr) {
-        fail(tr("Unable to open %1.").arg(path));
+        const int directoryError = sftp_get_error(m_impl->sftp);
+        if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
+            ssh_is_connected(m_impl->session) == 0) {
+            fail(tr("The SSH connection was lost while opening %1.").arg(path));
+        } else {
+            emit directoryListingFailed(requestId, path, tr("Unable to open %1.").arg(path));
+        }
         return;
     }
     QList<rfm::core::RemoteEntry> entries;
@@ -426,13 +437,18 @@ void SshSession::listDirectory(QString path)
         sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
     sftp_closedir(directory);
     if (directoryError != SSH_FX_OK) {
-        fail(tr("Unable to read %1.").arg(path));
+        if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
+            ssh_is_connected(m_impl->session) == 0) {
+            fail(tr("The SSH connection was lost while reading %1.").arg(path));
+        } else {
+            emit directoryListingFailed(requestId, path, tr("Unable to read %1.").arg(path));
+        }
         return;
     }
     std::ranges::sort(entries, {}, [](const auto& entry) {
         return std::pair{!entry.directory, entry.name.toCaseFolded()};
     });
-    emit directoryListed(path, entries);
+    emit directoryListed(requestId, path, entries);
 }
 
 void SshSession::createDirectory(quint64 id, QString parent, QString name)

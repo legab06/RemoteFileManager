@@ -104,6 +104,7 @@ private slots:
     void copiesOnServerOrReportsUnsupported();
     void removesFileAndRecursiveTreeWithGuards();
     void emitsWorkerOperationErrors();
+    void treatsListingWithoutSessionAsFatal();
 };
 
 void RemoteFileOperationsTest::validatesAndNormalizesRemotePaths()
@@ -115,6 +116,14 @@ void RemoteFileOperationsTest::validatesAndNormalizesRemotePaths()
     QVERIFY(!rfm::core::RemotePath::isValidName(QStringLiteral("a/b")));
     QCOMPARE(rfm::core::RemotePath::normalize(QStringLiteral("/srv//data/../files")),
              QStringLiteral("/srv/files"));
+    QCOMPARE(rfm::core::RemotePath::normalize(QStringLiteral("rfm-sprint4/./dossier-test/")),
+             QStringLiteral("rfm-sprint4/dossier-test"));
+    QCOMPARE(rfm::core::RemotePath::join(QStringLiteral("rfm-sprint4/./"),
+                                         QStringLiteral("fichier.txt")),
+             QStringLiteral("rfm-sprint4/fichier.txt"));
+    QCOMPARE(rfm::core::RemotePath::join(QStringLiteral("/home/gabriel/rfm-sprint4/"),
+                                         QStringLiteral("fichier.txt")),
+             QStringLiteral("/home/gabriel/rfm-sprint4/fichier.txt"));
     QCOMPARE(rfm::core::RemotePath::join(QStringLiteral("."), QStringLiteral("folder")),
              QStringLiteral("./folder"));
     QCOMPARE(rfm::core::RemotePath::parent(QStringLiteral("./folder/child")),
@@ -210,6 +219,21 @@ void RemoteFileOperationsTest::copiesOnServerOrReportsUnsupported()
         8, {{QStringLiteral("src/folder"), true}}, QStringLiteral("src/folder/child"));
     QVERIFY(!insideItself.allSucceeded());
     QCOMPARE(backend.calls.size(), callCount);
+
+    const auto childToParent = operations.copy(
+        9, {{QStringLiteral("tree/child/folder"), true}}, QStringLiteral("tree/./"));
+    QVERIFY(childToParent.allSucceeded());
+    QCOMPARE(childToParent.items.constFirst().destination, QStringLiteral("tree/folder"));
+    QVERIFY(backend.calls.contains(QStringLiteral("copy:tree/child/folder:tree/folder:r")));
+
+    const auto parentToChild = operations.move(
+        10, {{QStringLiteral("/home/gabriel/tree/file.txt"), false}},
+        QStringLiteral("/home/gabriel/tree/child/"));
+    QVERIFY(parentToChild.allSucceeded());
+    QCOMPARE(parentToChild.items.constFirst().destination,
+             QStringLiteral("/home/gabriel/tree/child/file.txt"));
+    QVERIFY(backend.calls.contains(QStringLiteral(
+        "rename:/home/gabriel/tree/file.txt:/home/gabriel/tree/child/file.txt")));
 }
 
 void RemoteFileOperationsTest::removesFileAndRecursiveTreeWithGuards()
@@ -257,6 +281,18 @@ void RemoteFileOperationsTest::emitsWorkerOperationErrors()
     QSignalSpy failure(&session, &rfm::ssh::SshSession::failed);
     session.createDirectory(11, QStringLiteral("."), QStringLiteral("folder"));
     QCOMPARE(failure.size(), 1);
+}
+
+void RemoteFileOperationsTest::treatsListingWithoutSessionAsFatal()
+{
+    rfm::ssh::SshSession session;
+    QSignalSpy fatalFailure(&session, &rfm::ssh::SshSession::failed);
+    QSignalSpy localizedFailure(&session, &rfm::ssh::SshSession::directoryListingFailed);
+
+    session.listDirectory(42, QStringLiteral("/srv"));
+
+    QCOMPARE(fatalFailure.size(), 1);
+    QCOMPARE(localizedFailure.size(), 0);
 }
 
 QTEST_APPLESS_MAIN(RemoteFileOperationsTest)
