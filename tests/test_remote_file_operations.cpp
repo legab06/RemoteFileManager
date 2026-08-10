@@ -213,6 +213,14 @@ void RemoteFileOperationsTest::copiesOnServerOrReportsUnsupported()
     QVERIFY(backend.calls.contains(QStringLiteral("copy:src/a.txt:backup/a.txt:f")));
     QVERIFY(backend.calls.contains(QStringLiteral("copy:src/folder:backup/folder:r")));
 
+    const qsizetype beforeCollision = backend.calls.size();
+    const auto collision = operations.copy(
+        71, {{QStringLiteral("src/a.txt"), false}}, QStringLiteral("backup"));
+    QVERIFY(!collision.allSucceeded());
+    QVERIFY(collision.items.constFirst().error.contains(QStringLiteral("exists")));
+    QCOMPARE(backend.calls.size(), beforeCollision + 1);
+    QCOMPARE(backend.calls.constLast(), QStringLiteral("probe:backup/a.txt"));
+
     backend.forced.remove(QStringLiteral("copy:src/folder"));
     const qsizetype callCount = backend.calls.size();
     const auto insideItself = operations.copy(

@@ -26,10 +26,12 @@ class PaneWorkspace final : public QWidget
     [[nodiscard]] FileBrowserPane* pane(PaneId id) const;
     [[nodiscard]] PaneId paneId(const FileBrowserPane* pane) const;
     [[nodiscard]] QList<PaneId> visiblePaneIds() const;
+    [[nodiscard]] QList<PaneId> paneIds() const;
     [[nodiscard]] bool isSplit() const;
 
   public slots:
     void setSplit(bool enabled);
+    void activateOtherPane();
 
   signals:
     void activePaneChanged(quint64 paneId);

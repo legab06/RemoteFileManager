@@ -33,11 +33,13 @@
 #include <QPushButton>
 #include <QStatusBar>
 #include <QStyle>
+#include <QTableWidget>
 #include <QThread>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
 #include <QUrl>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -115,6 +117,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
           std::move(operationHistoryDirectory)))
 {
     setObjectName(QStringLiteral("mainWindow"));
+    m_applicationInstanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     setWindowTitle(tr("RemoteFileManager"));
     resize(1100, 700);
     setMinimumSize(760, 480);
@@ -162,6 +165,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
     qRegisterMetaType<rfm::core::ConnectionProfile>();
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
+    qRegisterMetaType<rfm::core::InternalTransferPayload>();
     qRegisterMetaType<rfm::core::RemoteOperationResult>();
     qRegisterMetaType<rfm::core::OperationProgress>();
     qRegisterMetaType<rfm::core::TransferRequest>();
@@ -220,11 +224,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory)
                 updateConnectionAction();
                 statusBar()->showMessage(error, 8000);
             });
-    connect(m_sshSession, &rfm::ssh::SshSession::disconnected, this, [this] {
-        m_connected = false;
-        stopAutomaticRefresh();
-        setBusy(false);
-    });
+    connect(m_sshSession, &rfm::ssh::SshSession::disconnected, this,
+            &MainWindow::handleDisconnected);
     m_sshThread->start();
 
     statusBar()->showMessage(
@@ -269,6 +270,7 @@ void MainWindow::createActions()
     connect(m_createDirectoryAction, &QAction::triggered, this, &MainWindow::createRemoteDirectory);
     m_renameAction = new QAction(tr("Rename…"), this);
     m_renameAction->setObjectName(QStringLiteral("renameAction"));
+    m_renameAction->setShortcut(QKeySequence(Qt::Key_F2));
     connect(m_renameAction, &QAction::triggered, this, &MainWindow::renameSelectedEntry);
     m_moveAction = new QAction(tr("Move to…"), this);
     m_moveAction->setObjectName(QStringLiteral("moveAction"));
@@ -286,7 +288,41 @@ void MainWindow::createActions()
             &MainWindow::copySelectedToOtherPane);
     m_removeAction = new QAction(tr("Delete…"), this);
     m_removeAction->setObjectName(QStringLiteral("removeAction"));
+    m_removeAction->setShortcut(QKeySequence::Delete);
     connect(m_removeAction, &QAction::triggered, this, &MainWindow::removeSelectedEntries);
+
+    m_clipboardCopyAction = new QAction(tr("Copy"), this);
+    m_clipboardCopyAction->setObjectName(QStringLiteral("clipboardCopyAction"));
+    m_clipboardCopyAction->setShortcut(QKeySequence::Copy);
+    connect(m_clipboardCopyAction, &QAction::triggered, this,
+            &MainWindow::copySelectionToClipboard);
+    m_clipboardCutAction = new QAction(tr("Cut"), this);
+    m_clipboardCutAction->setObjectName(QStringLiteral("clipboardCutAction"));
+    m_clipboardCutAction->setShortcut(QKeySequence::Cut);
+    connect(m_clipboardCutAction, &QAction::triggered, this,
+            &MainWindow::cutSelectionToClipboard);
+    m_clipboardPasteAction = new QAction(tr("Paste"), this);
+    m_clipboardPasteAction->setObjectName(QStringLiteral("clipboardPasteAction"));
+    m_clipboardPasteAction->setShortcut(QKeySequence::Paste);
+    connect(m_clipboardPasteAction, &QAction::triggered, this, &MainWindow::pasteClipboard);
+    m_selectAllAction = new QAction(tr("Select all"), this);
+    m_selectAllAction->setObjectName(QStringLiteral("selectAllAction"));
+    m_selectAllAction->setShortcut(QKeySequence::SelectAll);
+    connect(m_selectAllAction, &QAction::triggered, this, &MainWindow::selectAllInActivePane);
+    m_focusLocationAction = new QAction(tr("Focus location"), this);
+    m_focusLocationAction->setObjectName(QStringLiteral("focusLocationAction"));
+    m_focusLocationAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+L")));
+    connect(m_focusLocationAction, &QAction::triggered, this, &MainWindow::focusActiveLocation);
+    m_switchPaneAction = new QAction(tr("Switch pane"), this);
+    m_switchPaneAction->setObjectName(QStringLiteral("switchPaneAction"));
+    m_switchPaneAction->setShortcut(QKeySequence(Qt::Key_F6));
+    connect(m_switchPaneAction, &QAction::triggered, m_paneWorkspace,
+            &PaneWorkspace::activateOtherPane);
+    m_cancelCutAction = new QAction(this);
+    m_cancelCutAction->setObjectName(QStringLiteral("cancelCutAction"));
+    m_cancelCutAction->setShortcut(QKeySequence(Qt::Key_Escape));
+    connect(m_cancelCutAction, &QAction::triggered, this, &MainWindow::cancelPendingCut);
+    addAction(m_cancelCutAction);
 
     const QIcon uploadIcon =
         QIcon::fromTheme(QStringLiteral("go-up"), style()->standardIcon(QStyle::SP_ArrowUp));
@@ -327,8 +363,17 @@ void MainWindow::createMenus()
     fileMenu->addSeparator();
     fileMenu->addAction(m_quitAction);
 
+    QMenu* const editMenu = menuBar()->addMenu(tr("&Edit"));
+    editMenu->addAction(m_clipboardCopyAction);
+    editMenu->addAction(m_clipboardCutAction);
+    editMenu->addAction(m_clipboardPasteAction);
+    editMenu->addSeparator();
+    editMenu->addAction(m_selectAllAction);
+
     QMenu* const viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(m_splitViewAction);
+    viewMenu->addAction(m_focusLocationAction);
+    viewMenu->addAction(m_switchPaneAction);
 
     QMenu* const helpMenu = menuBar()->addMenu(tr("&Help"));
     helpMenu->addAction(m_aboutAction);
@@ -353,10 +398,15 @@ void MainWindow::createPaneWorkspace()
             [this](quint64 paneId, bool visible) {
                 if (!visible) {
                     cancelDirectoryRequests(paneId);
+                    updateOperationActions();
                     return;
                 }
                 connectBrowserPane(paneId);
                 FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+                if (m_connected) {
+                    pane->setTransferContext(m_applicationInstanceId, currentConnectionIdentity(),
+                                             paneId);
+                }
                 if (m_connected &&
                     pane->property("connectionGeneration").toULongLong() !=
                         m_connectionGeneration) {
@@ -366,6 +416,7 @@ void MainWindow::createPaneWorkspace()
                                                 PaneNavigation::Initial);
                     }
                 }
+                updateOperationActions();
             });
 }
 
@@ -395,6 +446,11 @@ void MainWindow::connectBrowserPane(quint64 paneId)
     });
     connect(pane, &FileBrowserPane::contextMenuRequested, this,
             &MainWindow::showFileContextMenu);
+    connect(pane, &FileBrowserPane::internalDropRequested, this,
+            [this, paneId](rfm::core::InternalTransferPayload payload,
+                           const QString& destination) {
+                handleInternalDrop(std::move(payload), paneId, destination);
+            });
 }
 
 void MainWindow::createNavigationBar()
@@ -406,15 +462,19 @@ void MainWindow::createNavigationBar()
     m_backAction =
         navigationBar->addAction(style()->standardIcon(QStyle::SP_ArrowBack), tr("Back"));
     m_backAction->setObjectName(QStringLiteral("backAction"));
+    m_backAction->setShortcut(QKeySequence(QStringLiteral("Alt+Left")));
     m_forwardAction =
         navigationBar->addAction(style()->standardIcon(QStyle::SP_ArrowForward), tr("Forward"));
     m_forwardAction->setObjectName(QStringLiteral("forwardAction"));
+    m_forwardAction->setShortcut(QKeySequence(QStringLiteral("Alt+Right")));
     m_upAction =
         navigationBar->addAction(style()->standardIcon(QStyle::SP_ArrowUp), tr("Parent folder"));
     m_upAction->setObjectName(QStringLiteral("upAction"));
+    m_upAction->setShortcut(QKeySequence(QStringLiteral("Alt+Up")));
     m_refreshAction =
         navigationBar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Refresh"));
     m_refreshAction->setObjectName(QStringLiteral("refreshAction"));
+    m_refreshAction->setShortcut(QKeySequence(Qt::Key_F5));
 
     navigationBar->addSeparator();
     navigationBar->addAction(m_uploadAction);
@@ -528,6 +588,8 @@ void MainWindow::showConnectionDialog()
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
+    clearInternalClipboard();
+    updatePaneTransferContexts();
     m_activeProfile = dialog.profile();
     setBusy(true, tr("Connecting securely to %1…").arg(m_activeProfile.host));
     emit connectionRequested(m_activeProfile, dialog.password());
@@ -557,6 +619,7 @@ void MainWindow::showRemoteDirectory(const QString& path,
 {
     m_connected = true;
     ++m_connectionGeneration;
+    clearInternalClipboard();
     if (centralWidget() != m_paneWorkspace) {
         setCentralWidget(m_paneWorkspace);
     }
@@ -564,6 +627,7 @@ void MainWindow::showRemoteDirectory(const QString& path,
     const QString displayPath = remoteDisplayUrl(m_activeProfile, path);
     pane->showDirectory(path, displayPath, entries, PaneNavigation::Initial);
     pane->setProperty("connectionGeneration", QVariant::fromValue(m_connectionGeneration));
+    updatePaneTransferContexts();
     m_upAction->setEnabled(pane->currentPath() != QStringLiteral("."));
     m_refreshAction->setEnabled(true);
     setBusy(false);
@@ -626,6 +690,8 @@ void MainWindow::handleDirectoryListingError(quint64 requestId, const QString& p
 void MainWindow::showConnectionError(const QString& message)
 {
     m_connected = false;
+    clearInternalClipboard();
+    updatePaneTransferContexts();
     stopAutomaticRefresh();
     m_pendingTransferRequests.clear();
     m_nonTerminalTransfers.clear();
@@ -642,6 +708,15 @@ void MainWindow::showConnectionError(const QString& message)
     QMessageBox::critical(this, tr("SSH connection error"), message);
 }
 
+void MainWindow::handleDisconnected()
+{
+    m_connected = false;
+    clearInternalClipboard();
+    updatePaneTransferContexts();
+    stopAutomaticRefresh();
+    setBusy(false);
+}
+
 void MainWindow::showFileContextMenu(const QPoint& globalPosition)
 {
     if (m_busy) {
@@ -650,30 +725,26 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
     updateOperationActions();
     QMenu menu(this);
     const bool hasSelection = !selectedEntries().isEmpty();
-    if (m_paneWorkspace->isSplit() && hasSelection) {
-        menu.addAction(m_copyToOtherPaneAction);
-        menu.addAction(m_moveToOtherPaneAction);
+    if (hasSelection) {
+        menu.addAction(m_clipboardCopyAction);
+        menu.addAction(m_clipboardCutAction);
+    }
+    menu.addAction(m_clipboardPasteAction);
+    menu.addSeparator();
+    if (hasSelection) {
+        if (m_paneWorkspace->isSplit()) {
+            menu.addAction(m_copyToOtherPaneAction);
+            menu.addAction(m_moveToOtherPaneAction);
+        }
+        menu.addAction(m_copyAction);
+        menu.addAction(m_moveAction);
+        menu.addSeparator();
+        menu.addAction(m_renameAction);
+        menu.addAction(m_downloadAction);
+        menu.addAction(m_removeAction);
         menu.addSeparator();
     }
     menu.addAction(m_createDirectoryAction);
-    if (hasSelection) {
-        menu.addSeparator();
-        menu.addAction(m_renameAction);
-        if (m_paneWorkspace->isSplit()) {
-            QMenu* const advancedMenu = menu.addMenu(tr("More…"));
-            advancedMenu->setObjectName(QStringLiteral("advancedOperationsMenu"));
-            advancedMenu->menuAction()->setObjectName(
-                QStringLiteral("advancedOperationsMenuAction"));
-            advancedMenu->addAction(m_copyAction);
-            advancedMenu->addAction(m_moveAction);
-        } else {
-            menu.addAction(m_copyAction);
-            menu.addAction(m_moveAction);
-        }
-        menu.addAction(m_downloadAction);
-        menu.addSeparator();
-        menu.addAction(m_removeAction);
-    }
     menu.exec(globalPosition);
 }
 
@@ -727,6 +798,8 @@ void MainWindow::renameSelectedEntry()
 
 void MainWindow::moveSelectedEntries()
 {
+    FileBrowserPane* const sourcePane = m_paneWorkspace->activePane();
+    const quint64 sourcePaneId = m_paneWorkspace->paneId(sourcePane);
     const QList<rfm::core::RemoteSelection> selection = selectedEntries();
     if (selection.isEmpty()) {
         return;
@@ -735,17 +808,14 @@ void MainWindow::moveSelectedEntries()
     if (destination.isEmpty()) {
         return;
     }
-    setBusy(true, tr("Moving %1 item(s)…").arg(selection.size()));
-    const quint64 id = nextOperationId();
-    const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
-    m_operationContexts.insert(
-        id, {paneId, 0, m_paneWorkspace->activePane()->currentPath(), destination});
-    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteMove, selection, destination);
-    emit moveRequested(id, selection, destination);
+    startRemoteTransfer(rfm::core::InternalTransferAction::Move,
+                        transferPayload(sourcePaneId, selection), 0, destination);
 }
 
 void MainWindow::copySelectedEntries()
 {
+    FileBrowserPane* const sourcePane = m_paneWorkspace->activePane();
+    const quint64 sourcePaneId = m_paneWorkspace->paneId(sourcePane);
     const QList<rfm::core::RemoteSelection> selection = selectedEntries();
     if (selection.isEmpty()) {
         return;
@@ -754,13 +824,8 @@ void MainWindow::copySelectedEntries()
     if (destination.isEmpty()) {
         return;
     }
-    setBusy(true, tr("Copying %1 item(s) on the server…").arg(selection.size()));
-    const quint64 id = nextOperationId();
-    const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
-    m_operationContexts.insert(
-        id, {paneId, 0, m_paneWorkspace->activePane()->currentPath(), destination});
-    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteCopy, selection, destination);
-    emit copyRequested(id, selection, destination);
+    startRemoteTransfer(rfm::core::InternalTransferAction::Copy,
+                        transferPayload(sourcePaneId, selection), 0, destination);
 }
 
 void MainWindow::moveSelectedToOtherPane()
@@ -791,12 +856,8 @@ void MainWindow::moveSelectedToOtherPane()
     if (!confirmOtherPaneOperation(tr("Move"), selection, destination)) {
         return;
     }
-    setBusy(true, tr("Moving %1 item(s)…").arg(selection.size()));
-    const quint64 id = nextOperationId();
-    m_operationContexts.insert(
-        id, {sourcePaneId, destinationPaneId, sourceDirectory, destination});
-    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteMove, selection, destination);
-    emit moveRequested(id, selection, destination);
+    startRemoteTransfer(rfm::core::InternalTransferAction::Move,
+                        transferPayload(sourcePaneId, selection), destinationPaneId, destination);
 }
 
 void MainWindow::copySelectedToOtherPane()
@@ -827,12 +888,112 @@ void MainWindow::copySelectedToOtherPane()
     if (!confirmOtherPaneOperation(tr("Copy"), selection, destination)) {
         return;
     }
-    setBusy(true, tr("Copying %1 item(s) on the server…").arg(selection.size()));
-    const quint64 id = nextOperationId();
-    m_operationContexts.insert(
-        id, {sourcePaneId, destinationPaneId, sourceDirectory, destination});
-    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteCopy, selection, destination);
-    emit copyRequested(id, selection, destination);
+    startRemoteTransfer(rfm::core::InternalTransferAction::Copy,
+                        transferPayload(sourcePaneId, selection), destinationPaneId, destination);
+}
+
+void MainWindow::copySelectionToClipboard()
+{
+    FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    const QList<rfm::core::RemoteSelection> selection = pane->selectedEntries();
+    if (!m_connected || selection.isEmpty()) {
+        return;
+    }
+    m_internalClipboard.set(rfm::core::InternalTransferAction::Copy,
+                            transferPayload(m_paneWorkspace->paneId(pane), selection));
+    updateCutAppearance();
+    updateOperationActions();
+    statusBar()->showMessage(tr("%1 remote item(s) copied").arg(selection.size()), 3000);
+}
+
+void MainWindow::cutSelectionToClipboard()
+{
+    FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    const QList<rfm::core::RemoteSelection> selection = pane->selectedEntries();
+    if (!m_connected || selection.isEmpty()) {
+        return;
+    }
+    m_internalClipboard.set(rfm::core::InternalTransferAction::Move,
+                            transferPayload(m_paneWorkspace->paneId(pane), selection));
+    updateCutAppearance();
+    updateOperationActions();
+    statusBar()->showMessage(tr("%1 remote item(s) ready to move").arg(selection.size()), 3000);
+}
+
+void MainWindow::pasteClipboard()
+{
+    if (!m_internalClipboard.content().has_value()) {
+        return;
+    }
+    const rfm::core::ClipboardEntry entry = *m_internalClipboard.content();
+    FileBrowserPane* const destinationPane = m_paneWorkspace->activePane();
+    const quint64 destinationPaneId = m_paneWorkspace->paneId(destinationPane);
+    startRemoteTransfer(entry.action, entry.payload, destinationPaneId,
+                        destinationPane->currentPath(),
+                        entry.action == rfm::core::InternalTransferAction::Move);
+}
+
+void MainWindow::cancelPendingCut()
+{
+    if (!m_internalClipboard.isCut()) {
+        return;
+    }
+    clearInternalClipboard();
+    statusBar()->showMessage(tr("Pending move cancelled"), 3000);
+}
+
+void MainWindow::selectAllInActivePane()
+{
+    if (m_connected) {
+        m_paneWorkspace->activePane()->fileTable()->selectAll();
+    }
+}
+
+void MainWindow::focusActiveLocation()
+{
+    if (m_connected) {
+        m_paneWorkspace->activePane()->focusLocation();
+    }
+}
+
+void MainWindow::handleInternalDrop(rfm::core::InternalTransferPayload payload,
+                                    quint64 destinationPaneId,
+                                    QString destinationDirectory)
+{
+    const rfm::core::InternalTransferValidation validation =
+        rfm::core::validateInternalTransfer(payload, m_applicationInstanceId,
+                                            currentConnectionIdentity(), destinationDirectory);
+    FileBrowserPane* const destinationPane = m_paneWorkspace->pane(destinationPaneId);
+    if (!validation.accepted() || destinationPane == nullptr || destinationPane->isHidden()) {
+        const QString message = transferValidationMessage(
+            validation.accepted() ? rfm::core::InternalTransferValidationError::InvalidDestination
+                                  : validation.error);
+        statusBar()->showMessage(message, 8000);
+        return;
+    }
+
+    QMessageBox choice(QMessageBox::Question, tr("Remote file operation"),
+                       tr("%1 remote item(s)\nDestination: %2")
+                           .arg(payload.sources.size())
+                           .arg(destinationDirectory),
+                       QMessageBox::NoButton, this);
+    QPushButton* const copyButton =
+        choice.addButton(tr("Copy"), QMessageBox::AcceptRole);
+    copyButton->setObjectName(QStringLiteral("dropCopyButton"));
+    QPushButton* const moveButton =
+        choice.addButton(tr("Move"), QMessageBox::DestructiveRole);
+    moveButton->setObjectName(QStringLiteral("dropMoveButton"));
+    QPushButton* const cancelButton = choice.addButton(QMessageBox::Cancel);
+    cancelButton->setObjectName(QStringLiteral("dropCancelButton"));
+    choice.setDefaultButton(cancelButton);
+    choice.exec();
+    if (choice.clickedButton() == copyButton) {
+        startRemoteTransfer(rfm::core::InternalTransferAction::Copy, payload,
+                            destinationPaneId, destinationDirectory);
+    } else if (choice.clickedButton() == moveButton) {
+        startRemoteTransfer(rfm::core::InternalTransferAction::Move, payload,
+                            destinationPaneId, destinationDirectory);
+    }
 }
 
 void MainWindow::removeSelectedEntries()
@@ -1024,6 +1185,9 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
         const rfm::core::OperationProgress started = m_remoteOperations.take(result.id);
         updateTrackedOperation(rfm::core::finishRemoteOperation(result, started));
     }
+    if (m_clipboardMoveOperations.remove(result.id) > 0 && result.allSucceeded()) {
+        clearInternalClipboard();
+    }
     QStringList failures;
     bool anySuccess = false;
     for (const rfm::core::RemoteItemResult& item : result.items) {
@@ -1126,6 +1290,138 @@ void MainWindow::updateConnectionAction()
 {
     m_newConnectionAction->setEnabled(!m_busy && m_busyPanes.isEmpty() &&
                                       m_nonTerminalTransfers.isEmpty());
+}
+
+rfm::core::RemoteConnectionIdentity MainWindow::currentConnectionIdentity() const
+{
+    if (!m_connected || m_connectionGeneration == 0) {
+        return {};
+    }
+    const QString host = m_activeProfile.host.trimmed().isEmpty()
+                             ? QStringLiteral("<active-session>")
+                             : m_activeProfile.host.trimmed();
+    return {host, m_activeProfile.port, m_connectionGeneration};
+}
+
+rfm::core::InternalTransferPayload MainWindow::transferPayload(
+    quint64 paneId, const QList<rfm::core::RemoteSelection>& sources) const
+{
+    return {m_applicationInstanceId, currentConnectionIdentity(), paneId, sources};
+}
+
+bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
+                                     const rfm::core::InternalTransferPayload& payload,
+                                     quint64 destinationPaneId,
+                                     const QString& destinationDirectory, bool clipboardMove)
+{
+    const rfm::core::InternalTransferValidation validation =
+        rfm::core::validateInternalTransfer(payload, m_applicationInstanceId,
+                                            currentConnectionIdentity(), destinationDirectory);
+    FileBrowserPane* const sourcePane = m_paneWorkspace->pane(payload.sourcePaneId);
+    FileBrowserPane* const destinationPane =
+        destinationPaneId == 0 ? nullptr : m_paneWorkspace->pane(destinationPaneId);
+    if (!validation.accepted() || !m_connected || m_busy || sourcePane == nullptr ||
+        (destinationPaneId != 0 &&
+         (destinationPane == nullptr || destinationPane->isHidden()))) {
+        statusBar()->showMessage(
+            transferValidationMessage(
+                validation.accepted()
+                    ? rfm::core::InternalTransferValidationError::InvalidDestination
+                    : validation.error),
+            8000);
+        return false;
+    }
+
+    const bool move = action == rfm::core::InternalTransferAction::Move;
+    setBusy(true, move ? tr("Moving %1 item(s)…").arg(payload.sources.size())
+                       : tr("Copying %1 item(s) on the server…").arg(payload.sources.size()));
+    const quint64 id = nextOperationId();
+    const QString sourceDirectory = payload.sources.isEmpty()
+                                        ? QString{}
+                                        : rfm::core::RemotePath::parent(
+                                              payload.sources.constFirst().path);
+    m_operationContexts.insert(
+        id, {payload.sourcePaneId, destinationPaneId, sourceDirectory, destinationDirectory});
+    beginTrackedRemoteOperation(id,
+                                move ? rfm::core::OperationKind::RemoteMove
+                                     : rfm::core::OperationKind::RemoteCopy,
+                                payload.sources, destinationDirectory);
+    if (clipboardMove) {
+        m_clipboardMoveOperations.insert(id);
+    }
+    if (move) {
+        emit moveRequested(id, payload.sources, destinationDirectory);
+    } else {
+        emit copyRequested(id, payload.sources, destinationDirectory);
+    }
+    return true;
+}
+
+QString MainWindow::transferValidationMessage(
+    rfm::core::InternalTransferValidationError error) const
+{
+    using Error = rfm::core::InternalTransferValidationError;
+    switch (error) {
+    case Error::ForeignApplication:
+    case Error::InvalidPayload:
+        return tr("Only internal RemoteFileManager drags are accepted.");
+    case Error::IncompatibleConnection:
+        return tr("The source belongs to a different or expired server session.");
+    case Error::InvalidDestination:
+        return tr("The remote destination is invalid.");
+    case Error::IncompatiblePathConvention:
+        return tr("Source and destination use incompatible remote path conventions.");
+    case Error::IdenticalSourceAndDestination:
+        return tr("Source and destination are identical.");
+    case Error::DestinationInsideSource:
+        return tr("A folder cannot be copied or moved inside itself.");
+    case Error::None:
+        return {};
+    }
+    return tr("The remote destination is invalid.");
+}
+
+void MainWindow::updatePaneTransferContexts()
+{
+    const rfm::core::RemoteConnectionIdentity identity = currentConnectionIdentity();
+    for (const quint64 paneId : m_paneWorkspace->paneIds()) {
+        FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+        if (identity.isValid()) {
+            pane->setTransferContext(m_applicationInstanceId, identity, paneId);
+        } else {
+            pane->clearTransferContext();
+        }
+    }
+}
+
+void MainWindow::updateCutAppearance()
+{
+    for (const quint64 paneId : m_paneWorkspace->paneIds()) {
+        m_paneWorkspace->pane(paneId)->setCutPaths({});
+    }
+    if (!m_internalClipboard.isCut() || !m_internalClipboard.content().has_value()) {
+        return;
+    }
+    const rfm::core::InternalTransferPayload& payload =
+        m_internalClipboard.content()->payload;
+    if (payload.connection != currentConnectionIdentity()) {
+        return;
+    }
+    QSet<QString> paths;
+    for (const rfm::core::RemoteSelection& source : payload.sources) {
+        paths.insert(source.path);
+    }
+    if (FileBrowserPane* const pane = m_paneWorkspace->pane(payload.sourcePaneId)) {
+        pane->setCutPaths(std::move(paths));
+    }
+}
+
+void MainWindow::clearInternalClipboard()
+{
+    m_internalClipboard.clear();
+    m_clipboardMoveOperations.clear();
+    updateCutAppearance();
+    updateOperationActions();
 }
 
 void MainWindow::requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
@@ -1312,6 +1608,21 @@ void MainWindow::updateOperationActions()
     m_removeAction->setEnabled(available && count > 0);
     m_uploadAction->setEnabled(available);
     m_downloadAction->setEnabled(available && count > 0);
+    m_clipboardCopyAction->setEnabled(available && count > 0);
+    m_clipboardCutAction->setEnabled(available && count > 0);
+    bool pasteAvailable = false;
+    if (available && m_internalClipboard.content().has_value()) {
+        pasteAvailable = rfm::core::validateInternalTransfer(
+                             m_internalClipboard.content()->payload,
+                             m_applicationInstanceId, currentConnectionIdentity(),
+                             m_paneWorkspace->activePane()->currentPath())
+                             .accepted();
+    }
+    m_clipboardPasteAction->setEnabled(pasteAvailable);
+    m_selectAllAction->setEnabled(available);
+    m_focusLocationAction->setEnabled(available);
+    m_switchPaneAction->setEnabled(!m_busy && m_paneWorkspace->isSplit());
+    m_cancelCutAction->setEnabled(m_internalClipboard.isCut());
 }
 
 QList<rfm::core::RemoteSelection> MainWindow::selectedEntries() const
@@ -1390,7 +1701,7 @@ void MainWindow::showAboutDialog()
     QMessageBox::about(
         this, tr("About RemoteFileManager"),
         tr("RemoteFileManager %1\n\nA native file manager for standard SSH/SFTP servers.\n"
-           "Sprint 4: dual-pane navigation and persistent operation history.")
+           "Sprint 5: internal drag and drop, clipboard, and keyboard navigation.")
             .arg(QApplication::applicationVersion()));
 }
 
