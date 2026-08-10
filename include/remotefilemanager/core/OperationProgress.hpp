@@ -1,0 +1,55 @@
+#pragma once
+
+#include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/TransferTypes.hpp"
+
+#include <QMetaType>
+#include <QString>
+#include <QStringList>
+#include <QtGlobal>
+
+namespace rfm::core
+{
+
+enum class OperationKind { Upload, Download, RemoteCopy, RemoteMove };
+
+enum class OperationState {
+    Queued,
+    Preparing,
+    Running,
+    Paused,
+    Finalizing,
+    Cancelling,
+    Completed,
+    Cancelled,
+    Failed,
+};
+
+struct OperationProgress {
+    quint64 id{0};
+    OperationKind kind{OperationKind::Upload};
+    OperationState state{OperationState::Queued};
+    QStringList sources;
+    QString destination;
+    quint64 transferredBytes{0};
+    quint64 totalBytes{0};
+    quint64 bytesPerSecond{0};
+    quint64 completedItems{0};
+    quint64 totalItems{0};
+    QString currentItem;
+    QString error;
+    bool byteProgressAvailable{false};
+    bool pauseResumeSupported{false};
+    bool cancellationSupported{false};
+};
+
+[[nodiscard]] OperationProgress operationProgress(const TransferProgress& transfer);
+[[nodiscard]] OperationProgress beginRemoteOperation(
+    quint64 id, OperationKind kind, const QList<RemoteSelection>& sources,
+    const QString& destinationDirectory);
+[[nodiscard]] OperationProgress finishRemoteOperation(
+    const RemoteOperationResult& result, const OperationProgress& started = {});
+
+} // namespace rfm::core
+
+Q_DECLARE_METATYPE(rfm::core::OperationProgress)

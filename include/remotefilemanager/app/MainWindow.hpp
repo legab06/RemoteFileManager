@@ -1,7 +1,8 @@
 #pragma once
 
-#include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/app/FileBrowserPane.hpp"
+#include "remotefilemanager/core/ConnectionProfile.hpp"
+#include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
@@ -26,7 +27,7 @@ namespace rfm::app
 {
 
 class PaneWorkspace;
-class TransferPanel;
+class OperationPanel;
 
 class MainWindow final : public QMainWindow
 {
@@ -61,7 +62,7 @@ class MainWindow final : public QMainWindow
     void connectBrowserPane(quint64 paneId);
     void createNavigationBar();
     void createPlacesDock();
-    void createTransferDock();
+    void createOperationDock();
     void createEmptyState();
     void showConnectionDialog();
     void showAboutDialog();
@@ -88,6 +89,9 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void queueDownloads(QString localDirectory);
     Q_INVOKABLE void handleOperationResult(const rfm::core::RemoteOperationResult& result);
     Q_INVOKABLE void handleTransferProgress(const rfm::core::TransferProgress& progress);
+    void beginTrackedRemoteOperation(quint64 id, rfm::core::OperationKind kind,
+                                     const QList<rfm::core::RemoteSelection>& sources,
+                                     const QString& destination);
     void updateOperationActions();
     void updateConnectionAction();
     void requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
@@ -125,7 +129,7 @@ class MainWindow final : public QMainWindow
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
     PaneWorkspace* m_paneWorkspace{nullptr};
-    TransferPanel* m_transferPanel{nullptr};
+    OperationPanel* m_operationPanel{nullptr};
     QTimer* m_autoRefreshTimer{nullptr};
     QTimer* m_refreshDebounceTimer{nullptr};
     QThread* m_sshThread{nullptr};
@@ -151,6 +155,7 @@ class MainWindow final : public QMainWindow
         QString destinationDirectory;
     };
     QHash<quint64, OperationContext> m_operationContexts;
+    QHash<quint64, rfm::core::OperationProgress> m_remoteOperations;
     QHash<quint64, quint64> m_transferPanes;
     quint64 m_activeDirectoryRequestId{0};
     quint64 m_nextOperationId{1};

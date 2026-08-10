@@ -2,7 +2,7 @@
 #include "remotefilemanager/app/FileBrowserPane.hpp"
 #include "remotefilemanager/app/MainWindow.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
-#include "remotefilemanager/app/TransferPanel.hpp"
+#include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 
 #include <QAction>
@@ -111,6 +111,7 @@ class MainWindowTest final : public QObject
     void queuesDownloadsFromRemoteSelection();
     void displaysTransferProgressAndMultipleEntries();
     void displaysTransferStatesInEnglish();
+    void displaysRemoteCopyAndMoveOperations();
     void exposesPauseResumeAndCancelIntentions();
     void displaysTerminalTransferStatesAndErrors();
     void formatsTransferSizesAndSpeeds();
@@ -147,13 +148,13 @@ void MainWindowTest::exposesInitialDisconnectedShell()
     QVERIFY(connectionButton != nullptr);
     QVERIFY(connectionButton->isEnabled());
 
-    const auto* const transferPanel =
-        window.findChild<rfm::app::TransferPanel*>(QStringLiteral("transferPanel"));
-    const auto* const transferTable =
-        window.findChild<QTableWidget*>(QStringLiteral("transferTable"));
-    QVERIFY(transferPanel != nullptr);
-    QVERIFY(transferTable != nullptr);
-    QCOMPARE(transferTable->rowCount(), 0);
+    const auto* const operationPanel =
+        window.findChild<rfm::app::OperationPanel*>(QStringLiteral("operationPanel"));
+    const auto* const operationTable =
+        window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(operationPanel != nullptr);
+    QVERIFY(operationTable != nullptr);
+    QCOMPARE(operationTable->rowCount(), 0);
     const auto* const uploadAction = window.findChild<QAction*>(QStringLiteral("uploadAction"));
     const auto* const downloadAction = window.findChild<QAction*>(QStringLiteral("downloadAction"));
     QVERIFY(uploadAction != nullptr);
@@ -344,31 +345,34 @@ void MainWindowTest::queuesDownloadsFromRemoteSelection()
 
 void MainWindowTest::displaysTransferProgressAndMultipleEntries()
 {
-    rfm::app::TransferPanel panel;
+    rfm::app::OperationPanel panel;
     panel.show();
     auto first = progress(201, rfm::core::TransferState::Queued);
-    panel.updateTransfer(first);
+    panel.updateOperation(rfm::core::operationProgress(first));
     auto second = progress(202, rfm::core::TransferState::Queued);
     second.source = QStringLiteral("/tmp/photos");
     second.destination = QStringLiteral("/srv/photos");
+    second.direction = rfm::core::TransferDirection::Download;
     second.directory = true;
-    panel.updateTransfer(second);
+    panel.updateOperation(rfm::core::operationProgress(second));
 
-    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("transferTable"));
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     QCOMPARE(table->rowCount(), 2);
     const int firstRow = rowForId(table, 201);
     QVERIFY(firstRow >= 0);
-    QCOMPARE(table->horizontalHeaderItem(0)->text(), QStringLiteral("Direction"));
+    QCOMPARE(table->horizontalHeaderItem(0)->text(), QStringLiteral("Operation"));
     QCOMPARE(table->horizontalHeaderItem(3)->text(), QStringLiteral("Status"));
     QCOMPARE(table->horizontalHeaderItem(4)->text(), QStringLiteral("Progress"));
     QCOMPARE(table->horizontalHeaderItem(5)->text(), QStringLiteral("Speed"));
     QCOMPARE(table->horizontalHeaderItem(7)->text(), QStringLiteral("Error"));
     QCOMPARE(table->item(firstRow, 0)->text(), QStringLiteral("↑ Upload"));
     QCOMPARE(table->item(firstRow, 3)->text(), QStringLiteral("Queued"));
+    QCOMPARE(table->item(rowForId(table, 202), 0)->text(), QStringLiteral("↓ Download"));
 
-    panel.updateTransfer(progress(201, rfm::core::TransferState::Transferring, 512, 1024, 1024));
-    QCOMPARE(table->item(firstRow, 3)->text(), QStringLiteral("Transferring"));
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(201, rfm::core::TransferState::Transferring, 512, 1024, 1024)));
+    QCOMPARE(table->item(firstRow, 3)->text(), QStringLiteral("Running"));
     QCOMPARE(table->item(firstRow, 5)->text(), QStringLiteral("1.0 KiB/s"));
     auto* const bar = qobject_cast<QProgressBar*>(table->cellWidget(firstRow, 4));
     QVERIFY(bar != nullptr);
@@ -378,13 +382,13 @@ void MainWindowTest::displaysTransferProgressAndMultipleEntries()
 
 void MainWindowTest::displaysTransferStatesInEnglish()
 {
-    rfm::app::TransferPanel panel;
-    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("transferTable"));
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const QList<QPair<rfm::core::TransferState, QString>> states{
         {rfm::core::TransferState::Queued, QStringLiteral("Queued")},
         {rfm::core::TransferState::Preparing, QStringLiteral("Preparing")},
-        {rfm::core::TransferState::Transferring, QStringLiteral("Transferring")},
+        {rfm::core::TransferState::Transferring, QStringLiteral("Running")},
         {rfm::core::TransferState::Paused, QStringLiteral("Paused")},
         {rfm::core::TransferState::Finalizing, QStringLiteral("Finalizing")},
         {rfm::core::TransferState::Cancelling, QStringLiteral("Cancelling")},
@@ -394,20 +398,79 @@ void MainWindowTest::displaysTransferStatesInEnglish()
     };
     quint64 id = 600;
     for (const auto& [state, text] : states) {
-        panel.updateTransfer(progress(++id, state));
+        panel.updateOperation(rfm::core::operationProgress(progress(++id, state)));
         QCOMPARE(table->item(rowForId(table, id), 3)->text(), text);
     }
 }
 
+void MainWindowTest::displaysRemoteCopyAndMoveOperations()
+{
+    rfm::app::OperationPanel panel;
+    panel.show();
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    const QList<rfm::core::RemoteSelection> copySources{
+        {QStringLiteral("/source/first.txt"), false},
+        {QStringLiteral("/source/second.txt"), false}};
+    const auto copy = rfm::core::beginRemoteOperation(
+        701, rfm::core::OperationKind::RemoteCopy, copySources, QStringLiteral("/destination"));
+    panel.updateOperation(copy);
+    const int copyRow = rowForId(table, 701);
+    QVERIFY(copyRow >= 0);
+    QCOMPARE(table->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
+    QCOMPARE(table->item(copyRow, 1)->text(), QStringLiteral("first.txt (+1)"));
+    QCOMPARE(table->item(copyRow, 2)->text(), QStringLiteral("/destination"));
+    QCOMPARE(table->item(copyRow, 3)->text(), QStringLiteral("Running"));
+    QCOMPARE(table->item(copyRow, 4)->text(), QStringLiteral("—"));
+    QCOMPARE(table->item(copyRow, 5)->text(), QStringLiteral("—"));
+    QCOMPARE(table->item(copyRow, 6)->text(), QStringLiteral("—"));
+    QVERIFY(table->cellWidget(copyRow, 4) == nullptr);
+    QVERIFY(table->cellWidget(copyRow, 6) == nullptr);
+
+    const rfm::core::RemoteOperationResult completedCopy{
+        701,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/first.txt"), QStringLiteral("/destination/first.txt"), true, {}},
+         {QStringLiteral("/source/second.txt"), QStringLiteral("/destination/second.txt"), true,
+          {}}}};
+    panel.updateOperation(rfm::core::finishRemoteOperation(completedCopy, copy));
+    QCOMPARE(table->item(copyRow, 3)->text(), QStringLiteral("Completed"));
+    QCOMPARE(table->item(copyRow, 4)->text(), QStringLiteral("2 / 2 completed"));
+
+    const QList<rfm::core::RemoteSelection> moveSources{
+        {QStringLiteral("/source/a.txt"), false},
+        {QStringLiteral("/source/b.txt"), false}};
+    const auto move = rfm::core::beginRemoteOperation(
+        702, rfm::core::OperationKind::RemoteMove, moveSources, QStringLiteral("/archive"));
+    panel.updateOperation(move);
+    const rfm::core::RemoteOperationResult partialMove{
+        702,
+        rfm::core::RemoteOperationKind::Move,
+        {{QStringLiteral("/source/a.txt"), QStringLiteral("/archive/a.txt"), true, {}},
+         {QStringLiteral("/source/b.txt"), QStringLiteral("/archive/b.txt"), false,
+          QStringLiteral("permission denied")}}};
+    panel.updateOperation(rfm::core::finishRemoteOperation(partialMove, move));
+    const int moveRow = rowForId(table, 702);
+    QVERIFY(moveRow >= 0);
+    QCOMPARE(table->item(moveRow, 0)->text(), QStringLiteral("Remote Move"));
+    QCOMPARE(table->item(moveRow, 3)->text(), QStringLiteral("Failed"));
+    QCOMPARE(table->item(moveRow, 4)->text(), QStringLiteral("1 / 2 completed"));
+    QVERIFY(table->item(moveRow, 7)->text().contains(QStringLiteral("permission denied")));
+    QVERIFY(table->cellWidget(moveRow, 4) == nullptr);
+    QVERIFY(table->cellWidget(moveRow, 6) == nullptr);
+}
+
 void MainWindowTest::exposesPauseResumeAndCancelIntentions()
 {
-    rfm::app::TransferPanel panel;
+    rfm::app::OperationPanel panel;
     panel.show();
-    QSignalSpy pauses(&panel, &rfm::app::TransferPanel::pauseRequested);
-    QSignalSpy resumes(&panel, &rfm::app::TransferPanel::resumeRequested);
-    QSignalSpy cancellations(&panel, &rfm::app::TransferPanel::cancelRequested);
-    panel.updateTransfer(progress(301, rfm::core::TransferState::Transferring, 1, 10));
-    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("transferTable"));
+    QSignalSpy pauses(&panel, &rfm::app::OperationPanel::pauseRequested);
+    QSignalSpy resumes(&panel, &rfm::app::OperationPanel::resumeRequested);
+    QSignalSpy cancellations(&panel, &rfm::app::OperationPanel::cancelRequested);
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(301, rfm::core::TransferState::Transferring, 1, 10)));
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const int row = rowForId(table, 301);
     QWidget* const actions = table->cellWidget(row, 6);
@@ -432,11 +495,13 @@ void MainWindowTest::exposesPauseResumeAndCancelIntentions()
     QTest::mouseClick(pauseResume, Qt::LeftButton);
     QCOMPARE(pauses.size(), 1);
 
-    panel.updateTransfer(progress(301, rfm::core::TransferState::Paused, 1, 10));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(301, rfm::core::TransferState::Paused, 1, 10)));
     QCOMPARE(pauseResume->text(), QStringLiteral("Resume"));
     QTest::mouseClick(pauseResume, Qt::LeftButton);
     QCOMPARE(resumes.size(), 1);
-    panel.updateTransfer(progress(301, rfm::core::TransferState::Transferring, 2, 10));
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(301, rfm::core::TransferState::Transferring, 2, 10)));
     QCOMPARE(pauseResume->text(), QStringLiteral("Pause"));
     QTest::mouseClick(cancel, Qt::LeftButton);
     QCOMPARE(cancellations.size(), 1);
@@ -446,13 +511,14 @@ void MainWindowTest::exposesPauseResumeAndCancelIntentions()
 
 void MainWindowTest::displaysTerminalTransferStatesAndErrors()
 {
-    rfm::app::TransferPanel panel;
+    rfm::app::OperationPanel panel;
     panel.show();
-    panel.updateTransfer(progress(401, rfm::core::TransferState::Completed, 10, 10));
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(401, rfm::core::TransferState::Completed, 10, 10)));
     auto failure = progress(402, rfm::core::TransferState::Failed, 4, 10);
     failure.error = QStringLiteral("/srv/archive: permission denied");
-    panel.updateTransfer(failure);
-    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("transferTable"));
+    panel.updateOperation(rfm::core::operationProgress(failure));
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const int completedRow = rowForId(table, 401);
     const int failedRow = rowForId(table, 402);
@@ -468,10 +534,10 @@ void MainWindowTest::displaysTerminalTransferStatesAndErrors()
 
 void MainWindowTest::formatsTransferSizesAndSpeeds()
 {
-    QCOMPARE(rfm::app::TransferPanel::formatBytes(0), QStringLiteral("0 B"));
-    QCOMPARE(rfm::app::TransferPanel::formatBytes(1536), QStringLiteral("1.5 KiB"));
-    QCOMPARE(rfm::app::TransferPanel::formatSpeed(0), QStringLiteral("—"));
-    QCOMPARE(rfm::app::TransferPanel::formatSpeed(1024), QStringLiteral("1.0 KiB/s"));
+    QCOMPARE(rfm::app::OperationPanel::formatBytes(0), QStringLiteral("0 B"));
+    QCOMPARE(rfm::app::OperationPanel::formatBytes(1536), QStringLiteral("1.5 KiB"));
+    QCOMPARE(rfm::app::OperationPanel::formatSpeed(0), QStringLiteral("—"));
+    QCOMPARE(rfm::app::OperationPanel::formatSpeed(1024), QStringLiteral("1.0 KiB/s"));
 }
 
 void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
@@ -962,6 +1028,15 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QCOMPARE(copiedSources.constFirst().path, QStringLiteral("/source/file.txt"));
     QCOMPARE(copies.constFirst().at(2).toString(), destinationPane->currentPath());
     const quint64 copyId = copies.constFirst().constFirst().toULongLong();
+    auto* const operationTable =
+        window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(operationTable != nullptr);
+    const int copyRow = rowForId(operationTable, copyId);
+    QVERIFY(copyRow >= 0);
+    QCOMPARE(operationTable->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
+    QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Running"));
+    QVERIFY(operationTable->cellWidget(copyRow, 4) == nullptr);
+    QVERIFY(operationTable->cellWidget(copyRow, 6) == nullptr);
     const rfm::core::RemoteOperationResult copyResult{
         copyId,
         rfm::core::RemoteOperationKind::Copy,
@@ -969,6 +1044,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleOperationResult", Qt::DirectConnection,
         Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Completed"));
 
     auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
     debounce->stop();
@@ -988,6 +1064,10 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QVERIFY(workspace->paneId(destinationPane) !=
             workspace->paneId(workspace->otherVisiblePane(workspace->paneId(destinationPane))));
     const quint64 moveId = moves.constFirst().constFirst().toULongLong();
+    const int moveRow = rowForId(operationTable, moveId);
+    QVERIFY(moveRow >= 0);
+    QCOMPARE(operationTable->item(moveRow, 0)->text(), QStringLiteral("Remote Move"));
+    QCOMPARE(operationTable->item(moveRow, 3)->text(), QStringLiteral("Running"));
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     const rfm::core::RemoteOperationResult moveResult{
         moveId,
@@ -996,6 +1076,16 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleOperationResult", Qt::DirectConnection,
         Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+    QCOMPARE(operationTable->item(moveRow, 3)->text(), QStringLiteral("Completed"));
+    const int operationCount = operationTable->rowCount();
+    const rfm::core::RemoteOperationResult createDirectoryResult{
+        moveId + 100,
+        rfm::core::RemoteOperationKind::CreateDirectory,
+        {{QStringLiteral("/source"), QStringLiteral("/source/new"), true, {}}}};
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleOperationResult", Qt::DirectConnection,
+        Q_ARG(rfm::core::RemoteOperationResult, createDirectoryResult)));
+    QCOMPARE(operationTable->rowCount(), operationCount);
     QVERIFY(!workspace->isSplit());
 }
 

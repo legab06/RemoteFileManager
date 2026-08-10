@@ -2,8 +2,8 @@
 
 #include "remotefilemanager/app/ConnectionDialog.hpp"
 #include "remotefilemanager/app/FileBrowserPane.hpp"
+#include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
-#include "remotefilemanager/app/TransferPanel.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/ssh/LibsshRuntime.hpp"
@@ -119,7 +119,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     createMenus();
     createNavigationBar();
     createPlacesDock();
-    createTransferDock();
+    createOperationDock();
     createEmptyState();
 
     m_autoRefreshTimer = new QTimer(this);
@@ -150,6 +150,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent)
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
     qRegisterMetaType<rfm::core::RemoteOperationResult>();
+    qRegisterMetaType<rfm::core::OperationProgress>();
     qRegisterMetaType<rfm::core::TransferRequest>();
     qRegisterMetaType<rfm::core::TransferProgress>();
     m_sshThread = new QThread(this);
@@ -446,20 +447,20 @@ void MainWindow::createPlacesDock()
     addDockWidget(Qt::LeftDockWidgetArea, placesDock);
 }
 
-void MainWindow::createTransferDock()
+void MainWindow::createOperationDock()
 {
-    auto* const transferDock = new QDockWidget(tr("Transfers"), this);
-    transferDock->setObjectName(QStringLiteral("transferDock"));
-    transferDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
-    m_transferPanel = new TransferPanel(transferDock);
-    transferDock->setWidget(m_transferPanel);
-    addDockWidget(Qt::BottomDockWidgetArea, transferDock);
+    auto* const operationDock = new QDockWidget(tr("Operations"), this);
+    operationDock->setObjectName(QStringLiteral("operationDock"));
+    operationDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    m_operationPanel = new OperationPanel(operationDock);
+    operationDock->setWidget(m_operationPanel);
+    addDockWidget(Qt::BottomDockWidgetArea, operationDock);
 
-    connect(m_transferPanel, &TransferPanel::pauseRequested, this,
+    connect(m_operationPanel, &OperationPanel::pauseRequested, this,
             &MainWindow::pauseTransferRequested);
-    connect(m_transferPanel, &TransferPanel::resumeRequested, this,
+    connect(m_operationPanel, &OperationPanel::resumeRequested, this,
             &MainWindow::resumeTransferRequested);
-    connect(m_transferPanel, &TransferPanel::cancelRequested, this,
+    connect(m_operationPanel, &OperationPanel::cancelRequested, this,
             &MainWindow::cancelTransferRequested);
 }
 
@@ -608,6 +609,12 @@ void MainWindow::showConnectionError(const QString& message)
     m_pendingTransferRequests.clear();
     m_nonTerminalTransfers.clear();
     m_operationContexts.clear();
+    for (auto operation : std::as_const(m_remoteOperations)) {
+        operation.state = rfm::core::OperationState::Failed;
+        operation.error = message;
+        m_operationPanel->updateOperation(operation);
+    }
+    m_remoteOperations.clear();
     m_transferPanes.clear();
     setBusy(false);
     statusBar()->showMessage(tr("Disconnected"));
@@ -712,6 +719,7 @@ void MainWindow::moveSelectedEntries()
     const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
     m_operationContexts.insert(
         id, {paneId, 0, m_paneWorkspace->activePane()->currentPath(), destination});
+    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteMove, selection, destination);
     emit moveRequested(id, selection, destination);
 }
 
@@ -730,6 +738,7 @@ void MainWindow::copySelectedEntries()
     const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
     m_operationContexts.insert(
         id, {paneId, 0, m_paneWorkspace->activePane()->currentPath(), destination});
+    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteCopy, selection, destination);
     emit copyRequested(id, selection, destination);
 }
 
@@ -765,6 +774,7 @@ void MainWindow::moveSelectedToOtherPane()
     const quint64 id = nextOperationId();
     m_operationContexts.insert(
         id, {sourcePaneId, destinationPaneId, sourceDirectory, destination});
+    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteMove, selection, destination);
     emit moveRequested(id, selection, destination);
 }
 
@@ -800,6 +810,7 @@ void MainWindow::copySelectedToOtherPane()
     const quint64 id = nextOperationId();
     m_operationContexts.insert(
         id, {sourcePaneId, destinationPaneId, sourceDirectory, destination});
+    beginTrackedRemoteOperation(id, rfm::core::OperationKind::RemoteCopy, selection, destination);
     emit copyRequested(id, selection, destination);
 }
 
@@ -893,9 +904,24 @@ void MainWindow::queueDownloads(QString localDirectory)
     }
 }
 
+void MainWindow::beginTrackedRemoteOperation(
+    quint64 id, rfm::core::OperationKind kind,
+    const QList<rfm::core::RemoteSelection>& sources, const QString& destination)
+{
+    const rfm::core::OperationProgress operation =
+        rfm::core::beginRemoteOperation(id, kind, sources, destination);
+    m_remoteOperations.insert(id, operation);
+    m_operationPanel->updateOperation(operation);
+}
+
 void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& result)
 {
     const OperationContext context = m_operationContexts.take(result.id);
+    if (result.kind == rfm::core::RemoteOperationKind::Copy ||
+        result.kind == rfm::core::RemoteOperationKind::Move) {
+        const rfm::core::OperationProgress started = m_remoteOperations.take(result.id);
+        m_operationPanel->updateOperation(rfm::core::finishRemoteOperation(result, started));
+    }
     QStringList failures;
     bool anySuccess = false;
     for (const rfm::core::RemoteItemResult& item : result.items) {
@@ -969,7 +995,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
 
 void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progress)
 {
-    m_transferPanel->updateTransfer(progress);
+    m_operationPanel->updateOperation(rfm::core::operationProgress(progress));
     m_pendingTransferRequests.remove(progress.id);
     const bool terminal = progress.state == rfm::core::TransferState::Completed ||
                           progress.state == rfm::core::TransferState::Cancelled ||

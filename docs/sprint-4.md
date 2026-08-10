@@ -175,8 +175,19 @@ Création de dossier, renommage et suppression ne sont pas ajoutés à cette vue
 principale. Leur résultat reste présenté dans le contexte de l’action afin de ne
 pas encombrer l’historique.
 
-Le modèle d’affichage commun ne remplace pas la FIFO et les jobs du Sprint 3. Il
-agrège leurs événements avec ceux des copies et déplacements.
+Le modèle d’affichage commun `OperationProgress` ne remplace pas la FIFO et les
+jobs du Sprint 3. Il agrège leurs événements avec ceux des copies et déplacements.
+`TransferDirection` reste limité aux uploads et downloads ; un `OperationKind`
+distinct décrit les quatre catégories présentées. `OperationState` adapte les
+états détaillés des transferts et fournit les états communs aux opérations
+distantes.
+
+`OperationPanel`, qui remplace `TransferPanel`, ne reçoit que ce modèle commun.
+Les transferts conservent leur barre de progression réelle, leur vitesse et leurs
+commandes Pause/Reprise/Annuler. Les copies et déplacements affichent leurs
+sources, leur destination et leur état sans pourcentage, vitesse ou commande
+fictive. Un résultat partiel indique le nombre d’éléments terminés et détaille
+les éléments en erreur.
 
 ## Historique persistant
 
@@ -296,7 +307,7 @@ Tous les tests automatisés restent indépendants d’un serveur SSH externe.
 - [ ] Une copie ou un déplacement sur la même connexion reste exécuté côté serveur.
 - [ ] Les réponses asynchrones ne peuvent pas être appliquées au mauvais panneau.
 - [ ] Uploads, downloads et navigation du Sprint 3 ne régressent pas.
-- [ ] La vue d’opérations suit upload, download, copie et déplacement.
+- [x] La vue d’opérations suit upload, download, copie et déplacement.
 - [ ] L’historique terminal est persistant et nettoyable.
 - [ ] Les opérations triviales n’encombrent pas l’historique principal.
 - [ ] Les tests automatisés ne nécessitent aucun serveur externe.
@@ -307,7 +318,7 @@ manuelle sur une installation SSH/SFTP standard.
 
 ## État d’avancement
 
-Les étapes 1, 2, 3A et 3B sont implémentées. À l’issue de l’étape 3B :
+Les étapes 1 à 5 sont implémentées. À l’issue de l’étape 5 :
 
 - chaque `FileBrowserPane` conserve un historique arrière/avant indépendant,
   modifié seulement lorsqu’un listing attendu réussit ;
@@ -324,10 +335,22 @@ Les étapes 1, 2, 3A et 3B sont implémentées. À l’issue de l’étape 3B :
 - l’identité des panneaux et des dossiers source/destination est conservée pendant
   l’opération, y compris si le split est refermé ;
 - les succès complets ou partiels déclenchent uniquement les refreshs distants
-  pertinents, coalescés par panneau ; un download n’en déclenche aucun.
+  pertinents, coalescés par panneau ; un download n’en déclenche aucun ;
+- le dock inférieur et son composant sont renommés « Operations » et
+  `OperationPanel` ;
+- `OperationProgress` agrège les événements sans modifier `TransferQueue`,
+  `TransferFileJob`, `TransferDirectoryJob`, leur FIFO ni `TransferDirection` ;
+- uploads et downloads conservent progression, vitesse, pause, reprise,
+  annulation ainsi que leurs phases détaillées ;
+- copies et déplacements distants apparaissent dès leur démarrage puis passent à
+  « Completed » ou « Failed », sans progression ou contrôle non pris en charge ;
+- les résultats partiels indiquent le nombre d’éléments réussis et conservent le
+  détail contextualisé des échecs ;
+- création de dossier, renommage et suppression restent exclus de la vue.
 
-Le gestionnaire d’opérations commun et l’historique persistant ne sont pas encore
-commencés.
+L’historique persistant de l’étape 6 n’est pas commencé. Les lignes du panneau ne
+sont conservées que pendant l’exécution courante de l’application et aucune
+commande de nettoyage n’est encore proposée.
 
 Une nouvelle validation visuelle manuelle reste nécessaire sur les thèmes clairs
 et sombres réellement ciblés ; les tests automatisés vérifient les palettes et les
