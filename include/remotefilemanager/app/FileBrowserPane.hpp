@@ -83,6 +83,7 @@ class FileBrowserPane final : public QWidget
     quint64 m_paneId{0};
     QSet<QString> m_cutPaths;
     int m_dropHighlightRow{-1};
+    bool m_restoreTableFocus{false};
 };
 
 } // namespace rfm::app

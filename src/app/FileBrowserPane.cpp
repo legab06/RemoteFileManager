@@ -2,6 +2,7 @@
 
 #include "remotefilemanager/core/RemotePath.hpp"
 
+#include <QApplication>
 #include <QColor>
 #include <QBrush>
 #include <QDrag>
@@ -11,6 +12,7 @@
 #include <QDropEvent>
 #include <QFileIconProvider>
 #include <QEvent>
+#include <QFocusEvent>
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QLineEdit>
@@ -140,10 +142,17 @@ QByteArray FileBrowserPane::createInternalDragData() const
 
 bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
 {
-    if ((watched == this || watched == m_pathEdit || watched == m_fileTable ||
-         watched == m_fileTable->viewport()) &&
-        (event->type() == QEvent::MouseButtonPress || event->type() == QEvent::FocusIn)) {
-        emit activated();
+    if (watched == this || watched == m_pathEdit || watched == m_fileTable ||
+        watched == m_fileTable->viewport()) {
+        bool activatesPane = event->type() == QEvent::MouseButtonPress;
+        if (event->type() == QEvent::FocusIn) {
+            const Qt::FocusReason reason = static_cast<QFocusEvent*>(event)->reason();
+            activatesPane = reason == Qt::MouseFocusReason || reason == Qt::TabFocusReason ||
+                            reason == Qt::BacktabFocusReason || reason == Qt::ShortcutFocusReason;
+        }
+        if (activatesPane) {
+            emit activated();
+        }
     }
     if (watched == m_fileTable->viewport()) {
         if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
@@ -314,7 +323,20 @@ void FileBrowserPane::setPendingSelectionNames(QStringList names)
 
 void FileBrowserPane::setInteractionEnabled(bool enabled)
 {
+    if (!enabled && m_fileTable->isEnabled()) {
+        QWidget* const focusWidget = QApplication::focusWidget();
+        if (focusWidget == m_fileTable || m_fileTable->isAncestorOf(focusWidget)) {
+            m_pathEdit->setFocus(Qt::OtherFocusReason);
+            m_restoreTableFocus = true;
+        }
+    }
     m_fileTable->setEnabled(enabled);
+    if (enabled && m_restoreTableFocus) {
+        if (QApplication::focusWidget() == m_pathEdit) {
+            m_fileTable->setFocus(Qt::OtherFocusReason);
+        }
+        m_restoreTableFocus = false;
+    }
 }
 
 void FileBrowserPane::setActiveAppearance(bool active)
