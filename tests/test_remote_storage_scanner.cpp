@@ -182,6 +182,8 @@ class RemoteStorageScannerTest final : public QObject
     void exposesMountInfoFingerprintAfterSuccessfulScan();
     void keepsFuseVolumesNavigableWhenNoBlockDeviceExists();
     void filtersPseudoMountsBeforeApplyingTheMountLimit();
+    void sharesLsblkParsingAndAddsUnmountedDevices();
+    void keepsMountedDiscoveryWhenLsblkIsUnavailable();
 };
 
 void RemoteStorageScannerTest::yieldsAndCompletesAClassifiedScan()
@@ -396,6 +398,59 @@ void RemoteStorageScannerTest::filtersPseudoMountsBeforeApplyingTheMountLimit()
     const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
     QCOMPARE(volumes.size(), 1);
     QCOMPARE(volumes.constFirst().rootPath, QStringLiteral("/data"));
+}
+
+void RemoteStorageScannerTest::sharesLsblkParsingAndAddsUnmountedDevices()
+{
+    const QByteArray json = R"json({"blockdevices":[
+        {"path":"/dev/sda","name":"sda","type":"disk","fstype":null,"size":10000,
+         "children":[
+           {"path":"/dev/sda1","name":"sda1","pkname":"/dev/sda","type":"part",
+            "fstype":"ext4","label":"ROOT","size":7000,"mountpoints":["/"],"ro":false},
+           {"path":"/dev/sda2","name":"sda2","pkname":"/dev/sda","type":"part",
+            "fstype":"swap","size":3000,"mountpoints":[null]}]},
+        {"path":"/dev/sdb","name":"sdb","type":"disk","fstype":"ext4","label":"USB",
+         "size":4096,"mountpoints":[null],"tran":"usb","rm":true},
+        {"path":"/dev/loop0","name":"loop0","type":"loop","fstype":"squashfs",
+         "size":1024,"mountpoints":[null]}
+    ]})json";
+    const QList<rfm::core::LinuxBlockDevice> devices = rfm::core::parseLinuxBlockDevices(json);
+    QCOMPARE(devices.size(), 5);
+    QCOMPARE(devices.at(1).parentDevice, QStringLiteral("/dev/sda"));
+    QCOMPARE(devices.at(1).mountPoint, QStringLiteral("/"));
+
+    rfm::core::StorageVolume root;
+    root.displayName = QStringLiteral("System");
+    root.rootPath = QStringLiteral("/");
+    root.device = QStringLiteral("/dev/sda1");
+    root.fileSystemType = QByteArrayLiteral("ext4");
+    root.kind = rfm::core::StorageKind::System;
+    const QList<rfm::core::StorageVolume> volumes =
+        rfm::core::mergeLinuxBlockDevices({root}, devices);
+    QCOMPARE(volumes.size(), 2);
+    QVERIFY(std::ranges::any_of(volumes, [](const rfm::core::StorageVolume& volume) {
+        return volume.device == QStringLiteral("/dev/sda1") && volume.mounted &&
+               volume.rootPath == QStringLiteral("/") &&
+               volume.kind == rfm::core::StorageKind::System;
+    }));
+    QVERIFY(std::ranges::any_of(volumes, [](const rfm::core::StorageVolume& volume) {
+        return volume.device == QStringLiteral("/dev/sdb") && !volume.mounted &&
+               volume.kind == rfm::core::StorageKind::External;
+    }));
+}
+
+void RemoteStorageScannerTest::keepsMountedDiscoveryWhenLsblkIsUnavailable()
+{
+    auto reader = std::make_unique<FakeRemoteStorageReader>();
+    reader->mountInfo =
+        blockMount(24, "8:1", "/", "/dev/sda1") + blockMount(25, "8:17", "/media/usb", "/dev/sdb1");
+    rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 15);
+    QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::Completed);
+    const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
+    QCOMPARE(volumes.size(), 2);
+    QVERIFY(std::ranges::any_of(volumes, [](const rfm::core::StorageVolume& volume) {
+        return volume.rootPath == QStringLiteral("/") && volume.mounted;
+    }));
 }
 
 QTEST_MAIN(RemoteStorageScannerTest)

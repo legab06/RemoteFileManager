@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
+#include "remotefilemanager/core/VolumeService.hpp"
 
 #include <QByteArray>
 #include <QObject>
@@ -28,6 +29,7 @@ class SshSession final : public QObject
     void listDirectory(quint64 requestId, QString path);
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
+    void operateVolume(rfm::core::VolumeOperationRequest request);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
     void moveEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
@@ -53,6 +55,7 @@ class SshSession final : public QObject
     void storageMountsProbed(quint64 requestId, QByteArray fingerprint);
     void storageMountProbeFailed(quint64 requestId, QString error);
     void storageVolumeListingFailed(quint64 requestId, QString error);
+    void volumeOperationFinished(rfm::core::VolumeOperationResult result);
     void operationFinished(rfm::core::RemoteOperationResult result);
     void operationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
@@ -76,6 +79,10 @@ class SshSession final : public QObject
     void processStorageProbeStep();
     void scheduleStorageProbeStep();
     void cancelStorageProbe();
+    void processVolumeCommandStep();
+    void scheduleVolumeCommandStep();
+    void startRemoteStorageScanner(quint64 requestId);
+    void startPendingRemoteWork();
     void completeShutdownIfReady();
     void fail(const QString& message);
 };

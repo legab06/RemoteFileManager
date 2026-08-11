@@ -126,7 +126,8 @@ class UploadSelectionDialog final : public QFileDialog
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
-                       QString serverProfileDirectory)
+                       QString serverProfileDirectory,
+                       std::unique_ptr<rfm::core::VolumeService> volumeService)
     : QMainWindow(parent),
       m_operationHistoryStore(
           std::make_unique<rfm::core::OperationHistoryStore>(std::move(operationHistoryDirectory))),
@@ -193,6 +194,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     qRegisterMetaType<rfm::core::TransferProgress>();
     qRegisterMetaType<rfm::core::BrowserLocation>();
     qRegisterMetaType<QList<rfm::core::StorageVolume>>();
+    qRegisterMetaType<rfm::core::VolumeOperationRequest>();
+    qRegisterMetaType<rfm::core::VolumeOperationResult>();
 
     m_localThread = new QThread(this);
     m_localFileSystem = new rfm::core::LocalFileSystemWorker;
@@ -217,6 +220,19 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleLocalStorageProbe);
     m_localThread->start();
 
+    if (volumeService == nullptr) {
+        volumeService = std::make_unique<rfm::core::LocalLinuxVolumeService>();
+    }
+    m_volumeThread = new QThread(this);
+    m_volumeOperationWorker = new rfm::core::VolumeOperationWorker(std::move(volumeService));
+    m_volumeOperationWorker->moveToThread(m_volumeThread);
+    connect(m_volumeThread, &QThread::finished, m_volumeOperationWorker, &QObject::deleteLater);
+    connect(this, &MainWindow::volumeOperationRequested, m_volumeOperationWorker,
+            &rfm::core::VolumeOperationWorker::execute);
+    connect(m_volumeOperationWorker, &rfm::core::VolumeOperationWorker::finished, this,
+            &MainWindow::handleVolumeOperationResult);
+    m_volumeThread->start();
+
     m_sshThread = new QThread(this);
     m_sshSession = new rfm::ssh::SshSession;
     m_sshSession->moveToThread(m_sshThread);
@@ -231,6 +247,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::ssh::SshSession::listStorageVolumes);
     connect(this, &MainWindow::remoteStorageProbeRequested, m_sshSession,
             &rfm::ssh::SshSession::probeStorageMounts);
+    connect(this, &MainWindow::remoteVolumeOperationRequested, m_sshSession,
+            &rfm::ssh::SshSession::operateVolume);
     connect(this, &MainWindow::createDirectoryRequested, m_sshSession,
             &rfm::ssh::SshSession::createDirectory);
     connect(this, &MainWindow::renameRequested, m_sshSession, &rfm::ssh::SshSession::renameEntry);
@@ -268,6 +286,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleRemoteStorageProbe);
     connect(m_sshSession, &rfm::ssh::SshSession::storageMountProbeFailed, this,
             &MainWindow::handleRemoteStorageProbeError);
+    connect(m_sshSession, &rfm::ssh::SshSession::volumeOperationFinished, this,
+            &MainWindow::handleRemoteVolumeOperationResult);
     connect(m_sshSession, &rfm::ssh::SshSession::failed, this, &MainWindow::showConnectionError);
     connect(m_sshSession, &rfm::ssh::SshSession::operationFinished, this,
             &MainWindow::handleOperationResult);
@@ -313,6 +333,10 @@ MainWindow::~MainWindow()
     if (m_historySaveTimer->isActive()) {
         m_historySaveTimer->stop();
         saveOperationHistory();
+    }
+    if (m_volumeThread != nullptr && m_volumeThread->isRunning()) {
+        m_volumeThread->quit();
+        m_volumeThread->wait();
     }
     if (m_localThread != nullptr && m_localThread->isRunning()) {
         m_localThread->quit();
@@ -650,6 +674,22 @@ void MainWindow::createPlacesDock()
             &MainWindow::showServerProfileContextMenu);
     connect(m_navigationTree, &NavigationTree::localLocationActivated, this,
             &MainWindow::openLocalLocation);
+    connect(m_navigationTree, &NavigationTree::localVolumeMountRequested, this,
+            [this](const rfm::core::StorageVolume& volume) {
+                beginVolumeOperation(volume, rfm::core::VolumeOperation::Mount);
+            });
+    connect(m_navigationTree, &NavigationTree::localVolumeUnmountRequested, this,
+            [this](const rfm::core::StorageVolume& volume) {
+                beginVolumeOperation(volume, rfm::core::VolumeOperation::Unmount);
+            });
+    connect(m_navigationTree, &NavigationTree::remoteVolumeMountRequested, this,
+            [this](const QString& machineId, const rfm::core::StorageVolume& volume) {
+                beginRemoteVolumeOperation(machineId, volume, rfm::core::VolumeOperation::Mount);
+            });
+    connect(m_navigationTree, &NavigationTree::remoteVolumeUnmountRequested, this,
+            [this](const QString& machineId, const rfm::core::StorageVolume& volume) {
+                beginRemoteVolumeOperation(machineId, volume, rfm::core::VolumeOperation::Unmount);
+            });
     connect(m_navigationTree, &NavigationTree::remoteLocationActivated, this,
             &MainWindow::openRemoteTreeLocation);
     connect(m_navigationTree, &NavigationTree::localDirectoryExpansionRequested, this,
@@ -711,8 +751,22 @@ void MainWindow::probeRemoteStorage()
 
 void MainWindow::handleLocalStorageVolumes(const QList<rfm::core::StorageVolume>& volumes)
 {
-    m_navigationTree->setStorageVolumes(volumes);
     m_localStorageRefreshPending = false;
+    if (m_localStorageRefreshAfterCurrent) {
+        m_localStorageRefreshAfterCurrent = false;
+        refreshStorage();
+        return;
+    }
+
+    for (const quint64 id : std::as_const(m_volumeOperationsAwaitingRefresh)) {
+        const auto request = m_volumeOperations.constFind(id);
+        if (request != m_volumeOperations.cend()) {
+            m_navigationTree->setLocalVolumeOperation(request->target.device, std::nullopt);
+            m_volumeOperations.remove(id);
+        }
+    }
+    m_volumeOperationsAwaitingRefresh.clear();
+    m_navigationTree->setStorageVolumes(volumes);
     updateStorageRefreshAction();
 }
 
@@ -738,7 +792,20 @@ void MainWindow::handleRemoteStorageVolumes(quint64 requestId,
     m_remoteStorageRefreshPending = false;
     m_remoteStorageRequestId = 0;
     m_remoteStorageRequestConnectionGeneration = 0;
+    if (std::exchange(m_remoteStorageRefreshAfterCurrent, false)) {
+        refreshStorage();
+        return;
+    }
     if (m_connected) {
+        for (const quint64 id : std::as_const(m_remoteVolumeOperationsAwaitingRefresh)) {
+            const auto context = m_remoteVolumeOperations.constFind(id);
+            if (context != m_remoteVolumeOperations.cend()) {
+                m_navigationTree->setVolumeOperation(context->machineId,
+                                                     context->request.target.device, std::nullopt);
+                m_remoteVolumeOperations.remove(id);
+            }
+        }
+        m_remoteVolumeOperationsAwaitingRefresh.clear();
         m_remoteStorageFingerprint = std::exchange(m_pendingRemoteStorageFingerprint, {});
         m_navigationTree->setRemoteStorageVolumes(activeRemoteMachineId(), volumes);
     }
@@ -755,6 +822,19 @@ void MainWindow::handleRemoteStorageError(quint64 requestId, const QString& erro
     m_remoteStorageRequestId = 0;
     m_remoteStorageRequestConnectionGeneration = 0;
     m_pendingRemoteStorageFingerprint.clear();
+    if (std::exchange(m_remoteStorageRefreshAfterCurrent, false) && m_connected) {
+        refreshStorage();
+        return;
+    }
+    for (const quint64 id : std::as_const(m_remoteVolumeOperationsAwaitingRefresh)) {
+        const auto context = m_remoteVolumeOperations.constFind(id);
+        if (context != m_remoteVolumeOperations.cend()) {
+            m_navigationTree->setVolumeOperation(context->machineId, context->request.target.device,
+                                                 std::nullopt);
+            m_remoteVolumeOperations.remove(id);
+        }
+    }
+    m_remoteVolumeOperationsAwaitingRefresh.clear();
     updateStorageRefreshAction();
     if (m_connected && !error.isEmpty()) {
         statusBar()->showMessage(tr("Unable to refresh server storage: %1").arg(error), 8000);
@@ -1263,6 +1343,7 @@ void MainWindow::resetDisconnectedUi()
 {
     m_connected = false;
     m_remoteStorageRefreshPending = false;
+    m_remoteStorageRefreshAfterCurrent = false;
     m_remoteStorageRequestId = 0;
     m_remoteStorageRequestConnectionGeneration = 0;
     m_remoteStorageProbePending = false;
@@ -1270,6 +1351,12 @@ void MainWindow::resetDisconnectedUi()
     m_remoteStorageProbeConnectionGeneration = 0;
     m_remoteStorageFingerprint.clear();
     m_pendingRemoteStorageFingerprint.clear();
+    for (const RemoteVolumeOperationContext& context : std::as_const(m_remoteVolumeOperations)) {
+        m_navigationTree->setVolumeOperation(context.machineId, context.request.target.device,
+                                             std::nullopt);
+    }
+    m_remoteVolumeOperations.clear();
+    m_remoteVolumeOperationsAwaitingRefresh.clear();
     updateStorageRefreshAction();
     clearInternalClipboard();
     updatePaneTransferContexts();
@@ -2198,6 +2285,215 @@ void MainWindow::openLocalLocation(const QString& path)
 {
     const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
     requestLocalDirectoryListing(paneId, path, true, PaneNavigation::Normal);
+}
+
+void MainWindow::beginVolumeOperation(const rfm::core::StorageVolume& volume,
+                                      rfm::core::VolumeOperation operation)
+{
+    const QString device = QDir::cleanPath(volume.device.trimmed());
+    if (!device.startsWith(QStringLiteral("/dev/")) ||
+        (operation == rfm::core::VolumeOperation::Mount && volume.mounted) ||
+        (operation == rfm::core::VolumeOperation::Unmount &&
+         (!volume.mounted || QDir::cleanPath(volume.rootPath) == QStringLiteral("/") ||
+          volume.kind == rfm::core::StorageKind::System))) {
+        return;
+    }
+    for (const rfm::core::VolumeOperationRequest& active : std::as_const(m_volumeOperations)) {
+        if (QDir::cleanPath(active.target.device.trimmed()) == device) {
+            return;
+        }
+    }
+
+    const quint64 id = nextOperationId();
+    const rfm::core::VolumeOperationRequest request{
+        id, operation, {device, volume.rootPath, volume.kind}};
+    m_volumeOperations.insert(id, request);
+    m_navigationTree->setLocalVolumeOperation(device, operation);
+    emit volumeOperationRequested(request);
+}
+
+void MainWindow::handleVolumeOperationResult(const rfm::core::VolumeOperationResult& result)
+{
+    const auto request = m_volumeOperations.constFind(result.id);
+    if (request == m_volumeOperations.cend() || request->operation != result.operation ||
+        QDir::cleanPath(request->target.device.trimmed()) !=
+            QDir::cleanPath(result.device.trimmed())) {
+        return;
+    }
+
+    if (!result.succeeded()) {
+        const QString device = request->target.device;
+        m_volumeOperations.remove(result.id);
+        m_navigationTree->setLocalVolumeOperation(device, std::nullopt);
+        statusBar()->showMessage(volumeOperationErrorMessage(result), 8000);
+        if (result.error == rfm::core::VolumeOperationError::DeviceNotFound) {
+            if (m_localStorageRefreshPending) {
+                m_localStorageRefreshAfterCurrent = true;
+            } else {
+                refreshStorage();
+            }
+        }
+        return;
+    }
+
+    if (result.operation == rfm::core::VolumeOperation::Unmount) {
+        evacuateLocalPanesFromMountPoint(request->target.mountPoint);
+    }
+    m_volumeOperationsAwaitingRefresh.insert(result.id);
+    if (m_localStorageRefreshPending) {
+        // The in-flight snapshot may predate the command. Discard it and force
+        // an enumeration whose start is known to follow the successful result.
+        m_localStorageRefreshAfterCurrent = true;
+    } else {
+        refreshStorage();
+    }
+}
+
+void MainWindow::beginRemoteVolumeOperation(const QString& machineId,
+                                            const rfm::core::StorageVolume& volume,
+                                            rfm::core::VolumeOperation operation)
+{
+    if (!m_connected || machineId != activeRemoteMachineId() ||
+        !rfm::core::isSafeLinuxDevicePath(volume.device) ||
+        (operation == rfm::core::VolumeOperation::Mount && volume.mounted) ||
+        (operation == rfm::core::VolumeOperation::Unmount &&
+         (!volume.mounted ||
+          rfm::core::RemotePath::normalize(volume.rootPath) == QStringLiteral("/") ||
+          volume.kind == rfm::core::StorageKind::System))) {
+        return;
+    }
+    for (const RemoteVolumeOperationContext& active : std::as_const(m_remoteVolumeOperations)) {
+        if (active.machineId == machineId && active.request.target.device == volume.device) {
+            return;
+        }
+    }
+
+    const quint64 id = nextOperationId();
+    const rfm::core::VolumeOperationRequest request{
+        id, operation, {volume.device, volume.rootPath, volume.kind}};
+    m_remoteVolumeOperations.insert(id, {request, machineId, m_connectionGeneration});
+    m_navigationTree->setVolumeOperation(machineId, volume.device, operation);
+    emit remoteVolumeOperationRequested(request);
+}
+
+void MainWindow::handleRemoteVolumeOperationResult(const rfm::core::VolumeOperationResult& result)
+{
+    const auto context = m_remoteVolumeOperations.constFind(result.id);
+    if (context == m_remoteVolumeOperations.cend() ||
+        context->request.operation != result.operation ||
+        context->request.target.device != result.device) {
+        return;
+    }
+    const RemoteVolumeOperationContext completed = *context;
+    if (completed.connectionGeneration != m_connectionGeneration ||
+        completed.machineId != activeRemoteMachineId()) {
+        m_remoteVolumeOperations.remove(result.id);
+        return;
+    }
+
+    if (!result.succeeded()) {
+        m_remoteVolumeOperations.remove(result.id);
+        m_navigationTree->setVolumeOperation(completed.machineId, completed.request.target.device,
+                                             std::nullopt);
+        statusBar()->showMessage(volumeOperationErrorMessage(result), 8000);
+        if (result.error == rfm::core::VolumeOperationError::DeviceNotFound && m_connected) {
+            if (m_remoteStorageRefreshPending) {
+                m_remoteStorageRefreshAfterCurrent = true;
+            } else {
+                refreshStorage();
+            }
+        }
+        return;
+    }
+
+    if (result.operation == rfm::core::VolumeOperation::Unmount) {
+        evacuateRemotePanesFromMountPoint(completed.machineId, completed.request.target.mountPoint);
+    }
+    m_remoteVolumeOperationsAwaitingRefresh.insert(result.id);
+    if (m_remoteStorageRefreshPending) {
+        m_remoteStorageRefreshAfterCurrent = true;
+    } else {
+        refreshStorage();
+    }
+}
+
+void MainWindow::evacuateLocalPanesFromMountPoint(const QString& mountPoint)
+{
+    if (mountPoint.trimmed().isEmpty()) {
+        return;
+    }
+    QString fallbackPath = QDir::homePath();
+    if (rfm::core::localPathIsAtOrBelow(fallbackPath, mountPoint)) {
+        fallbackPath = QDir::rootPath();
+    }
+    for (const quint64 paneId : m_paneWorkspace->visiblePaneIds()) {
+        FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+        if (pane == nullptr) {
+            continue;
+        }
+        const rfm::core::BrowserLocation location = pane->currentLocation();
+        if (location.source != rfm::core::FileSource::Local ||
+            location.machineId != QString::fromLatin1(rfm::core::LocalMachineId) ||
+            !rfm::core::localPathIsAtOrBelow(location.path, mountPoint)) {
+            continue;
+        }
+        pane->removeLocalHistoryUnderPath(mountPoint);
+        requestLocalDirectoryListing(paneId, fallbackPath, true, PaneNavigation::SafetyFallback);
+    }
+}
+
+void MainWindow::evacuateRemotePanesFromMountPoint(const QString& machineId,
+                                                   const QString& mountPoint)
+{
+    if (!m_connected || machineId != activeRemoteMachineId() ||
+        !rfm::core::RemotePath::normalize(mountPoint).startsWith(QChar{'/'})) {
+        return;
+    }
+    QString fallbackPath = rfm::core::RemotePath::normalize(m_remoteInitialPath);
+    if (!fallbackPath.startsWith(QChar{'/'}) ||
+        rfm::core::RemotePath::isAtOrBelow(fallbackPath, mountPoint)) {
+        fallbackPath = QStringLiteral("/");
+    }
+    for (const quint64 paneId : m_paneWorkspace->visiblePaneIds()) {
+        FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+        if (pane == nullptr) {
+            continue;
+        }
+        const rfm::core::BrowserLocation location = pane->currentLocation();
+        if (location.source != rfm::core::FileSource::Ssh || location.machineId != machineId ||
+            !rfm::core::RemotePath::isAtOrBelow(location.path, mountPoint)) {
+            continue;
+        }
+        pane->removeHistoryUnderPath(rfm::core::FileSource::Ssh, machineId, mountPoint);
+        requestDirectoryListing(paneId, fallbackPath, true, false, PaneNavigation::SafetyFallback);
+    }
+}
+
+QString
+MainWindow::volumeOperationErrorMessage(const rfm::core::VolumeOperationResult& result) const
+{
+    const QString operation =
+        result.operation == rfm::core::VolumeOperation::Mount ? tr("mount") : tr("unmount");
+    switch (result.error) {
+    case rfm::core::VolumeOperationError::NotSupported:
+        return tr("This volume cannot be %1ed by RemoteFileManager.").arg(operation);
+    case rfm::core::VolumeOperationError::PermissionDenied:
+        return tr("Permission was denied while trying to %1 %2.").arg(operation, result.device);
+    case rfm::core::VolumeOperationError::DeviceNotFound:
+        return tr("The volume %1 is no longer available.").arg(result.device);
+    case rfm::core::VolumeOperationError::VolumeBusy:
+        return tr("The volume %1 is busy. Close files using it and try again.").arg(result.device);
+    case rfm::core::VolumeOperationError::ToolUnavailable:
+        return tr("No supported system tool is available to %1 this volume.").arg(operation);
+    case rfm::core::VolumeOperationError::ConnectionLost:
+        return tr("The SSH connection was lost while trying to %1 %2.")
+            .arg(operation, result.device);
+    case rfm::core::VolumeOperationError::SystemError:
+        return tr("The system could not %1 %2.").arg(operation, result.device);
+    case rfm::core::VolumeOperationError::None:
+        return {};
+    }
+    return tr("The volume operation failed.");
 }
 
 void MainWindow::openRemoteTreeLocation(const QString& profileId, const QString& path)

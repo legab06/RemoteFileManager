@@ -1,6 +1,7 @@
 #include "remotefilemanager/app/NavigationTree.hpp"
 
 #include <QDir>
+#include <QPushButton>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -21,6 +22,11 @@ class NavigationTreeTest final : public QObject
     void showsHumanMetadataAndRefreshesWithoutChangingNavigation();
     void preservesLoadedTreeStateDuringStorageRefresh();
     void escapesTooltipMetadataAndDisambiguatesLabels();
+    void exposesOnlyAppropriateLocalVolumeActions();
+    void showsPerVolumeBusyStates();
+    void opensVolumeOnlyFromRefreshedMountPoint();
+    void toleratesVolumeDisappearingDuringOperation();
+    void exposesRemoteVolumeActionsInTheActiveServerNamespace();
 };
 
 namespace
@@ -42,6 +48,23 @@ QTreeWidgetItem* childNamed(QTreeWidgetItem* parent, const QString& name)
     for (int index = 0; index < parent->childCount(); ++index) {
         if (parent->child(index)->text(0) == name) {
             return parent->child(index);
+        }
+    }
+    return nullptr;
+}
+
+QTreeWidgetItem* volumeItemByDevice(QTreeWidgetItem* root, const QString& device)
+{
+    if (root == nullptr) {
+        return nullptr;
+    }
+    if (root->data(0, Qt::UserRole + 6).isValid() &&
+        root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().device == device) {
+        return root;
+    }
+    for (int index = 0; index < root->childCount(); ++index) {
+        if (QTreeWidgetItem* const match = volumeItemByDevice(root->child(index), device)) {
+            return match;
         }
     }
     return nullptr;
@@ -257,6 +280,74 @@ void NavigationTreeTest::refreshesRemoteStorageWithoutMixingMachines()
     QCOMPARE(activated.constFirst().at(1).toString(), QStringLiteral("/data"));
 }
 
+void NavigationTreeTest::exposesRemoteVolumeActionsInTheActiveServerNamespace()
+{
+    rfm::app::NavigationTree navigation;
+    navigation.setProfiles({{QStringLiteral("Remote"), QStringLiteral("remote.test"),
+                             QStringLiteral("alice"), 22, QStringLiteral("remote-id")}});
+    navigation.setActiveServer(remoteMachine(QStringLiteral("remote-id")),
+                               QStringLiteral("/home/alice"));
+    rfm::core::StorageVolume available;
+    available.displayName = QStringLiteral("Remote USB");
+    available.device = QStringLiteral("/dev/sdb1");
+    available.fileSystemType = QByteArrayLiteral("ext4");
+    available.kind = rfm::core::StorageKind::External;
+    available.mounted = false;
+    rfm::core::StorageVolume mounted = available;
+    mounted.displayName = QStringLiteral("Remote data");
+    mounted.device = QStringLiteral("/dev/sdc1");
+    mounted.rootPath = QStringLiteral("/mnt/data");
+    mounted.mounted = true;
+    rfm::core::StorageVolume system = mounted;
+    system.displayName = QStringLiteral("Remote system");
+    system.device = QStringLiteral("/dev/sda1");
+    system.rootPath = QStringLiteral("/");
+    system.kind = rfm::core::StorageKind::System;
+    navigation.setRemoteStorageVolumes(QStringLiteral("remote-id"), {available, mounted, system});
+
+    auto* const mountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    auto* const openButton = navigation.findChild<QPushButton*>(QStringLiteral("openVolumeButton"));
+    auto* const unmountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QTreeWidgetItem* const server = navigation.tree()->topLevelItem(1)->child(0);
+    QTreeWidgetItem* const external = childNamed(server, QStringLiteral("External devices"));
+    QTreeWidgetItem* const volumes = childNamed(server, QStringLiteral("Volumes"));
+    QVERIFY(external != nullptr);
+    QVERIFY(volumes != nullptr);
+    QSignalSpy mounts(&navigation, &rfm::app::NavigationTree::remoteVolumeMountRequested);
+    QSignalSpy unmounts(&navigation, &rfm::app::NavigationTree::remoteVolumeUnmountRequested);
+    QSignalSpy opens(&navigation, &rfm::app::NavigationTree::remoteLocationActivated);
+
+    navigation.tree()->setCurrentItem(external->child(0));
+    QVERIFY(mountButton->isVisibleTo(&navigation));
+    QVERIFY(mountButton->isEnabled());
+    mountButton->click();
+    QCOMPARE(mounts.size(), 1);
+    QCOMPARE(mounts.constFirst().at(0).toString(), QStringLiteral("remote-id"));
+    navigation.setVolumeOperation(QStringLiteral("remote-id"), QStringLiteral("/dev/sdb1"),
+                                  rfm::core::VolumeOperation::Mount);
+    QVERIFY(!mountButton->isEnabled());
+
+    QTreeWidgetItem* const mountedItem = volumeItemByDevice(server, QStringLiteral("/dev/sdc1"));
+    QTreeWidgetItem* const systemItem = volumeItemByDevice(server, QStringLiteral("/dev/sda1"));
+    QVERIFY(mountedItem != nullptr);
+    QVERIFY(systemItem != nullptr);
+    navigation.tree()->setCurrentItem(mountedItem);
+    QVERIFY(openButton->isVisibleTo(&navigation));
+    QVERIFY(unmountButton->isVisibleTo(&navigation));
+    openButton->click();
+    QCOMPARE(opens.size(), 1);
+    QCOMPARE(opens.constFirst().at(0).toString(), QStringLiteral("remote-id"));
+    QCOMPARE(opens.constFirst().at(1).toString(), QStringLiteral("/mnt/data"));
+    unmountButton->click();
+    QCOMPARE(unmounts.size(), 1);
+
+    navigation.tree()->setCurrentItem(systemItem);
+    QVERIFY(openButton->isVisibleTo(&navigation));
+    QVERIFY(!unmountButton->isVisibleTo(&navigation));
+}
+
 void NavigationTreeTest::showsHumanMetadataAndRefreshesWithoutChangingNavigation()
 {
     QTemporaryDir mountPoint;
@@ -289,7 +380,7 @@ void NavigationTreeTest::showsHumanMetadataAndRefreshesWithoutChangingNavigation
     QVERIFY(fullToolTip.contains(QStringLiteral("Filesystem: exfat")));
     QVERIFY(fullToolTip.contains(QStringLiteral("Model: SanDisk Cruzer Glide")));
     QVERIFY(fullToolTip.contains(QStringLiteral("Size:")));
-    QVERIFY(fullToolTip.split(QChar{'\n'}).size() <= 6);
+    QVERIFY(fullToolTip.split(QChar{'\n'}).size() <= 7);
 
     QSignalSpy activated(&navigation, &rfm::app::NavigationTree::localLocationActivated);
     QVERIFY(QMetaObject::invokeMethod(navigation.tree(), "itemActivated", Qt::DirectConnection,
@@ -399,6 +490,153 @@ void NavigationTreeTest::escapesTooltipMetadataAndDisambiguatesLabels()
     QCOMPARE(activated.size(), 2);
     QCOMPARE(activated.at(0).constFirst().toString(), QDir(first.path()).absolutePath());
     QCOMPARE(activated.at(1).constFirst().toString(), QDir(second.path()).absolutePath());
+}
+
+void NavigationTreeTest::exposesOnlyAppropriateLocalVolumeActions()
+{
+    rfm::app::NavigationTree navigation;
+    auto* const mountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    auto* const openButton = navigation.findChild<QPushButton*>(QStringLiteral("openVolumeButton"));
+    auto* const unmountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QVERIFY(mountButton != nullptr);
+    QVERIFY(openButton != nullptr);
+    QVERIFY(unmountButton != nullptr);
+
+    rfm::core::StorageVolume available;
+    available.displayName = QStringLiteral("USB available");
+    available.device = QStringLiteral("/dev/sde1");
+    available.fileSystemType = QByteArrayLiteral("vfat");
+    available.kind = rfm::core::StorageKind::External;
+    available.mounted = false;
+    navigation.setStorageVolumes({available});
+    QTreeWidgetItem* const external =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation.tree()->setCurrentItem(external->child(0));
+    QVERIFY(mountButton->isVisibleTo(&navigation));
+    QVERIFY(mountButton->isEnabled());
+    QVERIFY(!openButton->isVisibleTo(&navigation));
+    QVERIFY(!unmountButton->isVisibleTo(&navigation));
+
+    QTemporaryDir mountedPath;
+    QVERIFY(mountedPath.isValid());
+    rfm::core::StorageVolume mounted = available;
+    mounted.rootPath = mountedPath.path();
+    mounted.mounted = true;
+    navigation.setStorageVolumes({mounted});
+    QTreeWidgetItem* mountedItem =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"))
+            ->child(0);
+    navigation.tree()->setCurrentItem(mountedItem);
+    QVERIFY(!mountButton->isVisibleTo(&navigation));
+    QVERIFY(openButton->isVisibleTo(&navigation));
+    QVERIFY(unmountButton->isVisibleTo(&navigation));
+    QSignalSpy unmounts(&navigation, &rfm::app::NavigationTree::localVolumeUnmountRequested);
+    unmountButton->click();
+    QCOMPARE(unmounts.size(), 1);
+
+    mounted.rootPath = QStringLiteral("/");
+    mounted.kind = rfm::core::StorageKind::System;
+    navigation.setStorageVolumes({mounted});
+    mountedItem =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"))->child(0);
+    navigation.tree()->setCurrentItem(mountedItem);
+    QVERIFY(openButton->isVisibleTo(&navigation));
+    QVERIFY(!unmountButton->isVisibleTo(&navigation));
+}
+
+void NavigationTreeTest::showsPerVolumeBusyStates()
+{
+    QTemporaryDir mountedPath;
+    QVERIFY(mountedPath.isValid());
+    rfm::app::NavigationTree navigation;
+    auto* const mountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    auto* const unmountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("USB");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.fileSystemType = QByteArrayLiteral("vfat");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    navigation.setStorageVolumes({volume});
+    QTreeWidgetItem* external =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation.tree()->setCurrentItem(external->child(0));
+    navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Mount);
+    QVERIFY(external->child(0)->text(0).contains(QStringLiteral("Mounting")));
+    QVERIFY(!mountButton->isEnabled());
+
+    navigation.setLocalVolumeOperation(volume.device, std::nullopt);
+    volume.rootPath = mountedPath.path();
+    volume.mounted = true;
+    navigation.setStorageVolumes({volume});
+    external = childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation.tree()->setCurrentItem(external->child(0));
+    navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Unmount);
+    QVERIFY(external->child(0)->text(0).contains(QStringLiteral("Unmounting")));
+    QVERIFY(!unmountButton->isEnabled());
+}
+
+void NavigationTreeTest::opensVolumeOnlyFromRefreshedMountPoint()
+{
+    QTemporaryDir actualMountPoint;
+    QVERIFY(actualMountPoint.isValid());
+    rfm::app::NavigationTree navigation;
+    auto* const mountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    auto* const openButton = navigation.findChild<QPushButton*>(QStringLiteral("openVolumeButton"));
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("USB");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    navigation.setStorageVolumes({volume});
+    QTreeWidgetItem* external =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation.tree()->setCurrentItem(external->child(0));
+
+    QSignalSpy opened(&navigation, &rfm::app::NavigationTree::localLocationActivated);
+    QSignalSpy mounts(&navigation, &rfm::app::NavigationTree::localVolumeMountRequested);
+    mountButton->click();
+    QCOMPARE(mounts.size(), 1);
+    QCOMPARE(opened.size(), 0);
+    navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Mount);
+    QVERIFY(!mountButton->isEnabled());
+
+    volume.rootPath = actualMountPoint.path();
+    volume.mounted = true;
+    navigation.setLocalVolumeOperation(volume.device, std::nullopt);
+    navigation.setStorageVolumes({volume});
+    external = childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation.tree()->setCurrentItem(external->child(0));
+    openButton->click();
+    QCOMPARE(opened.size(), 1);
+    QCOMPARE(opened.constFirst().constFirst().toString(), actualMountPoint.path());
+}
+
+void NavigationTreeTest::toleratesVolumeDisappearingDuringOperation()
+{
+    rfm::app::NavigationTree navigation;
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Transient USB");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    navigation.setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation.tree()->setCurrentItem(external->child(0));
+    navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Mount);
+
+    navigation.setStorageVolumes({});
+    navigation.setLocalVolumeOperation(volume.device, std::nullopt);
+
+    QVERIFY(childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices")) ==
+            nullptr);
+    QVERIFY(!navigation.selectedLocalStorageVolume().has_value());
 }
 
 QTEST_MAIN(NavigationTreeTest)

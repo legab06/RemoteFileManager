@@ -15,15 +15,19 @@ add_library(
     core/TransferDirectoryJob.cpp
     core/TransferFileJob.cpp
     core/TransferQueue.cpp
+    core/VolumeService.cpp
     ssh/LibsshRuntime.cpp
     ssh/RemoteCopyCommand.cpp
     ssh/RemoteStorageScanner.cpp
+    ssh/RemoteVolumeService.cpp
     ssh/SshSession.cpp
     ssh/SftpTransferBackend.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/LocalFileSystem.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/Storage.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageScanner.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteVolumeService.hpp
 )
 add_library(RemoteFileManager::Core ALIAS rfm_core)
 

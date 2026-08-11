@@ -9,6 +9,7 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
+#include "remotefilemanager/core/VolumeService.hpp"
 
 #include <QHash>
 #include <QList>
@@ -56,7 +57,8 @@ class MainWindow final : public QMainWindow
 
   public:
     explicit MainWindow(QWidget* parent = nullptr, QString operationHistoryDirectory = {},
-                        QString serverProfileDirectory = {});
+                        QString serverProfileDirectory = {},
+                        std::unique_ptr<rfm::core::VolumeService> volumeService = {});
     ~MainWindow() override;
 
   signals:
@@ -66,6 +68,8 @@ class MainWindow final : public QMainWindow
     void localDirectoryRequested(quint64 requestId, QString path);
     void localVolumesRequested();
     void localStorageProbeRequested(quint64 requestId);
+    void volumeOperationRequested(rfm::core::VolumeOperationRequest request);
+    void remoteVolumeOperationRequested(rfm::core::VolumeOperationRequest request);
     void remoteStorageRequested(quint64 requestId);
     void remoteStorageProbeRequested(quint64 requestId);
     void createDirectoryRequested(quint64 id, QString parent, QString name);
@@ -181,6 +185,18 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleLocalDirectoryListingError(quint64 requestId, const QString& path,
                                                       const QString& error);
     void openLocalLocation(const QString& path);
+    void beginVolumeOperation(const rfm::core::StorageVolume& volume,
+                              rfm::core::VolumeOperation operation);
+    Q_INVOKABLE void handleVolumeOperationResult(const rfm::core::VolumeOperationResult& result);
+    void beginRemoteVolumeOperation(const QString& machineId,
+                                    const rfm::core::StorageVolume& volume,
+                                    rfm::core::VolumeOperation operation);
+    Q_INVOKABLE void
+    handleRemoteVolumeOperationResult(const rfm::core::VolumeOperationResult& result);
+    void evacuateLocalPanesFromMountPoint(const QString& mountPoint);
+    void evacuateRemotePanesFromMountPoint(const QString& machineId, const QString& mountPoint);
+    [[nodiscard]] QString
+    volumeOperationErrorMessage(const rfm::core::VolumeOperationResult& result) const;
     void openRemoteTreeLocation(const QString& profileId, const QString& path);
     void refreshStorage();
     Q_INVOKABLE void probeStorage();
@@ -255,8 +271,10 @@ class MainWindow final : public QMainWindow
     QTimer* m_historySaveTimer{nullptr};
     QThread* m_sshThread{nullptr};
     QThread* m_localThread{nullptr};
+    QThread* m_volumeThread{nullptr};
     rfm::ssh::SshSession* m_sshSession{nullptr};
     rfm::core::LocalFileSystemWorker* m_localFileSystem{nullptr};
+    rfm::core::VolumeOperationWorker* m_volumeOperationWorker{nullptr};
     rfm::core::ConnectionProfile m_activeProfile;
     QString m_activeSavedProfileId;
     QSet<quint64> m_pendingTransferRequests;
@@ -293,6 +311,15 @@ class MainWindow final : public QMainWindow
         QString destinationDirectory;
     };
     QHash<quint64, OperationContext> m_operationContexts;
+    QHash<quint64, rfm::core::VolumeOperationRequest> m_volumeOperations;
+    QSet<quint64> m_volumeOperationsAwaitingRefresh;
+    struct RemoteVolumeOperationContext {
+        rfm::core::VolumeOperationRequest request;
+        QString machineId;
+        quint64 connectionGeneration{0};
+    };
+    QHash<quint64, RemoteVolumeOperationContext> m_remoteVolumeOperations;
+    QSet<quint64> m_remoteVolumeOperationsAwaitingRefresh;
     QHash<quint64, rfm::core::OperationProgress> m_remoteOperations;
     QHash<quint64, rfm::core::OperationProgress> m_operations;
     QHash<quint64, quint64> m_transferPanes;
@@ -320,7 +347,9 @@ class MainWindow final : public QMainWindow
     bool m_connected{false};
     bool m_busy{false};
     bool m_localStorageRefreshPending{false};
+    bool m_localStorageRefreshAfterCurrent{false};
     bool m_remoteStorageRefreshPending{false};
+    bool m_remoteStorageRefreshAfterCurrent{false};
     bool m_localStorageProbePending{false};
     bool m_remoteStorageProbePending{false};
 };

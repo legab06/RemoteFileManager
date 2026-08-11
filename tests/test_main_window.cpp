@@ -8,6 +8,7 @@
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
+#include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/ServerProfileStore.hpp"
 
@@ -71,6 +72,24 @@ class RecordingRemoteBackend final : public rfm::core::RemoteFileBackend
 
     QString lastSource;
     QString lastDestination;
+};
+
+class FixedVolumeService final : public rfm::core::VolumeService
+{
+  public:
+    explicit FixedVolumeService(rfm::core::VolumeOperationError error) : m_error(error) {}
+
+    rfm::core::VolumeOperationResult
+    execute(const rfm::core::VolumeOperationRequest& request) override
+    {
+        return {request.id, request.operation, request.target.device, m_error,
+                m_error == rfm::core::VolumeOperationError::None
+                    ? QString{}
+                    : QStringLiteral("technical fixture detail")};
+    }
+
+  private:
+    rfm::core::VolumeOperationError m_error;
 };
 
 rfm::core::TransferProgress progress(quint64 id, rfm::core::TransferState state,
@@ -151,7 +170,8 @@ void acceptNextQuestion()
 
 void setConnectionIdentity(rfm::app::MainWindow& window,
                            const QString& hostName = QStringLiteral("history.example.test"),
-                           const QString& userName = QStringLiteral("test-user"))
+                           const QString& userName = QStringLiteral("test-user"),
+                           const QString& initialPath = QStringLiteral("."))
 {
     QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
     window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->trigger();
@@ -162,8 +182,35 @@ void setConnectionIdentity(rfm::app::MainWindow& window,
     dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->setValue(2222);
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, initialPath),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+}
+
+QTreeWidgetItem* volumeItemByDevice(QTreeWidgetItem* root, const QString& device)
+{
+    if (root == nullptr) {
+        return nullptr;
+    }
+    if (root->data(0, Qt::UserRole + 6).isValid() &&
+        root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().device == device) {
+        return root;
+    }
+    for (int index = 0; index < root->childCount(); ++index) {
+        if (QTreeWidgetItem* const match = volumeItemByDevice(root->child(index), device)) {
+            return match;
+        }
+    }
+    return nullptr;
+}
+
+void showPaneLocation(rfm::app::FileBrowserPane* pane, rfm::core::FileSource source,
+                      const QString& path,
+                      rfm::app::PaneNavigation navigation = rfm::app::PaneNavigation::Initial)
+{
+    const QString machineId = source == rfm::core::FileSource::Local
+                                  ? QString::fromLatin1(rfm::core::LocalMachineId)
+                                  : QStringLiteral("ssh:fixture");
+    pane->showDirectory({source, machineId, path}, path, {}, navigation);
 }
 
 } // namespace
@@ -224,6 +271,20 @@ class MainWindowTest final : public QObject
     void temporaryConnectionAppearsInPlacesAndRejectsStaleStorage();
     void ignoresStaleResultsAfterSwitchingNavigationSource();
     void refreshesRemoteStorageOnlyAfterProbeFingerprintChanges();
+    void volumeOperationSuccessWaitsForSystemRefresh();
+    void volumeOperationErrorsRestoreUi_data();
+    void volumeOperationErrorsRestoreUi();
+    void successfulUnmountEvacuatesOnlyAffectedPanes_data();
+    void successfulUnmountEvacuatesOnlyAffectedPanes();
+    void failedUnmountDoesNotEvacuatePane();
+    void safetyFallbackPurgesUnmountedPathsFromHistory();
+    void remoteMountWaitsForRefreshAndOpensObservedMountPoint();
+    void failedRemoteUnmountDoesNotEvacuateOrRefresh();
+    void remoteTimeoutRestoresUiWithoutRefresh();
+    void successfulRemoteUnmountEvacuatesOnlyMatchingNamespace();
+    void remoteSafetyFallbackPurgesOnlyMatchingHistory();
+    void remoteDisconnectClearsPendingVolumeState();
+    void remoteDisconnectAfterCommandBeforeRefreshKeepsObservedModel();
 };
 
 void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
@@ -2960,6 +3021,710 @@ void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
     auto* const firstPane = workspace->activePane();
     action(QStringLiteral("switchPaneAction"))->trigger();
     QVERIFY(workspace->activePane() != firstPane);
+}
+
+void MainWindowTest::volumeOperationSuccessWaitsForSystemRefresh()
+{
+    rfm::app::MainWindow window(
+        nullptr, {}, {},
+        std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::None));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(storageRefresh != nullptr);
+    QVERIFY(mountButton != nullptr);
+    QTRY_VERIFY(storageRefresh->isEnabled());
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("USB fixture");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.fileSystemType = QByteArrayLiteral("vfat");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("External devices"));
+    QVERIFY(external != nullptr);
+    navigation->tree()->setCurrentItem(external->child(0));
+
+    QSignalSpy operations(&window, &rfm::app::MainWindow::volumeOperationRequested);
+    QSignalSpy refreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
+    mountButton->click();
+    QCOMPARE(operations.size(), 1);
+    QTRY_COMPARE(refreshes.size(), 1);
+    QVERIFY(external->child(0)->text(0).contains(QStringLiteral("Mounting")));
+    QVERIFY(!mountButton->isEnabled());
+    const auto beforeRefresh = navigation->selectedLocalStorageVolume();
+    QVERIFY(beforeRefresh.has_value());
+    QVERIFY(!beforeRefresh->mounted);
+    QVERIFY(beforeRefresh->rootPath.isEmpty());
+
+    const QList<rfm::core::StorageVolume> observedVolumes{volume};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(QList<rfm::core::StorageVolume>, observedVolumes)));
+    QVERIFY(mountButton->isEnabled());
+    QVERIFY(!external->child(0)->text(0).contains(QStringLiteral("Mounting")));
+    const auto afterRefresh = navigation->selectedLocalStorageVolume();
+    QVERIFY(afterRefresh.has_value());
+    QVERIFY(!afterRefresh->mounted);
+}
+
+void MainWindowTest::volumeOperationErrorsRestoreUi_data()
+{
+    QTest::addColumn<rfm::core::VolumeOperationError>("error");
+    QTest::addColumn<QString>("expectedMessage");
+    QTest::addColumn<bool>("refreshExpected");
+
+    QTest::newRow("permission") << rfm::core::VolumeOperationError::PermissionDenied
+                                << QStringLiteral("Permission was denied") << false;
+    QTest::newRow("busy") << rfm::core::VolumeOperationError::VolumeBusy
+                          << QStringLiteral("is busy") << false;
+    QTest::newRow("disappeared") << rfm::core::VolumeOperationError::DeviceNotFound
+                                 << QStringLiteral("no longer available") << true;
+    QTest::newRow("tool") << rfm::core::VolumeOperationError::ToolUnavailable
+                          << QStringLiteral("No supported system tool") << false;
+    QTest::newRow("system") << rfm::core::VolumeOperationError::SystemError
+                            << QStringLiteral("system could not") << false;
+}
+
+void MainWindowTest::volumeOperationErrorsRestoreUi()
+{
+    QFETCH(rfm::core::VolumeOperationError, error);
+    QFETCH(QString, expectedMessage);
+    QFETCH(bool, refreshExpected);
+    rfm::app::MainWindow window(nullptr, {}, {}, std::make_unique<FixedVolumeService>(error));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(storageRefresh != nullptr);
+    QVERIFY(mountButton != nullptr);
+    QTRY_VERIFY(storageRefresh->isEnabled());
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("USB fixture");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.fileSystemType = QByteArrayLiteral("vfat");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("External devices"));
+    QVERIFY(external != nullptr);
+    navigation->tree()->setCurrentItem(external->child(0));
+    QSignalSpy refreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
+
+    mountButton->click();
+
+    QTRY_VERIFY(window.statusBar()->currentMessage().contains(expectedMessage));
+    QVERIFY(!window.statusBar()->currentMessage().contains(QStringLiteral("technical fixture")));
+    QVERIFY(mountButton->isEnabled());
+    QCOMPARE(refreshes.size(), refreshExpected ? 1 : 0);
+}
+
+void MainWindowTest::successfulUnmountEvacuatesOnlyAffectedPanes_data()
+{
+    QTest::addColumn<rfm::core::FileSource>("primarySource");
+    QTest::addColumn<QString>("primaryPath");
+    QTest::addColumn<bool>("split");
+    QTest::addColumn<rfm::core::FileSource>("secondarySource");
+    QTest::addColumn<QString>("secondaryPath");
+    QTest::addColumn<bool>("primaryEvacuated");
+    QTest::addColumn<bool>("secondaryEvacuated");
+
+    QTest::newRow("single-exact") << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk")
+                                  << false << rfm::core::FileSource::Local << QString{} << true
+                                  << false;
+    QTest::newRow("left-descendant-right-similar-prefix")
+        << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk/Films/Action") << true
+        << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk2") << true << false;
+    QTest::newRow("right-descendant")
+        << rfm::core::FileSource::Local << QStringLiteral("/tmp/elsewhere") << true
+        << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk/Films") << false << true;
+    QTest::newRow("both") << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk") << true
+                          << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk/Films")
+                          << true << true;
+    QTest::newRow("neither") << rfm::core::FileSource::Local << QStringLiteral("/tmp/elsewhere")
+                             << true << rfm::core::FileSource::Local << QStringLiteral("/mnt/disk2")
+                             << false << false;
+    QTest::newRow("remote-identical-path")
+        << rfm::core::FileSource::Ssh << QStringLiteral("/mnt/disk/Films") << true
+        << rfm::core::FileSource::Local << QStringLiteral("/tmp/elsewhere") << false << false;
+}
+
+void MainWindowTest::successfulUnmountEvacuatesOnlyAffectedPanes()
+{
+    QFETCH(rfm::core::FileSource, primarySource);
+    QFETCH(QString, primaryPath);
+    QFETCH(bool, split);
+    QFETCH(rfm::core::FileSource, secondarySource);
+    QFETCH(QString, secondaryPath);
+    QFETCH(bool, primaryEvacuated);
+    QFETCH(bool, secondaryEvacuated);
+
+    rfm::app::MainWindow window(
+        nullptr, {}, {},
+        std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::None));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const unmountButton =
+        window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QVERIFY(workspace != nullptr);
+    QVERIFY(navigation != nullptr);
+    QVERIFY(storageRefresh != nullptr);
+    QVERIFY(unmountButton != nullptr);
+    QTRY_VERIFY(storageRefresh->isEnabled());
+    if (split) {
+        workspace->setSplit(true);
+    }
+    showPaneLocation(workspace->primaryPane(), primarySource, primaryPath);
+    if (split) {
+        showPaneLocation(workspace->otherVisiblePane(workspace->paneId(workspace->primaryPane())),
+                         secondarySource, secondaryPath);
+    }
+
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    QSignalSpy volumeRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Unmount fixture");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.rootPath = QStringLiteral("/mnt/disk");
+    volume.fileSystemType = QByteArrayLiteral("vfat");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = true;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("External devices"));
+    QVERIFY(external != nullptr);
+    navigation->tree()->setCurrentItem(external->child(0));
+
+    unmountButton->click();
+
+    const int expectedEvacuations =
+        static_cast<int>(primaryEvacuated) + static_cast<int>(secondaryEvacuated);
+    QTRY_COMPARE(directoryRequests.size(), expectedEvacuations);
+    QTRY_COMPARE(volumeRefreshes.size(), 1);
+    for (const QList<QVariant>& arguments : std::as_const(directoryRequests)) {
+        const quint64 requestId = arguments.at(0).toULongLong();
+        const QString fallbackPath = arguments.at(1).toString();
+        QCOMPARE(fallbackPath, QDir::homePath());
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "handleLocalDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
+            Q_ARG(QString, fallbackPath),
+            Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    }
+
+    QCOMPARE(workspace->primaryPane()->currentPath(),
+             primaryEvacuated ? QDir::homePath() : primaryPath);
+    QCOMPARE(workspace->primaryPane()->source(), primarySource);
+    if (split) {
+        rfm::app::FileBrowserPane* const secondary =
+            workspace->otherVisiblePane(workspace->paneId(workspace->primaryPane()));
+        QCOMPARE(secondary->currentPath(), secondaryEvacuated ? QDir::homePath() : secondaryPath);
+        QCOMPARE(secondary->source(), secondarySource);
+    }
+}
+
+void MainWindowTest::failedUnmountDoesNotEvacuatePane()
+{
+    rfm::app::MainWindow window(
+        nullptr, {}, {},
+        std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::PermissionDenied));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const unmountButton =
+        window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QVERIFY(workspace != nullptr);
+    QVERIFY(navigation != nullptr);
+    QVERIFY(storageRefresh != nullptr);
+    QVERIFY(unmountButton != nullptr);
+    QTRY_VERIFY(storageRefresh->isEnabled());
+    const QString currentPath = QStringLiteral("/mnt/disk/Films");
+    showPaneLocation(workspace->primaryPane(), rfm::core::FileSource::Local, currentPath);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    QSignalSpy volumeRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Unmount fixture");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.rootPath = QStringLiteral("/mnt/disk");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = true;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation->tree()->setCurrentItem(external->child(0));
+
+    unmountButton->click();
+
+    QTRY_VERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("Permission")));
+    QCOMPARE(workspace->primaryPane()->currentPath(), currentPath);
+    QCOMPARE(directoryRequests.size(), 0);
+    QCOMPARE(volumeRefreshes.size(), 0);
+}
+
+void MainWindowTest::safetyFallbackPurgesUnmountedPathsFromHistory()
+{
+    rfm::app::MainWindow window(
+        nullptr, {}, {},
+        std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::None));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const unmountButton =
+        window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QVERIFY(workspace != nullptr);
+    QVERIFY(navigation != nullptr);
+    QVERIFY(storageRefresh != nullptr);
+    QVERIFY(unmountButton != nullptr);
+    QTRY_VERIFY(storageRefresh->isEnabled());
+    rfm::app::FileBrowserPane* const pane = workspace->primaryPane();
+    showPaneLocation(pane, rfm::core::FileSource::Local, QStringLiteral("/mnt/disk/Old"));
+    showPaneLocation(pane, rfm::core::FileSource::Local, QStringLiteral("/tmp/safe"),
+                     rfm::app::PaneNavigation::Normal);
+    showPaneLocation(pane, rfm::core::FileSource::Local, QStringLiteral("/mnt/disk/Films"),
+                     rfm::app::PaneNavigation::Normal);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Unmount fixture");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.rootPath = QStringLiteral("/mnt/disk");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = true;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("External devices"));
+    navigation->tree()->setCurrentItem(external->child(0));
+
+    unmountButton->click();
+    QTRY_COMPARE(directoryRequests.size(), 1);
+    const quint64 fallbackRequestId = directoryRequests.constFirst().at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalDirectoryListed", Qt::DirectConnection,
+        Q_ARG(quint64, fallbackRequestId), Q_ARG(QString, QDir::homePath()),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(pane->currentPath(), QDir::homePath());
+    QVERIFY(pane->canGoBack());
+
+    pane->requestBack();
+
+    QCOMPARE(directoryRequests.size(), 2);
+    QCOMPARE(directoryRequests.constLast().at(1).toString(), QStringLiteral("/tmp/safe"));
+    QVERIFY(!rfm::core::localPathIsAtOrBelow(directoryRequests.constLast().at(1).toString(),
+                                             QStringLiteral("/mnt/disk")));
+}
+
+void MainWindowTest::remoteMountWaitsForRefreshAndOpensObservedMountPoint()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::directoryRequested);
+    setConnectionIdentity(window, QStringLiteral("volumes.example.test"), QStringLiteral("alice"),
+                          QStringLiteral("/home/alice"));
+    QCOMPARE(storageRequests.size(), 1);
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    auto* const openButton = window.findChild<QPushButton*>(QStringLiteral("openVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(mountButton != nullptr);
+    QVERIFY(openButton != nullptr);
+
+    rfm::core::StorageVolume available;
+    available.displayName = QStringLiteral("Remote USB");
+    available.device = QStringLiteral("/dev/sdb1");
+    available.fileSystemType = QByteArrayLiteral("ext4");
+    available.kind = rfm::core::StorageKind::External;
+    available.mounted = false;
+    const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{available})));
+    QTreeWidgetItem* item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), available.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    mountButton->click();
+    QCOMPARE(operations.size(), 1);
+    const rfm::core::VolumeOperationRequest request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    QVERIFY(!openButton->isVisibleTo(&window));
+    QVERIFY(item->text(0).contains(QStringLiteral("Mounting")));
+
+    const rfm::core::VolumeOperationResult success{request.id,
+                                                   request.operation,
+                                                   request.target.device,
+                                                   rfm::core::VolumeOperationError::None,
+                                                   {}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, success)));
+    QCOMPARE(storageRequests.size(), 2);
+    QVERIFY(!openButton->isVisibleTo(&window));
+
+    rfm::core::StorageVolume mounted = available;
+    mounted.rootPath = QStringLiteral("/run/media/alice/REMOTE_USB");
+    mounted.mounted = true;
+    const quint64 observedRefresh = storageRequests.constLast().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+        Q_ARG(quint64, observedRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{mounted})));
+    item = volumeItemByDevice(navigation->tree()->topLevelItem(1), mounted.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    QVERIFY(openButton->isEnabled());
+    openButton->click();
+    QCOMPARE(directoryRequests.size(), 1);
+    QCOMPARE(directoryRequests.constFirst().at(1).toString(), mounted.rootPath);
+}
+
+void MainWindowTest::failedRemoteUnmountDoesNotEvacuateOrRefresh()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::directoryRequested);
+    setConnectionIdentity(window, QStringLiteral("failure.example.test"), QStringLiteral("alice"),
+                          QStringLiteral("/home/alice"));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const unmountButton =
+        window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(workspace != nullptr);
+    rfm::core::StorageVolume mounted;
+    mounted.displayName = QStringLiteral("Remote USB");
+    mounted.device = QStringLiteral("/dev/sdb1");
+    mounted.rootPath = QStringLiteral("/mnt/usb");
+    mounted.fileSystemType = QByteArrayLiteral("ext4");
+    mounted.kind = rfm::core::StorageKind::External;
+    const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{mounted})));
+    const QString machineId =
+        navigation->tree()->topLevelItem(1)->child(0)->data(0, Qt::UserRole + 2).toString();
+    workspace->primaryPane()->showDirectory(
+        {rfm::core::FileSource::Ssh, machineId, QStringLiteral("/mnt/usb/Films")},
+        QStringLiteral("/mnt/usb/Films"), {}, rfm::app::PaneNavigation::Initial);
+    QTreeWidgetItem* const item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), mounted.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    unmountButton->click();
+    QCOMPARE(operations.size(), 1);
+    QVERIFY(item->text(0).contains(QStringLiteral("Unmounting")));
+    QVERIFY(!unmountButton->isEnabled());
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult failure{
+        request.id, request.operation, request.target.device,
+        rfm::core::VolumeOperationError::PermissionDenied, QStringLiteral("private detail")};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, failure)));
+    QCOMPARE(directoryRequests.size(), 0);
+    QCOMPARE(storageRequests.size(), 1);
+    QCOMPARE(workspace->primaryPane()->currentPath(), QStringLiteral("/mnt/usb/Films"));
+    QVERIFY(!item->text(0).contains(QStringLiteral("Unmounting")));
+    QVERIFY(unmountButton->isEnabled());
+    QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("Permission")));
+    QVERIFY(!window.statusBar()->currentMessage().contains(QStringLiteral("private detail")));
+}
+
+void MainWindowTest::remoteTimeoutRestoresUiWithoutRefresh()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    setConnectionIdentity(window, QStringLiteral("timeout.example.test"), QStringLiteral("alice"),
+                          QStringLiteral("/home/alice"));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(mountButton != nullptr);
+
+    rfm::core::StorageVolume available;
+    available.displayName = QStringLiteral("Remote USB");
+    available.device = QStringLiteral("/dev/sdb1");
+    available.fileSystemType = QByteArrayLiteral("ext4");
+    available.kind = rfm::core::StorageKind::External;
+    available.mounted = false;
+    const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{available})));
+    QTreeWidgetItem* const item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), available.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+
+    mountButton->click();
+    QCOMPARE(operations.size(), 1);
+    QVERIFY(item->text(0).contains(QStringLiteral("Mounting")));
+    QVERIFY(!mountButton->isEnabled());
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult timeout{
+        request.id, request.operation, request.target.device,
+        rfm::core::VolumeOperationError::SystemError, QStringLiteral("private timeout detail")};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, timeout)));
+
+    QCOMPARE(storageRequests.size(), 1);
+    QVERIFY(!item->text(0).contains(QStringLiteral("Mounting")));
+    QVERIFY(mountButton->isEnabled());
+    QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("could not mount")));
+    QVERIFY(
+        !window.statusBar()->currentMessage().contains(QStringLiteral("private timeout detail")));
+}
+
+void MainWindowTest::successfulRemoteUnmountEvacuatesOnlyMatchingNamespace()
+{
+    auto runScenario = [](bool split, rfm::core::FileSource secondarySource,
+                          const QString& secondaryMachineId, const QString& secondaryPath,
+                          int expectedRequests) {
+        rfm::app::MainWindow window;
+        QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr,
+                            nullptr);
+        QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                            nullptr);
+        QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+        QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+        QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+        QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::directoryRequested);
+        setConnectionIdentity(window, QStringLiteral("unmount.example.test"),
+                              QStringLiteral("alice"), QStringLiteral("/home/alice"));
+        auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+        auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+        auto* const unmountButton =
+            window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+        if (split) {
+            workspace->setSplit(true);
+        }
+        const QString machineId =
+            navigation->tree()->topLevelItem(1)->child(0)->data(0, Qt::UserRole + 2).toString();
+        workspace->primaryPane()->showDirectory(
+            {rfm::core::FileSource::Ssh, machineId, QStringLiteral("/mnt/usb/Films/Action")},
+            QStringLiteral("/mnt/usb/Films/Action"), {}, rfm::app::PaneNavigation::Initial);
+        if (split) {
+            auto* const secondary =
+                workspace->otherVisiblePane(workspace->paneId(workspace->primaryPane()));
+            const QString resolvedMachine =
+                secondaryMachineId == QStringLiteral("active") ? machineId : secondaryMachineId;
+            secondary->showDirectory({secondarySource, resolvedMachine, secondaryPath},
+                                     secondaryPath, {}, rfm::app::PaneNavigation::Initial);
+        }
+        rfm::core::StorageVolume mounted;
+        mounted.displayName = QStringLiteral("Remote USB");
+        mounted.device = QStringLiteral("/dev/sdb1");
+        mounted.rootPath = QStringLiteral("/mnt/usb");
+        mounted.fileSystemType = QByteArrayLiteral("ext4");
+        mounted.kind = rfm::core::StorageKind::External;
+        const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+            Q_ARG(quint64, initialRefresh),
+            Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{mounted})));
+        navigation->tree()->setCurrentItem(
+            volumeItemByDevice(navigation->tree()->topLevelItem(1), mounted.device));
+        unmountButton->click();
+        const auto request =
+            operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+        const rfm::core::VolumeOperationResult success{request.id,
+                                                       request.operation,
+                                                       request.target.device,
+                                                       rfm::core::VolumeOperationError::None,
+                                                       {}};
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                          Qt::DirectConnection,
+                                          Q_ARG(rfm::core::VolumeOperationResult, success)));
+        while (directoryRequests.size() < expectedRequests && !directoryRequests.isEmpty()) {
+            const QList<QVariant> arguments = directoryRequests.constLast();
+            QVERIFY(QMetaObject::invokeMethod(
+                &window, "handleDirectoryListed", Qt::DirectConnection,
+                Q_ARG(quint64, arguments.at(0).toULongLong()),
+                Q_ARG(QString, arguments.at(1).toString()),
+                Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+        }
+        QCOMPARE(directoryRequests.size(), expectedRequests);
+        QCOMPARE(storageRequests.size(), 2);
+        for (const QList<QVariant>& arguments : std::as_const(directoryRequests)) {
+            QCOMPARE(arguments.at(1).toString(), QStringLiteral("/home/alice"));
+        }
+    };
+
+    runScenario(true, rfm::core::FileSource::Ssh, QStringLiteral("active"),
+                QStringLiteral("/mnt/usb"), 2);
+    runScenario(true, rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+                QStringLiteral("/mnt/usb"), 1);
+    runScenario(true, rfm::core::FileSource::Ssh, QStringLiteral("ssh:other-server"),
+                QStringLiteral("/mnt/usb"), 1);
+    runScenario(true, rfm::core::FileSource::Ssh, QStringLiteral("active"),
+                QStringLiteral("/mnt/usb2"), 1);
+}
+
+void MainWindowTest::remoteSafetyFallbackPurgesOnlyMatchingHistory()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::directoryRequested);
+    setConnectionIdentity(window, QStringLiteral("history-volume.example.test"),
+                          QStringLiteral("alice"), QStringLiteral("/home/alice"));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const pane = window.findChild<rfm::app::PaneWorkspace*>()->primaryPane();
+    const QString machineId =
+        navigation->tree()->topLevelItem(1)->child(0)->data(0, Qt::UserRole + 2).toString();
+    pane->showDirectory({rfm::core::FileSource::Ssh, machineId, QStringLiteral("/mnt/usb/Old")},
+                        QStringLiteral("/mnt/usb/Old"), {}, rfm::app::PaneNavigation::Initial);
+    pane->showDirectory({rfm::core::FileSource::Ssh, machineId, QStringLiteral("/srv/safe")},
+                        QStringLiteral("/srv/safe"), {}, rfm::app::PaneNavigation::Normal);
+    pane->showDirectory({rfm::core::FileSource::Ssh, machineId, QStringLiteral("/mnt/usb/Films")},
+                        QStringLiteral("/mnt/usb/Films"), {}, rfm::app::PaneNavigation::Normal);
+    rfm::core::StorageVolume mounted;
+    mounted.displayName = QStringLiteral("Remote USB");
+    mounted.device = QStringLiteral("/dev/sdb1");
+    mounted.rootPath = QStringLiteral("/mnt/usb");
+    mounted.kind = rfm::core::StorageKind::External;
+    const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{mounted})));
+    navigation->tree()->setCurrentItem(
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), mounted.device));
+    window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"))->click();
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult success{request.id,
+                                                   request.operation,
+                                                   request.target.device,
+                                                   rfm::core::VolumeOperationError::None,
+                                                   {}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, success)));
+    QCOMPARE(directoryRequests.size(), 1);
+    const quint64 fallbackId = directoryRequests.constFirst().at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, fallbackId),
+        Q_ARG(QString, QStringLiteral("/home/alice")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(pane->currentPath(), QStringLiteral("/home/alice"));
+    pane->requestBack();
+    QCOMPARE(directoryRequests.size(), 2);
+    QCOMPARE(directoryRequests.constLast().at(1).toString(), QStringLiteral("/srv/safe"));
+}
+
+void MainWindowTest::remoteDisconnectClearsPendingVolumeState()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    setConnectionIdentity(window, QStringLiteral("disconnect-volume.example.test"));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    rfm::core::StorageVolume available;
+    available.displayName = QStringLiteral("Remote USB");
+    available.device = QStringLiteral("/dev/sdb1");
+    available.kind = rfm::core::StorageKind::External;
+    available.mounted = false;
+    const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{available})));
+    navigation->tree()->setCurrentItem(
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), available.device));
+    window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"))->click();
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    const rfm::core::VolumeOperationResult late{request.id,
+                                                request.operation,
+                                                request.target.device,
+                                                rfm::core::VolumeOperationError::ConnectionLost,
+                                                {}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, late)));
+    QCOMPARE(storageRequests.size(), 1);
+    QCOMPARE(navigation->tree()->topLevelItem(1)->childCount(), 0);
+}
+
+void MainWindowTest::remoteDisconnectAfterCommandBeforeRefreshKeepsObservedModel()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    setConnectionIdentity(window, QStringLiteral("post-command-loss.example.test"));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    rfm::core::StorageVolume available;
+    available.displayName = QStringLiteral("Remote USB");
+    available.device = QStringLiteral("/dev/sdb1");
+    available.kind = rfm::core::StorageKind::External;
+    available.mounted = false;
+    const quint64 initialRefresh = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{available})));
+    navigation->tree()->setCurrentItem(
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), available.device));
+    window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"))->click();
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult success{request.id,
+                                                   request.operation,
+                                                   request.target.device,
+                                                   rfm::core::VolumeOperationError::None,
+                                                   {}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, success)));
+    QCOMPARE(storageRequests.size(), 2);
+    QTreeWidgetItem* const stillObserved =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), available.device);
+    QVERIFY(stillObserved != nullptr);
+    QCOMPARE(stillObserved->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().mounted,
+             false);
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    QCOMPARE(navigation->tree()->topLevelItem(1)->childCount(), 0);
 }
 
 int main(int argc, char* argv[])

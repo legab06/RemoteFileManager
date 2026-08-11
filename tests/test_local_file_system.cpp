@@ -72,6 +72,9 @@ class LocalFileSystemTest final : public QObject
     void preservesDistinctBtrfsAndAmbiguousAttachments();
     void reportsPortableMountedVolumes();
     void buildsVolumesAndFingerprintFromOneSnapshot();
+    void discoversUnmountedUsbPartitionWithoutTechnicalDuplicates();
+    void keepsMountedVolumeWhenBlockDiscoveryReportsItToo();
+    void matchesLocalPathsOnComponentBoundaries();
 };
 
 void LocalFileSystemTest::listsOnlyImmediateEntriesFromTemporaryDirectory()
@@ -458,6 +461,84 @@ void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()
     QCOMPARE(firstResult.fingerprint, unchangedResult.fingerprint);
     QCOMPARE(secondResult.volumes.size(), 2);
     QVERIFY(firstResult.fingerprint != secondResult.fingerprint);
+}
+
+void LocalFileSystemTest::discoversUnmountedUsbPartitionWithoutTechnicalDuplicates()
+{
+    const QByteArray fixture = R"json({
+        "blockdevices": [
+            {
+                "path": "/dev/sde", "pkname": null, "type": "disk",
+                "fstype": "vfat", "label": "PARENT", "size": 123000,
+                "mountpoint": null, "ro": false, "rm": true, "tran": "usb",
+                "model": "USB Reader",
+                "children": [
+                    {
+                        "path": "/dev/sde1", "pkname": "/dev/sde", "type": "part",
+                        "fstype": "vfat", "label": "PHOTOS", "size": 120000,
+                        "mountpoint": null, "ro": false, "rm": true, "tran": null,
+                        "model": null
+                    },
+                    {
+                        "path": "/dev/sde2", "pkname": "/dev/sde", "type": "part",
+                        "fstype": "swap", "label": null, "size": 3000,
+                        "mountpoint": null, "ro": false, "rm": true, "tran": "usb",
+                        "model": "USB Reader"
+                    }
+                ]
+            }
+        ]
+    })json";
+
+    const QList<rfm::core::LocalBlockDevice> devices =
+        rfm::core::LocalFileSystem::parseLinuxBlockDevices(fixture);
+    QCOMPARE(devices.size(), 3);
+    const rfm::core::LocalStorageSnapshot snapshot =
+        rfm::core::LocalFileSystem::makeStorageSnapshot({}, devices);
+
+    QCOMPARE(snapshot.volumes.size(), 1);
+    const rfm::core::StorageVolume& volume = snapshot.volumes.constFirst();
+    QCOMPARE(volume.device, QStringLiteral("/dev/sde1"));
+    QCOMPARE(volume.displayName, QStringLiteral("PHOTOS"));
+    QCOMPARE(volume.fileSystemType, QByteArrayLiteral("vfat"));
+    QCOMPARE(volume.bytesTotal, quint64{120000});
+    QCOMPARE(volume.kind, rfm::core::StorageKind::External);
+    QCOMPARE(volume.deviceModel, QStringLiteral("USB Reader"));
+    QVERIFY(volume.removable);
+    QVERIFY(!volume.mounted);
+    QVERIFY(volume.rootPath.isEmpty());
+}
+
+void LocalFileSystemTest::keepsMountedVolumeWhenBlockDiscoveryReportsItToo()
+{
+    QTemporaryDir mountPoint;
+    QVERIFY(mountPoint.isValid());
+    const QList<rfm::core::LocalStorageMount> mounts{
+        {mountPoint.path(), QStringLiteral("/dev/sde1"), QByteArrayLiteral("vfat"),
+         QStringLiteral("PHOTOS"), 120000, false, true, true}};
+    const QList<rfm::core::LocalBlockDevice> devices{
+        {QStringLiteral("/dev/sde1"), QStringLiteral("/dev/sde"), QStringLiteral("part"),
+         QByteArrayLiteral("vfat"), QStringLiteral("PHOTOS"), mountPoint.path(),
+         QStringLiteral("usb"), QStringLiteral("USB Reader"), 120000, true, false}};
+
+    const rfm::core::LocalStorageSnapshot snapshot =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(mounts, devices);
+
+    QCOMPARE(snapshot.volumes.size(), 1);
+    QCOMPARE(snapshot.volumes.constFirst().device, QStringLiteral("/dev/sde1"));
+    QCOMPARE(snapshot.volumes.constFirst().rootPath, mountPoint.path());
+    QVERIFY(snapshot.volumes.constFirst().mounted);
+}
+
+void LocalFileSystemTest::matchesLocalPathsOnComponentBoundaries()
+{
+    QVERIFY(
+        rfm::core::localPathIsAtOrBelow(QStringLiteral("/mnt/disk"), QStringLiteral("/mnt/disk/")));
+    QVERIFY(rfm::core::localPathIsAtOrBelow(QStringLiteral("/mnt/disk/Films/../Music"),
+                                            QStringLiteral("/mnt/disk")));
+    QVERIFY(!rfm::core::localPathIsAtOrBelow(QStringLiteral("/mnt/disk2/Films"),
+                                             QStringLiteral("/mnt/disk")));
+    QVERIFY(!rfm::core::localPathIsAtOrBelow({}, QStringLiteral("/mnt/disk")));
 }
 
 void LocalFileSystemTest::filtersBindMountsAndKeepsVisibleOvermount()

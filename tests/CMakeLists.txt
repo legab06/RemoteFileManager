@@ -36,6 +36,16 @@ target_link_libraries(rfm_local_file_system_tests PRIVATE Qt6::Test RemoteFileMa
 rfm_set_project_warnings(rfm_local_file_system_tests)
 add_test(NAME unit.local_file_system COMMAND rfm_local_file_system_tests)
 
+qt_add_executable(rfm_volume_service_tests test_volume_service.cpp)
+target_link_libraries(rfm_volume_service_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_volume_service_tests)
+add_test(NAME unit.volume_service COMMAND rfm_volume_service_tests)
+
+qt_add_executable(rfm_remote_volume_service_tests test_remote_volume_service.cpp)
+target_link_libraries(rfm_remote_volume_service_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_remote_volume_service_tests)
+add_test(NAME unit.remote_volume_service COMMAND rfm_remote_volume_service_tests)
+
 qt_add_executable(rfm_remote_storage_scanner_tests test_remote_storage_scanner.cpp)
 target_link_libraries(rfm_remote_storage_scanner_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_remote_storage_scanner_tests)

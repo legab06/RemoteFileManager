@@ -38,6 +38,10 @@ struct LocalStorageSnapshot {
     QByteArray fingerprint;
 };
 
+[[nodiscard]] bool localPathIsAtOrBelow(const QString& path, const QString& rootPath);
+
+using LocalBlockDevice = LinuxBlockDevice;
+
 class LocalFileSystem final
 {
   public:
@@ -45,8 +49,13 @@ class LocalFileSystem final
     [[nodiscard]] static QList<StorageVolume> mountedVolumes();
     [[nodiscard]] static LocalStorageSnapshot mountedVolumeSnapshot();
     [[nodiscard]] static QByteArray mountedVolumeFingerprint();
+    [[nodiscard]] static QList<StorageVolume> storageVolumes();
+    [[nodiscard]] static LocalStorageSnapshot storageSnapshot();
+    [[nodiscard]] static QByteArray storageFingerprint();
+    [[nodiscard]] static QList<LocalBlockDevice> parseLinuxBlockDevices(const QByteArray& output);
     [[nodiscard]] static LocalStorageSnapshot
-    makeStorageSnapshot(const QList<LocalStorageMount>& mounts);
+    makeStorageSnapshot(const QList<LocalStorageMount>& mounts,
+                        const QList<LocalBlockDevice>& blockDevices = {});
 };
 
 class LocalFileSystemWorker final : public QObject

@@ -1,0 +1,216 @@
+#include "remotefilemanager/ssh/RemoteVolumeService.hpp"
+#include "remotefilemanager/ssh/SshSession.hpp"
+
+#include <QSignalSpy>
+#include <QTest>
+
+namespace
+{
+
+rfm::core::VolumeOperationRequest
+requestFor(rfm::core::VolumeOperation operation, QString device = QStringLiteral("/dev/sdb1"),
+           QString mountPoint = QStringLiteral("/mnt/usb"),
+           rfm::core::StorageKind kind = rfm::core::StorageKind::External)
+{
+    return {17, operation, {std::move(device), std::move(mountPoint), kind}};
+}
+
+rfm::ssh::RemoteLinuxVolumeCapabilities allCapabilities() { return {true, true, true, true, true}; }
+
+} // namespace
+
+class RemoteVolumeServiceTest final : public QObject
+{
+    Q_OBJECT
+
+  private slots:
+    void parsesCapabilitiesAndUsesOnlyFixedProbe();
+    void choosesUdisksctlAndFallbacks();
+    void rejectsUnavailableToolsAndProtectedVolumes();
+    void rejectsUnsafeDevicePaths_data();
+    void rejectsUnsafeDevicePaths();
+    void neverUsesPresentationMetadataOrPrivilegeEscalation();
+    void mapsStructuredFailures_data();
+    void mapsStructuredFailures();
+    void mapsTimeoutToStructuredFailure();
+    void reportsUnavailableSessionCapabilities();
+    void invalidatesCapabilitiesBetweenSessions();
+    void sessionLossBeforeOperationReturnsStructuredError();
+};
+
+void RemoteVolumeServiceTest::parsesCapabilitiesAndUsesOnlyFixedProbe()
+{
+    const auto capabilities = rfm::ssh::RemoteLinuxVolumeService::parseCapabilities(
+        QByteArrayLiteral("lsblk\nudisksctl\numount\n"));
+    QVERIFY(capabilities.known);
+    QVERIFY(capabilities.lsblk);
+    QVERIFY(capabilities.udisksctl);
+    QVERIFY(!capabilities.mount);
+    QVERIFY(capabilities.umount);
+    const QString probe = rfm::ssh::RemoteLinuxVolumeService::capabilityProbeCommand();
+    QVERIFY(probe.contains(QStringLiteral("lsblk udisksctl mount umount")));
+    QVERIFY(!probe.contains(QStringLiteral("sudo")));
+}
+
+void RemoteVolumeServiceTest::choosesUdisksctlAndFallbacks()
+{
+    rfm::core::VolumeOperationResult immediate;
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Mount), allCapabilities(), &immediate),
+             QStringLiteral("LC_ALL=C udisksctl mount -b /dev/sdb1 --no-user-interaction"));
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Unmount), allCapabilities(), &immediate),
+             QStringLiteral("LC_ALL=C udisksctl unmount -b /dev/sdb1 --no-user-interaction"));
+
+    rfm::ssh::RemoteLinuxVolumeCapabilities fallback{true, true, false, true, true};
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Mount), fallback, &immediate),
+             QStringLiteral("LC_ALL=C mount -- /dev/sdb1"));
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Unmount), fallback, &immediate),
+             QStringLiteral("LC_ALL=C umount -- /dev/sdb1"));
+}
+
+void RemoteVolumeServiceTest::rejectsUnavailableToolsAndProtectedVolumes()
+{
+    rfm::core::VolumeOperationResult immediate;
+    const rfm::ssh::RemoteLinuxVolumeCapabilities none{true, true, false, false, false};
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Mount), none, &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::ToolUnavailable);
+
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sda1"),
+                            QStringLiteral("/"), rfm::core::StorageKind::System),
+                 allCapabilities(), &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::NotSupported);
+
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sda2"),
+                            QStringLiteral("/boot"), rfm::core::StorageKind::System),
+                 allCapabilities(), &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::NotSupported);
+}
+
+void RemoteVolumeServiceTest::rejectsUnsafeDevicePaths_data()
+{
+    QTest::addColumn<QString>("device");
+    QTest::newRow("semicolon") << QStringLiteral("/dev/sdb1;touch /tmp/pwned");
+    QTest::newRow("substitution") << QStringLiteral("/dev/$(id)");
+    QTest::newRow("space") << QStringLiteral("/dev/disk/by-label/My Disk");
+    QTest::newRow("quote") << QStringLiteral("/dev/sdb1'");
+    QTest::newRow("traversal") << QStringLiteral("/dev/disk/../../tmp/x");
+    QTest::newRow("not-dev") << QStringLiteral("/tmp/device");
+}
+
+void RemoteVolumeServiceTest::rejectsUnsafeDevicePaths()
+{
+    QFETCH(QString, device);
+    rfm::core::VolumeOperationResult immediate;
+    QVERIFY(
+        !rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+             requestFor(rfm::core::VolumeOperation::Mount, device), allCapabilities(), &immediate)
+             .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::DeviceNotFound);
+}
+
+void RemoteVolumeServiceTest::neverUsesPresentationMetadataOrPrivilegeEscalation()
+{
+    for (const rfm::core::VolumeOperation operation :
+         {rfm::core::VolumeOperation::Mount, rfm::core::VolumeOperation::Unmount}) {
+        const auto request = requestFor(operation);
+        const QString command =
+            *rfm::ssh::RemoteLinuxVolumeService::operationCommand(request, allCapabilities());
+        QVERIFY(command.contains(request.target.device));
+        QCOMPARE(command.count(QStringLiteral("--no-user-interaction")), 1);
+        QVERIFY(!command.contains(QStringLiteral("Backup; rm -rf")));
+        QVERIFY(!command.contains(QStringLiteral("sudo")));
+        QVERIFY(!command.contains(QStringLiteral("su ")));
+        QVERIFY(!command.contains(QStringLiteral("password"), Qt::CaseInsensitive));
+        QVERIFY(!command.contains(QStringLiteral("--interactive")));
+    }
+}
+
+void RemoteVolumeServiceTest::mapsStructuredFailures_data()
+{
+    QTest::addColumn<QString>("diagnostic");
+    QTest::addColumn<rfm::core::VolumeOperationError>("error");
+    QTest::newRow("permission") << QStringLiteral("permission denied")
+                                << rfm::core::VolumeOperationError::PermissionDenied;
+    QTest::newRow("polkit-not-authorized")
+        << QStringLiteral("Error mounting /dev/sdb1: GDBus.Error:org.freedesktop.UDisks2.Error."
+                          "NotAuthorized: Not authorized to perform operation")
+        << rfm::core::VolumeOperationError::PermissionDenied;
+    QTest::newRow("polkit-authentication-required")
+        << QStringLiteral("Authentication is required to mount TOSHIBA (/dev/sdb1)")
+        << rfm::core::VolumeOperationError::PermissionDenied;
+    QTest::newRow("busy") << QStringLiteral("target is busy")
+                          << rfm::core::VolumeOperationError::VolumeBusy;
+    QTest::newRow("device") << QStringLiteral("no such file")
+                            << rfm::core::VolumeOperationError::DeviceNotFound;
+    QTest::newRow("tool-unavailable") << QStringLiteral("udisksctl: command not found")
+                                      << rfm::core::VolumeOperationError::ToolUnavailable;
+}
+
+void RemoteVolumeServiceTest::mapsStructuredFailures()
+{
+    QFETCH(QString, diagnostic);
+    QFETCH(rfm::core::VolumeOperationError, error);
+    const int exitCode = error == rfm::core::VolumeOperationError::ToolUnavailable ? 127 : 1;
+    const auto result = rfm::ssh::RemoteLinuxVolumeService::operationResult(
+        requestFor(rfm::core::VolumeOperation::Unmount),
+        {true, false, false, exitCode, {}, diagnostic});
+    QCOMPARE(result.error, error);
+    QCOMPARE(result.technicalMessage, diagnostic);
+}
+
+void RemoteVolumeServiceTest::mapsTimeoutToStructuredFailure()
+{
+    const auto result = rfm::ssh::RemoteLinuxVolumeService::operationResult(
+        requestFor(rfm::core::VolumeOperation::Mount),
+        {true, true, false, -1, {}, QStringLiteral("bounded timeout fixture")});
+
+    QCOMPARE(result.error, rfm::core::VolumeOperationError::SystemError);
+    QCOMPARE(result.technicalMessage, QStringLiteral("bounded timeout fixture"));
+}
+
+void RemoteVolumeServiceTest::reportsUnavailableSessionCapabilities()
+{
+    rfm::core::VolumeOperationResult immediate;
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                 requestFor(rfm::core::VolumeOperation::Mount), {}, &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::ConnectionLost);
+}
+
+void RemoteVolumeServiceTest::invalidatesCapabilitiesBetweenSessions()
+{
+    rfm::ssh::RemoteLinuxVolumeCapabilityCache cache;
+    QVERIFY(!cache.value().known);
+    cache.update({true, true, true, false, true});
+    QVERIFY(cache.value().known);
+    QVERIFY(cache.value().lsblk);
+    QVERIFY(cache.value().udisksctl);
+    cache.reset();
+    QVERIFY(!cache.value().known);
+    QVERIFY(!cache.value().lsblk);
+    QVERIFY(!cache.value().udisksctl);
+}
+
+void RemoteVolumeServiceTest::sessionLossBeforeOperationReturnsStructuredError()
+{
+    rfm::ssh::SshSession session;
+    QSignalSpy results(&session, &rfm::ssh::SshSession::volumeOperationFinished);
+    session.operateVolume(requestFor(rfm::core::VolumeOperation::Mount));
+    QCOMPARE(results.size(), 1);
+    const auto result = results.constFirst().constFirst().value<rfm::core::VolumeOperationResult>();
+    QCOMPARE(result.error, rfm::core::VolumeOperationError::ConnectionLost);
+    QCOMPARE(result.id, quint64{17});
+}
+
+QTEST_GUILESS_MAIN(RemoteVolumeServiceTest)
+
+#include "test_remote_volume_service.moc"

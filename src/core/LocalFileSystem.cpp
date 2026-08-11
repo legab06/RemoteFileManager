@@ -6,7 +6,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QProcess>
 #include <QSet>
+#include <QStandardPaths>
 #include <QStorageInfo>
 #include <QStringList>
 
@@ -59,7 +61,7 @@ QString storageMountIdentity(const LocalStorageMount& storage)
              storage.readOnly ? QStringLiteral("ro") : QStringLiteral("rw"));
 }
 
-QByteArray storageFingerprint(const QList<LocalStorageMount>& snapshot)
+QByteArray mountedStorageFingerprint(const QList<LocalStorageMount>& snapshot)
 {
     QStringList identities;
     identities.reserve(snapshot.size());
@@ -75,6 +77,37 @@ QByteArray storageFingerprint(const QList<LocalStorageMount>& snapshot)
     std::ranges::sort(identities);
     return QCryptographicHash::hash(identities.join(QChar{'\n'}).toUtf8(),
                                     QCryptographicHash::Sha256);
+}
+
+QList<LocalBlockDevice> linuxBlockDeviceSnapshot()
+{
+#ifdef Q_OS_LINUX
+    const QString program = QStandardPaths::findExecutable(QStringLiteral("lsblk"));
+    if (program.isEmpty()) {
+        return {};
+    }
+    QProcess process;
+    process.setProgram(program);
+    process.setArguments(
+        {QStringLiteral("--json"), QStringLiteral("--bytes"), QStringLiteral("--paths"),
+         QStringLiteral("--output"),
+         QStringLiteral("PATH,NAME,PKNAME,TYPE,FSTYPE,LABEL,SIZE,MOUNTPOINTS,RO,RM,TRAN,MODEL")});
+    process.start(QIODevice::ReadOnly);
+    if (!process.waitForStarted(2'000)) {
+        return {};
+    }
+    if (!process.waitForFinished(10'000)) {
+        process.kill();
+        static_cast<void>(process.waitForFinished());
+        return {};
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        return {};
+    }
+    return LocalFileSystem::parseLinuxBlockDevices(process.readAllStandardOutput());
+#else
+    return {};
+#endif
 }
 
 } // namespace
@@ -295,6 +328,28 @@ LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
     return {directory.absolutePath(), std::move(entries), {}};
 }
 
+bool localPathIsAtOrBelow(const QString& path, const QString& rootPath)
+{
+    if (path.trimmed().isEmpty() || rootPath.trimmed().isEmpty()) {
+        return false;
+    }
+    const QString normalizedPath =
+        QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath()));
+    const QString normalizedRoot =
+        QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(rootPath).absoluteFilePath()));
+#ifdef Q_OS_WIN
+    constexpr Qt::CaseSensitivity caseSensitivity = Qt::CaseInsensitive;
+#else
+    constexpr Qt::CaseSensitivity caseSensitivity = Qt::CaseSensitive;
+#endif
+    if (normalizedPath.compare(normalizedRoot, caseSensitivity) == 0) {
+        return true;
+    }
+    const QString boundary =
+        normalizedRoot.endsWith(QChar{'/'}) ? normalizedRoot : normalizedRoot + QChar{'/'};
+    return normalizedPath.startsWith(boundary, caseSensitivity);
+}
+
 QList<StorageVolume> LocalFileSystem::mountedVolumes() { return mountedVolumeSnapshot().volumes; }
 
 LocalStorageSnapshot LocalFileSystem::mountedVolumeSnapshot()
@@ -302,7 +357,21 @@ LocalStorageSnapshot LocalFileSystem::mountedVolumeSnapshot()
     return makeStorageSnapshot(mountedStorageSnapshot());
 }
 
-LocalStorageSnapshot LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot)
+QList<StorageVolume> LocalFileSystem::storageVolumes() { return storageSnapshot().volumes; }
+
+LocalStorageSnapshot LocalFileSystem::storageSnapshot()
+{
+    return makeStorageSnapshot(mountedStorageSnapshot(), linuxBlockDeviceSnapshot());
+}
+
+QList<LocalBlockDevice> LocalFileSystem::parseLinuxBlockDevices(const QByteArray& output)
+{
+    return rfm::core::parseLinuxBlockDevices(output);
+}
+
+LocalStorageSnapshot
+LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot,
+                                     const QList<LocalBlockDevice>& blockDevices)
 {
     QList<StorageVolume> volumes;
     QSet<QString> roots;
@@ -335,20 +404,23 @@ LocalStorageSnapshot LocalFileSystem::makeStorageSnapshot(const QList<LocalStora
         volume.readOnly = storage.readOnly;
         volume.fileSystemLabel = storage.fileSystemLabel.trimmed();
         volume.deviceModel = platformDetails.deviceModel;
+        volume.mounted = true;
         volume.displayName = storageDisplayName(volume.fileSystemLabel, volume.deviceModel,
                                                 volume.device, volume.rootPath);
         volumes.push_back(std::move(volume));
     }
-    std::ranges::sort(volumes, [](const StorageVolume& first, const StorageVolume& second) {
-        return first.rootPath.compare(second.rootPath, Qt::CaseInsensitive) < 0;
-    });
-    return {std::move(volumes), storageFingerprint(snapshot)};
+
+    volumes = mergeLinuxBlockDevices(std::move(volumes), blockDevices);
+    const QByteArray fingerprint = storageVolumeFingerprint(volumes);
+    return {std::move(volumes), fingerprint};
 }
 
 QByteArray LocalFileSystem::mountedVolumeFingerprint()
 {
-    return storageFingerprint(mountedStorageSnapshot());
+    return mountedStorageFingerprint(mountedStorageSnapshot());
 }
+
+QByteArray LocalFileSystem::storageFingerprint() { return storageSnapshot().fingerprint; }
 
 void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
 {
@@ -362,13 +434,13 @@ void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
 
 void LocalFileSystemWorker::listVolumes()
 {
-    LocalStorageSnapshot snapshot = LocalFileSystem::mountedVolumeSnapshot();
+    LocalStorageSnapshot snapshot = LocalFileSystem::storageSnapshot();
     emit volumesListed(std::move(snapshot.volumes), std::move(snapshot.fingerprint));
 }
 
 void LocalFileSystemWorker::probeVolumes(quint64 requestId)
 {
-    emit volumesProbed(requestId, LocalFileSystem::mountedVolumeFingerprint());
+    emit volumesProbed(requestId, LocalFileSystem::storageFingerprint());
 }
 
 } // namespace rfm::core
