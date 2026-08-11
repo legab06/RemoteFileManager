@@ -19,6 +19,9 @@ flowchart TD
     UC --> FS["Système de fichiers distant"]
     FS --> SFTP["SFTP : liste et transferts"]
     FS --> EXEC["SSH exec : opérations côté serveur"]
+    UI --> STORAGE["StorageVolume et classification commune"]
+    LOCAL["Collecteur local Qt/sysfs"] --> STORAGE
+    REMOTE["Collecteur Linux distant /proc + sysfs via SFTP"] --> STORAGE
 ```
 
 ## Asynchronisme
@@ -28,9 +31,29 @@ worker avec une file de tâches. Les transferts et copies serveur longues avance
 réordonnancées dans la boucle d'événements afin que le worker puisse traiter navigation, annulation
 et arrêt propre entre deux étapes.
 
+La découverte des volumes utilise la même discipline : `LocalFileSystemWorker` lit
+la machine cliente et `SshSession` lit le serveur connecté. Les deux collecteurs
+produisent les mêmes preuves topologiques et délèguent la décision métier à
+`Storage.cpp`. Un niveau sysfs sans lien `subsystem` est conservé comme niveau vide,
+tandis qu'une permission refusée ou une erreur d'I/O invalide explicitement la
+fiabilité ; seule la fin réelle de l'ascendance rend la topologie complète. Un
+périphérique bloc dont le parcours est incomplet reste donc `Unknown`.
+La lecture distante avance par étapes réordonnancées dans la boucle du worker SSH.
+`mountinfo` reste ouvert pendant la collecte, mais chaque étape n'effectue qu'une
+lecture SFTP bornée avant de rendre la main à la boucle d'évènements.
+La taille de `mountinfo`, le nombre de montages et labels, ainsi que le travail sysfs
+total sont bornés. Une nouvelle requête, une déconnexion ou le shutdown annule le
+snapshot en cours ; une perte de connexion supprime tout résultat partiel et rejoint
+le chemin de déconnexion existant.
+Le même modèle porte également le label, le modèle matériel, le périphérique et le
+point de montage. Le choix du nom humain est centralisé ; l'arbre utilise toujours le
+point de montage stocké pour naviguer et ne déduit jamais un chemin du texte affiché.
+
 ## Opérations distantes
 
 - SFTP servira à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
+- Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
+  lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
 - Les copies importantes entre deux chemins du même serveur devront rester côté serveur pour éviter un aller-retour des données par le client.
 - `cp` n’expose pas nativement une progression exploitable. Une copie active affiche donc une
   progression indéterminée honnête ; aucun pourcentage n'est estimé ou fabriqué.

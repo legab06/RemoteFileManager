@@ -9,8 +9,10 @@
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
+#include <QDir>
 #include <QDropEvent>
 #include <QFileIconProvider>
+#include <QFileInfo>
 #include <QEvent>
 #include <QFocusEvent>
 #include <QHeaderView>
@@ -26,8 +28,8 @@
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
-#include <limits>
 #include <functional>
+#include <limits>
 #include <utility>
 
 namespace rfm::app
@@ -71,7 +73,7 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setObjectName(QStringLiteral("remotePathEdit"));
     m_pathEdit->setReadOnly(true);
-    m_pathEdit->setPlaceholderText(tr("sftp://user@server/path"));
+    m_pathEdit->setPlaceholderText(tr("Local folder or sftp://user@server/path"));
     m_pathEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     layout->addWidget(m_pathEdit);
 
@@ -110,7 +112,16 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
         [this](Qt::DropActions supportedActions) { startInternalDrag(supportedActions); };
 }
 
-QString FileBrowserPane::currentPath() const { return m_currentPath; }
+QString FileBrowserPane::currentPath() const { return m_currentLocation.path; }
+
+rfm::core::BrowserLocation FileBrowserPane::currentLocation() const
+{
+    return m_currentLocation;
+}
+
+rfm::core::FileSource FileBrowserPane::source() const { return m_currentLocation.source; }
+
+bool FileBrowserPane::hasLocation() const { return m_currentLocation.isValid(); }
 
 QList<rfm::core::RemoteSelection> FileBrowserPane::selectedEntries() const
 {
@@ -119,8 +130,11 @@ QList<rfm::core::RemoteSelection> FileBrowserPane::selectedEntries() const
     for (const QModelIndex& index : rows) {
         const QTableWidgetItem* const item = m_fileTable->item(index.row(), 0);
         if (item != nullptr) {
-            selection.push_back({rfm::core::RemotePath::join(m_currentPath, item->text()),
-                                 item->data(Qt::UserRole).toBool()});
+            const QString path = m_currentLocation.source == rfm::core::FileSource::Local
+                                     ? QDir(m_currentLocation.path).filePath(item->text())
+                                     : rfm::core::RemotePath::join(m_currentLocation.path,
+                                                                  item->text());
+            selection.push_back({path, item->data(Qt::UserRole).toBool()});
         }
     }
     return selection;
@@ -136,6 +150,9 @@ bool FileBrowserPane::canGoForward() const { return !m_forwardHistory.isEmpty();
 
 QByteArray FileBrowserPane::createInternalDragData() const
 {
+    if (m_currentLocation.source != rfm::core::FileSource::Ssh) {
+        return {};
+    }
     return rfm::core::encodeInternalTransfer(
         {m_applicationInstanceId, m_connectionIdentity, m_paneId, selectedEntries()});
 }
@@ -213,14 +230,27 @@ void FileBrowserPane::showDirectory(const QString& path, const QString& displayP
                                     const QList<rfm::core::RemoteEntry>& entries,
                                     PaneNavigation navigation)
 {
-    const QString normalizedPath = rfm::core::RemotePath::normalize(path);
+    const QString machineId = m_currentLocation.source == rfm::core::FileSource::Ssh &&
+                                      !m_currentLocation.machineId.isEmpty()
+                                  ? m_currentLocation.machineId
+                                  : QStringLiteral("ssh");
+    showDirectory({rfm::core::FileSource::Ssh, machineId, path}, displayPath, entries, navigation);
+}
+
+void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
+                                    const QString& displayPath,
+                                    const QList<rfm::core::RemoteEntry>& entries,
+                                    PaneNavigation navigation)
+{
+    rfm::core::BrowserLocation normalizedLocation = location;
+    normalizedLocation.path = normalizedPath(location);
+    const QString& normalizedPath = normalizedLocation.path;
     if (normalizedPath.isEmpty()) {
         return;
     }
     QStringList namesToSelect;
     int previousScrollPosition = -1;
-    const bool sameDirectory = normalizedPath ==
-                               rfm::core::RemotePath::normalize(m_currentPath);
+    const bool sameDirectory = normalizedLocation == m_currentLocation;
     if (sameDirectory) {
         for (const QModelIndex& index : m_fileTable->selectionModel()->selectedRows(0)) {
             if (const QTableWidgetItem* const item = m_fileTable->item(index.row(), 0);
@@ -237,31 +267,34 @@ void FileBrowserPane::showDirectory(const QString& path, const QString& displayP
     }
     m_pendingSelectionNames.clear();
 
-    const QString previousPath = m_currentPath;
-    const bool pathChanged = rfm::core::RemotePath::normalize(previousPath) !=
-                             normalizedPath;
+    const rfm::core::BrowserLocation previousLocation = m_currentLocation;
+    const bool pathChanged = previousLocation != normalizedLocation;
     if (navigation == PaneNavigation::Initial) {
         m_backHistory.clear();
         m_forwardHistory.clear();
     } else if (pathChanged && navigation == PaneNavigation::Normal) {
-        if (!previousPath.isEmpty() &&
-            (m_backHistory.isEmpty() || m_backHistory.constLast() != previousPath)) {
-            m_backHistory.push_back(previousPath);
+        if (previousLocation.isValid() &&
+            (m_backHistory.isEmpty() || m_backHistory.constLast() != previousLocation)) {
+            m_backHistory.push_back(previousLocation);
         }
         m_forwardHistory.clear();
     } else if (pathChanged && navigation == PaneNavigation::Back && !m_backHistory.isEmpty()) {
         m_backHistory.removeLast();
-        if (!previousPath.isEmpty()) {
-            m_forwardHistory.push_back(previousPath);
+        if (previousLocation.isValid()) {
+            m_forwardHistory.push_back(previousLocation);
         }
     } else if (pathChanged && navigation == PaneNavigation::Forward &&
                !m_forwardHistory.isEmpty()) {
         m_forwardHistory.removeLast();
-        if (!previousPath.isEmpty()) {
-            m_backHistory.push_back(previousPath);
+        if (previousLocation.isValid()) {
+            m_backHistory.push_back(previousLocation);
         }
     }
-    m_currentPath = normalizedPath;
+    m_currentLocation = normalizedLocation;
+    m_fileTable->setDragEnabled(m_currentLocation.source == rfm::core::FileSource::Ssh);
+    m_fileTable->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
+    m_fileTable->viewport()->setAcceptDrops(m_currentLocation.source ==
+                                            rfm::core::FileSource::Ssh);
     m_fileTable->setRowCount(static_cast<int>(entries.size()));
     QFileIconProvider icons;
     for (qsizetype row = 0; row < entries.size(); ++row) {
@@ -302,7 +335,7 @@ void FileBrowserPane::showDirectory(const QString& path, const QString& displayP
 
 void FileBrowserPane::clear()
 {
-    m_currentPath.clear();
+    m_currentLocation = {};
     m_pendingSelectionNames.clear();
     m_backHistory.clear();
     m_forwardHistory.clear();
@@ -313,6 +346,17 @@ void FileBrowserPane::clear()
     setCutPaths({});
     updateDropAppearance(false, false);
     setInteractionEnabled(false);
+    emit historyChanged();
+}
+
+void FileBrowserPane::removeHistoryForSource(rfm::core::FileSource source)
+{
+    m_backHistory.removeIf([source](const rfm::core::BrowserLocation& location) {
+        return location.source == source;
+    });
+    m_forwardHistory.removeIf([source](const rfm::core::BrowserLocation& location) {
+        return location.source == source;
+    });
     emit historyChanged();
 }
 
@@ -395,44 +439,57 @@ void FileBrowserPane::focusLocation()
 
 void FileBrowserPane::navigateTo(const QString& path)
 {
-    const QString normalizedPath = rfm::core::RemotePath::normalize(path);
-    if (normalizedPath.isEmpty() ||
-        normalizedPath == rfm::core::RemotePath::normalize(m_currentPath)) {
+    rfm::core::BrowserLocation location = m_currentLocation;
+    location.path = path;
+    const QString pathValue = normalizedPath(location);
+    if (pathValue.isEmpty() || pathValue == m_currentLocation.path) {
         return;
     }
-    emit navigationRequested(normalizedPath, PaneNavigation::Normal);
+    location.path = pathValue;
+    requestLocation(location, PaneNavigation::Normal);
 }
 
 void FileBrowserPane::requestParentDirectory()
 {
-    if (m_currentPath.isEmpty() || m_currentPath == QStringLiteral(".")) {
+    if (!m_currentLocation.isValid()) {
         return;
     }
-    QString parent = rfm::core::RemotePath::parent(m_currentPath);
-    if (parent.isEmpty()) {
-        parent = QStringLiteral(".");
+    if (m_currentLocation.source == rfm::core::FileSource::Local) {
+        const QDir directory(m_currentLocation.path);
+        if (directory.isRoot()) {
+            return;
+        }
+        navigateTo(QFileInfo(m_currentLocation.path).dir().absolutePath());
+    } else {
+        if (m_currentLocation.path == QStringLiteral(".")) {
+            return;
+        }
+        QString parent = rfm::core::RemotePath::parent(m_currentLocation.path);
+        if (parent.isEmpty()) {
+            parent = QStringLiteral(".");
+        }
+        navigateTo(parent);
     }
-    navigateTo(parent);
 }
 
 void FileBrowserPane::requestBack()
 {
     if (!m_backHistory.isEmpty()) {
-        emit navigationRequested(m_backHistory.constLast(), PaneNavigation::Back);
+        requestLocation(m_backHistory.constLast(), PaneNavigation::Back);
     }
 }
 
 void FileBrowserPane::requestForward()
 {
     if (!m_forwardHistory.isEmpty()) {
-        emit navigationRequested(m_forwardHistory.constLast(), PaneNavigation::Forward);
+        requestLocation(m_forwardHistory.constLast(), PaneNavigation::Forward);
     }
 }
 
 void FileBrowserPane::requestRefresh()
 {
-    if (!m_currentPath.isEmpty()) {
-        emit navigationRequested(m_currentPath, PaneNavigation::Refresh);
+    if (m_currentLocation.isValid()) {
+        requestLocation(m_currentLocation, PaneNavigation::Refresh);
     }
 }
 
@@ -443,7 +500,9 @@ void FileBrowserPane::openEntry(int row)
                             !item->data(Qt::UserRole + 1).toBool())) {
         return;
     }
-    navigateTo(rfm::core::RemotePath::join(m_currentPath, item->text()));
+    navigateTo(m_currentLocation.source == rfm::core::FileSource::Local
+                   ? QDir(m_currentLocation.path).filePath(item->text())
+                   : rfm::core::RemotePath::join(m_currentLocation.path, item->text()));
 }
 
 void FileBrowserPane::prepareContextMenu(const QPoint& position)
@@ -491,16 +550,33 @@ QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRo
     }
     const QTableWidgetItem* const hit = m_fileTable->itemAt(position);
     if (hit == nullptr) {
-        return m_currentPath;
+        return m_currentLocation.path;
     }
     const QTableWidgetItem* const name = m_fileTable->item(hit->row(), 0);
     if (name == nullptr || !name->data(Qt::UserRole).toBool()) {
-        return m_currentPath;
+        return m_currentLocation.path;
     }
     if (folderRow != nullptr) {
         *folderRow = hit->row();
     }
-    return rfm::core::RemotePath::join(m_currentPath, name->text());
+    return rfm::core::RemotePath::join(m_currentLocation.path, name->text());
+}
+
+QString FileBrowserPane::normalizedPath(const rfm::core::BrowserLocation& location) const
+{
+    if (location.source == rfm::core::FileSource::Local) {
+        return location.path.isEmpty()
+                   ? QString{}
+                   : QDir::cleanPath(QFileInfo(location.path).absoluteFilePath());
+    }
+    return rfm::core::RemotePath::normalize(location.path);
+}
+
+void FileBrowserPane::requestLocation(const rfm::core::BrowserLocation& location,
+                                      PaneNavigation navigation)
+{
+    emit navigationRequested(location.path, navigation);
+    emit locationNavigationRequested(location, navigation);
 }
 
 rfm::core::InternalTransferValidation FileBrowserPane::validateDrop(
@@ -550,7 +626,8 @@ void FileBrowserPane::updateCutAppearance()
         const QTableWidgetItem* const name = m_fileTable->item(row, 0);
         const QString path = name == nullptr
                                  ? QString{}
-                                 : rfm::core::RemotePath::join(m_currentPath, name->text());
+                                 : rfm::core::RemotePath::join(m_currentLocation.path,
+                                                              name->text());
         const bool cut = m_cutPaths.contains(rfm::core::RemotePath::normalize(path));
         for (int column = 0; column < m_fileTable->columnCount(); ++column) {
             if (QTableWidgetItem* const item = m_fileTable->item(row, column)) {

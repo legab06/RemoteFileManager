@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QDragEnterEvent>
+#include <QDir>
 #include <QDropEvent>
 #include <QItemSelectionModel>
 #include <QLineEdit>
@@ -12,6 +13,7 @@
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QTableWidget>
+#include <QTemporaryDir>
 #include <QTest>
 
 class FileBrowserPaneTest final : public QObject
@@ -36,7 +38,58 @@ class FileBrowserPaneTest final : public QObject
     void resolvesDropOnCurrentDirectoryAndSubfolder();
     void cutAppearanceSurvivesRefreshAndClearsCleanly();
     void focusesLocationAndSwitchesVisiblePane();
+    void navigatesLocalDirectoriesWithSourceAwareHistory();
 };
+
+void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir root(temporary.path());
+    QVERIFY(root.mkdir(QStringLiteral("child")));
+    const rfm::core::BrowserLocation rootLocation{
+        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+        temporary.path()};
+    const rfm::core::BrowserLocation childLocation{
+        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+        root.filePath(QStringLiteral("child"))};
+
+    rfm::app::FileBrowserPane pane;
+    QSignalSpy navigation(&pane,
+                          &rfm::app::FileBrowserPane::locationNavigationRequested);
+    pane.showDirectory(rootLocation, QStringLiteral("file:///fixture"),
+                       {{QStringLiteral("child"), 0, {}, true, false}},
+                       rfm::app::PaneNavigation::Initial);
+    QCOMPARE(pane.source(), rfm::core::FileSource::Local);
+    QVERIFY(pane.createInternalDragData().isEmpty());
+
+    pane.navigateTo(childLocation.path);
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)),
+             childLocation);
+    pane.showDirectory(childLocation, QStringLiteral("file:///fixture/child"), {},
+                       rfm::app::PaneNavigation::Normal);
+    QVERIFY(pane.canGoBack());
+    pane.requestBack();
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)),
+             rootLocation);
+    pane.showDirectory(rootLocation, QStringLiteral("file:///fixture"), {},
+                       rfm::app::PaneNavigation::Back);
+    QVERIFY(pane.canGoForward());
+    pane.requestForward();
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)),
+             childLocation);
+    pane.showDirectory(childLocation, QStringLiteral("file:///fixture/child"), {},
+                       rfm::app::PaneNavigation::Forward);
+    pane.requestParentDirectory();
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)),
+             rootLocation);
+    pane.showDirectory(rootLocation, QStringLiteral("file:///fixture"), {},
+                       rfm::app::PaneNavigation::Normal);
+    pane.requestRefresh();
+    QCOMPARE(navigation.constLast().at(1).value<rfm::app::PaneNavigation>(),
+             rfm::app::PaneNavigation::Refresh);
+}
 
 void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
 {

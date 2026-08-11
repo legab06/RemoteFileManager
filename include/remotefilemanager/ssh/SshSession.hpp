@@ -4,6 +4,7 @@
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 
 #include <QObject>
@@ -22,6 +23,7 @@ public slots:
     void connectToHost(rfm::core::ConnectionProfile profile, QString password);
     void confirmUnknownHost(bool accepted);
     void listDirectory(quint64 requestId, QString path);
+    void listStorageVolumes(quint64 requestId);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
     void moveEntries(quint64 id,
@@ -45,6 +47,9 @@ signals:
     void directoryListed(quint64 requestId, QString path,
                          QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
+    void storageVolumesListed(quint64 requestId,
+                              QList<rfm::core::StorageVolume> volumes);
+    void storageVolumeListingFailed(quint64 requestId, QString error);
     void operationFinished(rfm::core::RemoteOperationResult result);
     void operationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
@@ -62,6 +67,9 @@ private:
     void scheduleTransferStep();
     void processCopyStep();
     void scheduleCopyStep();
+    void processStorageScanStep();
+    void scheduleStorageScanStep();
+    void cancelStorageScan();
     void completeShutdownIfReady();
     void fail(const QString& message);
 };
