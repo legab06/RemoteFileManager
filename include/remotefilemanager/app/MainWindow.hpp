@@ -10,9 +10,9 @@
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 
-#include <QMainWindow>
 #include <QHash>
 #include <QList>
+#include <QMainWindow>
 #include <QPointer>
 #include <QQueue>
 #include <QSet>
@@ -38,7 +38,7 @@ namespace rfm::core
 class OperationHistoryStore;
 class ServerProfileStore;
 class LocalFileSystemWorker;
-}
+} // namespace rfm::core
 
 namespace rfm::app
 {
@@ -65,7 +65,9 @@ class MainWindow final : public QMainWindow
     void directoryRequested(quint64 requestId, QString path);
     void localDirectoryRequested(quint64 requestId, QString path);
     void localVolumesRequested();
+    void localStorageProbeRequested(quint64 requestId);
     void remoteStorageRequested(quint64 requestId);
+    void remoteStorageProbeRequested(quint64 requestId);
     void createDirectoryRequested(quint64 id, QString parent, QString name);
     void renameRequested(quint64 id, QString source, QString newName);
     void moveRequested(quint64 id, QList<rfm::core::RemoteSelection> sources,
@@ -133,8 +135,7 @@ class MainWindow final : public QMainWindow
     void selectAllInActivePane();
     void focusActiveLocation();
     Q_INVOKABLE void handleInternalDrop(rfm::core::InternalTransferPayload payload,
-                                        quint64 destinationPaneId,
-                                        QString destinationDirectory);
+                                        quint64 destinationPaneId, QString destinationDirectory);
     void removeSelectedEntries();
     void chooseUploads();
     void chooseDownloadDirectory();
@@ -158,14 +159,14 @@ class MainWindow final : public QMainWindow
     void updateCutAppearance();
     void clearInternalClipboard();
     [[nodiscard]] rfm::core::RemoteConnectionIdentity currentConnectionIdentity() const;
-    [[nodiscard]] rfm::core::InternalTransferPayload transferPayload(
-        quint64 paneId, const QList<rfm::core::RemoteSelection>& sources) const;
-    bool startRemoteTransfer(
-        rfm::core::InternalTransferAction action,
-        const rfm::core::InternalTransferPayload& payload, quint64 destinationPaneId,
-        const QString& destinationDirectory, bool clipboardMove = false);
-    [[nodiscard]] QString transferValidationMessage(
-        rfm::core::InternalTransferValidationError error) const;
+    [[nodiscard]] rfm::core::InternalTransferPayload
+    transferPayload(quint64 paneId, const QList<rfm::core::RemoteSelection>& sources) const;
+    bool startRemoteTransfer(rfm::core::InternalTransferAction action,
+                             const rfm::core::InternalTransferPayload& payload,
+                             quint64 destinationPaneId, const QString& destinationDirectory,
+                             bool clipboardMove = false);
+    [[nodiscard]] QString
+    transferValidationMessage(rfm::core::InternalTransferValidationError error) const;
     void requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
                                  bool coalesceIfPending,
                                  PaneNavigation navigation = PaneNavigation::Refresh);
@@ -175,23 +176,34 @@ class MainWindow final : public QMainWindow
     void requestRemoteTreeDirectory(const QString& profileId, const QString& path);
     void requestLocationListing(quint64 paneId, const rfm::core::BrowserLocation& location,
                                 bool showBusy, PaneNavigation navigation);
-    Q_INVOKABLE void handleLocalDirectoryListed(
-        quint64 requestId, const QString& path, const QList<rfm::core::RemoteEntry>& entries);
+    Q_INVOKABLE void handleLocalDirectoryListed(quint64 requestId, const QString& path,
+                                                const QList<rfm::core::RemoteEntry>& entries);
     Q_INVOKABLE void handleLocalDirectoryListingError(quint64 requestId, const QString& path,
                                                       const QString& error);
     void openLocalLocation(const QString& path);
     void openRemoteTreeLocation(const QString& profileId, const QString& path);
     void refreshStorage();
-    Q_INVOKABLE void handleLocalStorageVolumes(
-        const QList<rfm::core::StorageVolume>& volumes);
-    Q_INVOKABLE void handleRemoteStorageVolumes(
-        quint64 requestId, const QList<rfm::core::StorageVolume>& volumes);
+    Q_INVOKABLE void probeStorage();
+    void probeLocalStorage();
+    void probeRemoteStorage();
+    Q_INVOKABLE void handleLocalStorageVolumes(const QList<rfm::core::StorageVolume>& volumes);
+    Q_INVOKABLE void handleLocalStorageProbe(quint64 requestId, const QByteArray& fingerprint);
+    Q_INVOKABLE void handleRemoteStorageVolumes(quint64 requestId,
+                                                const QList<rfm::core::StorageVolume>& volumes);
     Q_INVOKABLE void handleRemoteStorageError(quint64 requestId, const QString& error);
+    Q_INVOKABLE void handleRemoteStorageFingerprint(quint64 requestId,
+                                                    const QByteArray& fingerprint);
+    Q_INVOKABLE void handleRemoteStorageProbe(quint64 requestId, const QByteArray& fingerprint);
+    Q_INVOKABLE void handleRemoteStorageProbeError(quint64 requestId, const QString& error);
     void updateStorageRefreshAction();
     void updateNavigationActions();
     [[nodiscard]] QString activeRemoteMachineId() const;
     [[nodiscard]] RemoteMachineDescriptor activeRemoteMachine() const;
     void startNextDirectoryListing();
+    [[nodiscard]] quint64 beginPaneNavigation(quint64 paneId, rfm::core::FileSource source);
+    [[nodiscard]] bool isExpectedPaneNavigation(quint64 paneId, quint64 navigationGeneration,
+                                                rfm::core::FileSource source,
+                                                quint64 connectionGeneration = 0) const;
     void cancelDirectoryRequests(quint64 paneId);
     void setPaneBusy(quint64 paneId, bool busy, const QString& message = {});
     void schedulePaneRefresh(quint64 paneId, bool showBusy);
@@ -257,6 +269,7 @@ class MainWindow final : public QMainWindow
         bool treeRequest{false};
         QString profileId;
         quint64 connectionGeneration{0};
+        quint64 navigationGeneration{0};
     };
     QHash<quint64, DirectoryRequest> m_directoryRequests;
     QQueue<quint64> m_directoryQueue;
@@ -266,9 +279,12 @@ class MainWindow final : public QMainWindow
         quint64 paneId{0};
         PaneNavigation navigation{PaneNavigation::Refresh};
         bool treeRequest{false};
+        quint64 navigationGeneration{0};
     };
     QHash<quint64, LocalDirectoryRequest> m_localDirectoryRequests;
     QHash<quint64, quint64> m_expectedLocalDirectoryRequests;
+    QHash<quint64, quint64> m_paneNavigationGenerations;
+    QHash<quint64, rfm::core::FileSource> m_expectedPaneSources;
     QHash<quint64, bool> m_scheduledPaneRefreshes;
     struct OperationContext {
         quint64 sourcePaneId{0};
@@ -294,10 +310,19 @@ class MainWindow final : public QMainWindow
     quint64 m_connectionGeneration{0};
     quint64 m_nextStorageRequestId{1};
     quint64 m_remoteStorageRequestId{0};
+    quint64 m_remoteStorageRequestConnectionGeneration{0};
+    quint64 m_localStorageProbeRequestId{0};
+    quint64 m_remoteStorageProbeRequestId{0};
+    quint64 m_remoteStorageProbeConnectionGeneration{0};
+    QByteArray m_localStorageFingerprint;
+    QByteArray m_remoteStorageFingerprint;
+    QByteArray m_pendingRemoteStorageFingerprint;
     bool m_connected{false};
     bool m_busy{false};
     bool m_localStorageRefreshPending{false};
     bool m_remoteStorageRefreshPending{false};
+    bool m_localStorageProbePending{false};
+    bool m_remoteStorageProbePending{false};
 };
 
 } // namespace rfm::app

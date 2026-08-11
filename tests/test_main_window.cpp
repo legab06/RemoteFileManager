@@ -7,8 +7,8 @@
 #include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
-#include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
+#include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/ServerProfileStore.hpp"
 
 #include <QAbstractButton>
@@ -61,8 +61,8 @@ class RecordingRemoteBackend final : public rfm::core::RemoteFileBackend
     }
     rfm::core::RemoteBackendResult removeFile(const QString&) override { return {}; }
     rfm::core::RemoteBackendResult removeDirectory(const QString&) override { return {}; }
-    rfm::core::RemoteBackendResult copyOnServer(const QString& source,
-                                                const QString& destination, bool) override
+    rfm::core::RemoteBackendResult copyOnServer(const QString& source, const QString& destination,
+                                                bool) override
     {
         lastSource = source;
         lastDestination = destination;
@@ -129,9 +129,8 @@ QString plainToolTip(const QTreeWidgetItem* item)
 
 int serverProfileCount(QTreeWidget* tree)
 {
-    return tree != nullptr && tree->topLevelItemCount() >= 2
-               ? tree->topLevelItem(1)->childCount()
-               : 0;
+    return tree != nullptr && tree->topLevelItemCount() >= 2 ? tree->topLevelItem(1)->childCount()
+                                                             : 0;
 }
 
 void selectServerProfile(QTreeWidget* tree, int index)
@@ -150,24 +149,20 @@ void acceptNextQuestion()
     });
 }
 
-void setConnectionIdentity(
-    rfm::app::MainWindow& window,
-    const QString& hostName = QStringLiteral("history.example.test"),
-    const QString& userName = QStringLiteral("test-user"))
+void setConnectionIdentity(rfm::app::MainWindow& window,
+                           const QString& hostName = QStringLiteral("history.example.test"),
+                           const QString& userName = QStringLiteral("test-user"))
 {
     QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
     window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->trigger();
     auto* dialog = window.findChild<rfm::app::ConnectionDialog*>();
     QVERIFY(dialog != nullptr);
-    dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))
-        ->setText(hostName);
-    dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))
-        ->setText(userName);
+    dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))->setText(hostName);
+    dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))->setText(userName);
     dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->setValue(2222);
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
 }
 
@@ -227,6 +222,8 @@ class MainWindowTest final : public QObject
     void storageRefreshWorksWithoutConnectionAndUpdatesOpenTree();
     void storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks();
     void temporaryConnectionAppearsInPlacesAndRejectsStaleStorage();
+    void ignoresStaleResultsAfterSwitchingNavigationSource();
+    void refreshesRemoteStorageOnlyAfterProbeFingerprintChanges();
 };
 
 void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
@@ -242,8 +239,7 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     QVERIFY(navigation != nullptr);
     QTRY_VERIFY(action->isEnabled());
 
-    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr,
-                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     QSignalSpy localRequests(&window, &rfm::app::MainWindow::localVolumesRequested);
     QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
     action->trigger();
@@ -251,15 +247,20 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     QCOMPARE(remoteRequests.size(), 0);
     QVERIFY(!action->isEnabled());
 
-    QList<rfm::core::StorageVolume> initial{
-        {QStringLiteral("First"), first.path(), {}, {}, 0,
-         rfm::core::StorageKind::Internal, false, false, false}};
+    QList<rfm::core::StorageVolume> initial{{QStringLiteral("First"),
+                                             first.path(),
+                                             {},
+                                             {},
+                                             0,
+                                             rfm::core::StorageKind::Internal,
+                                             false,
+                                             false,
+                                             false}};
     initial[0].device = QStringLiteral("/dev/first1");
     initial[0].fileSystemType = QByteArrayLiteral("ext4");
     initial[0].deviceModel = QStringLiteral("First model");
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
-        Q_ARG(QList<rfm::core::StorageVolume>, initial)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(QList<rfm::core::StorageVolume>, initial)));
     QVERIFY(action->isEnabled());
 
     QTreeWidgetItem* const localMachine = navigation->tree()->topLevelItem(0);
@@ -277,15 +278,20 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
 
     action->trigger();
     QCOMPARE(localRequests.size(), 2);
-    QList<rfm::core::StorageVolume> replacement{
-        {QStringLiteral("Second"), second.path(), {}, {}, 0,
-         rfm::core::StorageKind::Internal, false, false, false}};
+    QList<rfm::core::StorageVolume> replacement{{QStringLiteral("Second"),
+                                                 second.path(),
+                                                 {},
+                                                 {},
+                                                 0,
+                                                 rfm::core::StorageKind::Internal,
+                                                 false,
+                                                 false,
+                                                 false}};
     replacement[0].device = QStringLiteral("/dev/second1");
     replacement[0].fileSystemType = QByteArrayLiteral("xfs");
     replacement[0].deviceModel = QStringLiteral("Second model");
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
-        Q_ARG(QList<rfm::core::StorageVolume>, replacement)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(QList<rfm::core::StorageVolume>, replacement)));
     QCOMPARE(volumes->childCount(), 1);
     QCOMPARE(volumes->child(0)->text(0), QStringLiteral("Second"));
     const QString replacementToolTip = plainToolTip(volumes->child(0));
@@ -306,8 +312,7 @@ void MainWindowTest::storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks()
     QVERIFY(action != nullptr);
     QTRY_VERIFY(action->isEnabled());
 
-    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr,
-                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
     QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
     setConnectionIdentity(window);
     QCOMPARE(remoteRequests.size(), 1);
@@ -318,12 +323,10 @@ void MainWindowTest::storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks()
 
     const QList<rfm::core::StorageVolume> remoteVolumes{
         {QStringLiteral("USB"), QStringLiteral("/media/usb"), QStringLiteral("/dev/sdb1"),
-         QByteArrayLiteral("vfat"), 0, rfm::core::StorageKind::External, false, false,
-         false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
-        Q_ARG(quint64, requestId),
-        Q_ARG(QList<rfm::core::StorageVolume>, remoteVolumes)));
+         QByteArrayLiteral("vfat"), 0, rfm::core::StorageKind::External, false, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(quint64, requestId),
+                                      Q_ARG(QList<rfm::core::StorageVolume>, remoteVolumes)));
     QTRY_VERIFY(action->isEnabled());
     action->trigger();
     QCOMPARE(remoteRequests.size(), 2);
@@ -351,8 +354,7 @@ void MainWindowTest::temporaryConnectionAppearsInPlacesAndRejectsStaleStorage()
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     QVERIFY(navigation != nullptr);
     QVERIFY(workspace != nullptr);
-    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr,
-                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
     QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
     QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::directoryRequested);
@@ -371,21 +373,18 @@ void MainWindowTest::temporaryConnectionAppearsInPlacesAndRejectsStaleStorage()
     QVERIFY(serverAMachineId.contains(QStringLiteral("server-a.test")));
 
     const QList<rfm::core::StorageVolume> serverAVolumes{
-        {QStringLiteral("SERVER_A_USB"), QStringLiteral("/media/a"),
-         QStringLiteral("/dev/sdb1"), QByteArrayLiteral("vfat"), 0,
-         rfm::core::StorageKind::External, false, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
-        Q_ARG(quint64, serverARequest),
-        Q_ARG(QList<rfm::core::StorageVolume>, serverAVolumes)));
+        {QStringLiteral("SERVER_A_USB"), QStringLiteral("/media/a"), QStringLiteral("/dev/sdb1"),
+         QByteArrayLiteral("vfat"), 0, rfm::core::StorageKind::External, false, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(quint64, serverARequest),
+                                      Q_ARG(QList<rfm::core::StorageVolume>, serverAVolumes)));
     QTreeWidgetItem* const externalA = childNamed(serverA, QStringLiteral("External devices"));
     QVERIFY(externalA != nullptr);
     QCOMPARE(externalA->childCount(), 1);
     QCOMPARE(externalA->child(0)->text(0), QStringLiteral("SERVER_A_USB"));
     rfm::app::FileBrowserPane* const activePane = workspace->activePane();
-    QVERIFY(QMetaObject::invokeMethod(
-        navigation->tree(), "itemActivated", Qt::DirectConnection,
-        Q_ARG(QTreeWidgetItem*, externalA->child(0)), Q_ARG(int, 0)));
+    QVERIFY(QMetaObject::invokeMethod(navigation->tree(), "itemActivated", Qt::DirectConnection,
+                                      Q_ARG(QTreeWidgetItem*, externalA->child(0)), Q_ARG(int, 0)));
     QCOMPARE(directoryRequests.size(), 1);
     QCOMPARE(directoryRequests.constFirst().at(1).toString(), QStringLiteral("/media/a"));
     QCOMPARE(workspace->activePane(), activePane);
@@ -398,27 +397,117 @@ void MainWindowTest::temporaryConnectionAppearsInPlacesAndRejectsStaleStorage()
     QVERIFY(serverBRequest != serverARequest);
     QCOMPARE(servers->childCount(), 1);
     QTreeWidgetItem* const serverB = servers->child(0);
-    QVERIFY(serverB->data(0, Qt::UserRole + 2).toString().contains(
-        QStringLiteral("server-b.test")));
+    QVERIFY(
+        serverB->data(0, Qt::UserRole + 2).toString().contains(QStringLiteral("server-b.test")));
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
-        Q_ARG(quint64, serverARequest),
-        Q_ARG(QList<rfm::core::StorageVolume>, serverAVolumes)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(quint64, serverARequest),
+                                      Q_ARG(QList<rfm::core::StorageVolume>, serverAVolumes)));
     QVERIFY(childNamed(serverB, QStringLiteral("External devices")) == nullptr);
 
     const QList<rfm::core::StorageVolume> serverBVolumes{
-        {QStringLiteral("SERVER_B_USB"), QStringLiteral("/media/b"),
-         QStringLiteral("/dev/sdc1"), QByteArrayLiteral("vfat"), 0,
-         rfm::core::StorageKind::External, false, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
-        Q_ARG(quint64, serverBRequest),
-        Q_ARG(QList<rfm::core::StorageVolume>, serverBVolumes)));
+        {QStringLiteral("SERVER_B_USB"), QStringLiteral("/media/b"), QStringLiteral("/dev/sdc1"),
+         QByteArrayLiteral("vfat"), 0, rfm::core::StorageKind::External, false, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(quint64, serverBRequest),
+                                      Q_ARG(QList<rfm::core::StorageVolume>, serverBVolumes)));
     QTreeWidgetItem* const externalB = childNamed(serverB, QStringLiteral("External devices"));
     QVERIFY(externalB != nullptr);
     QCOMPARE(externalB->childCount(), 1);
     QCOMPARE(externalB->child(0)->text(0), QStringLiteral("SERVER_B_USB"));
+}
+
+void MainWindowTest::ignoresStaleResultsAfterSwitchingNavigationSource()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::MainWindow window;
+    setConnectionIdentity(window);
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    QVERIFY(workspace != nullptr);
+    QVERIFY(navigation != nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::directoryRequested);
+    QSignalSpy localRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
+
+    window.findChild<QAction*>(QStringLiteral("refreshAction"))->trigger();
+    QCOMPARE(remoteRequests.size(), 1);
+    const quint64 staleRemoteId = remoteRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(navigation, "localLocationActivated", Qt::DirectConnection,
+                                      Q_ARG(QString, temporary.path())));
+    QCOMPARE(localRequests.size(), 1);
+    const quint64 localId = localRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, localId),
+        Q_ARG(QString, temporary.path()),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(workspace->activePane()->source(), rfm::core::FileSource::Local);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, staleRemoteId),
+        Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(workspace->activePane()->source(), rfm::core::FileSource::Local);
+
+    QVERIFY(QMetaObject::invokeMethod(navigation, "localLocationActivated", Qt::DirectConnection,
+                                      Q_ARG(QString, temporary.path())));
+    QCOMPARE(localRequests.size(), 2);
+    const quint64 staleLocalId = localRequests.at(1).constFirst().toULongLong();
+    QTreeWidgetItem* const server = serverProfileItem(navigation->tree(), 0);
+    QVERIFY(server != nullptr);
+    const QString machineId = server->data(0, Qt::UserRole + 2).toString();
+    QVERIFY(QMetaObject::invokeMethod(navigation, "remoteLocationActivated", Qt::DirectConnection,
+                                      Q_ARG(QString, machineId),
+                                      Q_ARG(QString, QStringLiteral("/srv"))));
+    QCOMPARE(remoteRequests.size(), 2);
+    const quint64 remoteId = remoteRequests.at(1).constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, remoteId),
+        Q_ARG(QString, QStringLiteral("/srv")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(workspace->activePane()->source(), rfm::core::FileSource::Ssh);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, staleLocalId),
+        Q_ARG(QString, temporary.path()),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(workspace->activePane()->source(), rfm::core::FileSource::Ssh);
+}
+
+void MainWindowTest::refreshesRemoteStorageOnlyAfterProbeFingerprintChanges()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageProbeRequested, nullptr,
+                        nullptr);
+    QSignalSpy refreshes(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy probes(&window, &rfm::app::MainWindow::remoteStorageProbeRequested);
+    setConnectionIdentity(window);
+    QCOMPARE(refreshes.size(), 1);
+    const quint64 initialRefresh = refreshes.constFirst().constFirst().toULongLong();
+    const QByteArray fingerprint = QByteArrayLiteral("initial-mounts");
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageFingerprint",
+                                      Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+                                      Q_ARG(QByteArray, fingerprint)));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "probeStorage", Qt::DirectConnection));
+    QCOMPARE(probes.size(), 1);
+    const quint64 unchangedProbe = probes.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageProbe", Qt::DirectConnection,
+                                      Q_ARG(quint64, unchangedProbe),
+                                      Q_ARG(QByteArray, fingerprint)));
+    QCOMPARE(refreshes.size(), 1);
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "probeStorage", Qt::DirectConnection));
+    QCOMPARE(probes.size(), 2);
+    const quint64 changedProbe = probes.at(1).constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageProbe", Qt::DirectConnection,
+                                      Q_ARG(quint64, changedProbe),
+                                      Q_ARG(QByteArray, QByteArrayLiteral("changed-mounts"))));
+    QCOMPARE(refreshes.size(), 2);
 }
 
 void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
@@ -443,8 +532,7 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QTRY_COMPARE(workspace->activePane()->source(), rfm::core::FileSource::Local);
     QCOMPARE(workspace->activePane()->currentPath(), QDir(temporary.path()).absolutePath());
     QCOMPARE(workspace->activePane()->fileTable()->rowCount(), 1);
-    QCOMPARE(workspace->activePane()->fileTable()->item(0, 0)->text(),
-             QStringLiteral("local.txt"));
+    QCOMPARE(workspace->activePane()->fileTable()->item(0, 0)->text(), QStringLiteral("local.txt"));
     QCOMPARE(stack->currentWidget(), workspace);
     QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("uploadAction"))->isEnabled());
@@ -463,9 +551,9 @@ void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect(
     auto* const stack = window.findChild<QStackedWidget*>(QStringLiteral("centralStack"));
     QVERIFY(workspace != nullptr);
     QVERIFY(navigation != nullptr);
-    workspace->activePane()->showDirectory(
-        QStringLiteral("/remote"), QStringLiteral("sftp://host/remote"),
-        {{QStringLiteral("remote.txt"), 1, {}, false, false}});
+    workspace->activePane()->showDirectory(QStringLiteral("/remote"),
+                                           QStringLiteral("sftp://host/remote"),
+                                           {{QStringLiteral("remote.txt"), 1, {}, false, false}});
     workspace->setSplit(true);
     rfm::app::FileBrowserPane* const remotePane = workspace->primaryPane();
     rfm::app::FileBrowserPane* const localPane =
@@ -532,7 +620,7 @@ void MainWindowTest::exposesInitialDisconnectedShell()
     const auto* const refreshTimer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
     QVERIFY(refreshTimer != nullptr);
     QCOMPARE(refreshTimer->interval(), 3000);
-    QVERIFY(!refreshTimer->isActive());
+    QVERIFY(refreshTimer->isActive());
 }
 
 void MainWindowTest::enablesMultipleRemoteSelection()
@@ -624,9 +712,8 @@ void MainWindowTest::keepsConnectionDialogOpenAcrossFailureAndRetry()
     QCOMPARE(requested.size(), 1);
     QCOMPARE(dialog->state(), rfm::app::ConnectionDialog::State::Connecting);
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "showConnectionError", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral("Host unreachable"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "showConnectionError", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("Host unreachable"))));
     QCOMPARE(dialog->state(), rfm::app::ConnectionDialog::State::Error);
     QVERIFY(dialog->isVisible());
     QCOMPARE(host->text(), QStringLiteral("wrong.example.test"));
@@ -636,8 +723,7 @@ void MainWindowTest::keepsConnectionDialogOpenAcrossFailureAndRetry()
 
     QSignalSpy accepted(dialog, &QDialog::accepted);
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QCOMPARE(accepted.size(), 1);
 }
@@ -649,7 +735,8 @@ void MainWindowTest::loadsSavedServersAndPrefillsQuickConnection()
     const rfm::core::ServerProfileStore store(temporary.path());
     const rfm::core::ConnectionProfile saved{
         QStringLiteral("Home NAS"), QStringLiteral("nas.example.test"),
-        QStringLiteral("alice"), 2222, QStringLiteral("nas-id"), true};
+        QStringLiteral("alice"),    2222,
+        QStringLiteral("nas-id"),   true};
     QString error;
     QVERIFY2(store.save({saved}, &error), qPrintable(error));
 
@@ -686,13 +773,12 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     const rfm::core::ServerProfileStore store(temporary.path());
-    const QList profiles{
-        rfm::core::ConnectionProfile{QStringLiteral("Active server"),
-                                     QStringLiteral("active.example.test"),
-                                     QStringLiteral("alice"), 22, QStringLiteral("active-id")},
-        rfm::core::ConnectionProfile{QStringLiteral("Other server"),
-                                     QStringLiteral("other.example.test"),
-                                     QStringLiteral("alice"), 22, QStringLiteral("other-id")}};
+    const QList profiles{rfm::core::ConnectionProfile{
+                             QStringLiteral("Active server"), QStringLiteral("active.example.test"),
+                             QStringLiteral("alice"), 22, QStringLiteral("active-id")},
+                         rfm::core::ConnectionProfile{
+                             QStringLiteral("Other server"), QStringLiteral("other.example.test"),
+                             QStringLiteral("alice"), 22, QStringLiteral("other-id")}};
     QString error;
     QVERIFY2(store.save(profiles, &error), qPrintable(error));
 
@@ -711,8 +797,7 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QVERIFY(dialog != nullptr);
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
 
     QCOMPARE(button->text(), QStringLiteral("Disconnect"));
@@ -735,8 +820,7 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QVERIFY(dialog != nullptr);
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     selectServerProfile(list, 1);
     QCOMPARE(button->text(), QStringLiteral("Connect"));
@@ -753,14 +837,14 @@ void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings_data()
     QTest::addColumn<int>("port");
     QTest::addColumn<bool>("savedProfileIsConnected");
 
-    QTest::newRow("saved profile without edits") << QStringLiteral("saved.example.test")
-                                                  << QStringLiteral("alice") << 22 << true;
-    QTest::newRow("edited host") << QStringLiteral("other.example.test")
-                                  << QStringLiteral("alice") << 22 << false;
-    QTest::newRow("edited username") << QStringLiteral("saved.example.test")
-                                      << QStringLiteral("bob") << 22 << false;
-    QTest::newRow("edited port") << QStringLiteral("saved.example.test")
-                                  << QStringLiteral("alice") << 2222 << false;
+    QTest::newRow("saved profile without edits")
+        << QStringLiteral("saved.example.test") << QStringLiteral("alice") << 22 << true;
+    QTest::newRow("edited host") << QStringLiteral("other.example.test") << QStringLiteral("alice")
+                                 << 22 << false;
+    QTest::newRow("edited username")
+        << QStringLiteral("saved.example.test") << QStringLiteral("bob") << 22 << false;
+    QTest::newRow("edited port") << QStringLiteral("saved.example.test") << QStringLiteral("alice")
+                                 << 2222 << false;
 }
 
 void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings()
@@ -785,8 +869,7 @@ void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings()
     auto* const list = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
     auto* const profileButton =
         window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton"));
-    auto* const disconnectAction =
-        window.findChild<QAction*>(QStringLiteral("disconnectAction"));
+    auto* const disconnectAction = window.findChild<QAction*>(QStringLiteral("disconnectAction"));
     QVERIFY(list != nullptr);
     QVERIFY(profileButton != nullptr);
     QVERIFY(disconnectAction != nullptr);
@@ -808,8 +891,7 @@ void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings()
     QCOMPARE(liveProfile.username, username);
     QCOMPARE(liveProfile.port, static_cast<quint16>(port));
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
 
     QCOMPARE(serverProfileItem(list, 0)->data(0, Qt::UserRole + 4).toBool(),
@@ -838,10 +920,8 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     rfm::app::MainWindow window(nullptr, {}, temporary.path());
     auto* const list = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
     auto* const homeList = window.findChild<QListWidget*>(QStringLiteral("homeServerList"));
-    auto* const add =
-        window.findChild<QPushButton*>(QStringLiteral("addServerProfileButton"));
-    auto* const edit =
-        window.findChild<QPushButton*>(QStringLiteral("editServerProfileButton"));
+    auto* const add = window.findChild<QPushButton*>(QStringLiteral("addServerProfileButton"));
+    auto* const edit = window.findChild<QPushButton*>(QStringLiteral("editServerProfileButton"));
     auto* const remove =
         window.findChild<QPushButton*>(QStringLiteral("removeServerProfileButton"));
     QVERIFY(list != nullptr);
@@ -921,8 +1001,7 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
         dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))
             ->setText(QStringLiteral("alice"));
         dialog->findChild<QCheckBox*>(QStringLiteral("passwordFallbackCheck"))->setChecked(true);
-        dialog->findChild<QLineEdit*>(QStringLiteral("passwordEdit"))
-            ->setText(ephemeralSecret);
+        dialog->findChild<QLineEdit*>(QStringLiteral("passwordEdit"))->setText(ephemeralSecret);
         dialog->findChild<QCheckBox*>(QStringLiteral("saveServerCheck"))->setChecked(true);
         dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
         return dialog;
@@ -932,16 +1011,14 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QVERIFY(dialog != nullptr);
     QVERIFY(store.load(&error).isEmpty());
     QVERIFY(error.isEmpty());
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "showConnectionError", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral("Authentication failed"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "showConnectionError", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("Authentication failed"))));
     QVERIFY(store.load(&error).isEmpty());
     QVERIFY(error.isEmpty());
 
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QList saved = store.load(&error);
     QVERIFY(error.isEmpty());
@@ -958,8 +1035,7 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     dialog = openManualConnection();
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     saved = store.load(&error);
     QVERIFY(error.isEmpty());
@@ -973,7 +1049,8 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     const rfm::core::ServerProfileStore store(temporary.path());
     const rfm::core::ConnectionProfile saved{
         QStringLiteral("Disconnect test"), QStringLiteral("disconnect.example.test"),
-        QStringLiteral("alice"), 22, QStringLiteral("disconnect-id"), false};
+        QStringLiteral("alice"),           22,
+        QStringLiteral("disconnect-id"),   false};
     QString error;
     QVERIFY2(store.save({saved}, &error), qPrintable(error));
     rfm::app::MainWindow window(nullptr, {}, temporary.path());
@@ -990,8 +1067,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     QVERIFY(workspace != nullptr);
 
     QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
-    auto* const serverList =
-        window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
+    auto* const serverList = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
     auto* const connectServer =
         window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton"));
     QVERIFY(serverList != nullptr);
@@ -1002,8 +1078,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     QVERIFY(dialog != nullptr);
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral(".")),
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QVERIFY(disconnect->isEnabled());
     QVERIFY(refreshTimer->isActive());
@@ -1017,7 +1092,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
 
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
     QVERIFY(!disconnect->isEnabled());
-    QVERIFY(!refreshTimer->isActive());
+    QVERIFY(refreshTimer->isActive());
     QVERIFY(window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("uploadAction"))->isEnabled());
     QVERIFY(!window.findChild<QTableWidget*>(QStringLiteral("remoteFileTable"))->isEnabled());
@@ -1215,22 +1290,20 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     const QList<rfm::core::RemoteSelection> copySources{
         {QStringLiteral("/source/first.txt"), false},
         {QStringLiteral("/source/second.txt"), false}};
-    auto copy = rfm::core::beginRemoteOperation(
-        701, rfm::core::OperationKind::RemoteCopy, copySources, QStringLiteral("/destination"));
+    auto copy = rfm::core::beginRemoteOperation(701, rfm::core::OperationKind::RemoteCopy,
+                                                copySources, QStringLiteral("/destination"));
     copy.serverHost = QStringLiteral("files.example.test");
     copy.serverPort = 2222;
     panel.updateOperation(copy);
     const int copyRow = rowForId(table, 701);
     QVERIFY(copyRow >= 0);
     QCOMPARE(table->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
-    QCOMPARE(table->item(copyRow, 0)->toolTip(),
-             QStringLiteral("Server: files.example.test:2222"));
+    QCOMPARE(table->item(copyRow, 0)->toolTip(), QStringLiteral("Server: files.example.test:2222"));
     QCOMPARE(table->item(copyRow, 1)->text(), QStringLiteral("first.txt (+1)"));
     QCOMPARE(table->item(copyRow, 2)->text(), QStringLiteral("/destination"));
     QCOMPARE(table->item(copyRow, 3)->text(), QStringLiteral("Running"));
     QCOMPARE(table->item(copyRow, 5)->text(), QStringLiteral("—"));
-    auto* const indeterminate =
-        qobject_cast<QProgressBar*>(table->cellWidget(copyRow, 4));
+    auto* const indeterminate = qobject_cast<QProgressBar*>(table->cellWidget(copyRow, 4));
     QVERIFY(indeterminate != nullptr);
     QCOMPARE(indeterminate->minimum(), 0);
     QCOMPARE(indeterminate->maximum(), 0);
@@ -1245,17 +1318,18 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
         701,
         rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/first.txt"), QStringLiteral("/destination/first.txt"), true, {}},
-         {QStringLiteral("/source/second.txt"), QStringLiteral("/destination/second.txt"), true,
+         {QStringLiteral("/source/second.txt"),
+          QStringLiteral("/destination/second.txt"),
+          true,
           {}}}};
     panel.updateOperation(rfm::core::finishRemoteOperation(completedCopy, copy));
     QCOMPARE(table->item(copyRow, 3)->text(), QStringLiteral("Completed"));
     QCOMPARE(table->item(copyRow, 4)->text(), QStringLiteral("2 / 2 completed"));
 
-    const QList<rfm::core::RemoteSelection> moveSources{
-        {QStringLiteral("/source/a.txt"), false},
-        {QStringLiteral("/source/b.txt"), false}};
-    const auto move = rfm::core::beginRemoteOperation(
-        702, rfm::core::OperationKind::RemoteMove, moveSources, QStringLiteral("/archive"));
+    const QList<rfm::core::RemoteSelection> moveSources{{QStringLiteral("/source/a.txt"), false},
+                                                        {QStringLiteral("/source/b.txt"), false}};
+    const auto move = rfm::core::beginRemoteOperation(702, rfm::core::OperationKind::RemoteMove,
+                                                      moveSources, QStringLiteral("/archive"));
     panel.updateOperation(move);
     const rfm::core::RemoteOperationResult partialMove{
         702,
@@ -1279,8 +1353,7 @@ void MainWindowTest::removesOnlyTerminalOperationsFromPanel()
     rfm::app::OperationPanel panel;
     panel.show();
     auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
-    auto* const remove =
-        panel.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
+    auto* const remove = panel.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
     auto* const clear =
         panel.findChild<QPushButton*>(QStringLiteral("clearOperationHistoryButton"));
     QVERIFY(table != nullptr);
@@ -1290,8 +1363,8 @@ void MainWindowTest::removesOnlyTerminalOperationsFromPanel()
     QSignalSpy clears(&panel, &rfm::app::OperationPanel::clearTerminalRequested);
 
     panel.updateOperation(rfm::core::beginRemoteOperation(
-        801, rfm::core::OperationKind::RemoteCopy,
-        {{QStringLiteral("/source/active"), false}}, QStringLiteral("/destination")));
+        801, rfm::core::OperationKind::RemoteCopy, {{QStringLiteral("/source/active"), false}},
+        QStringLiteral("/destination")));
     auto completed = progress(802, rfm::core::TransferState::Completed, 10, 10);
     panel.updateOperation(rfm::core::operationProgress(completed));
     auto failed = progress(803, rfm::core::TransferState::Failed, 4, 10);
@@ -1328,8 +1401,8 @@ void MainWindowTest::exposesPauseResumeAndCancelIntentions()
     QSignalSpy pauses(&panel, &rfm::app::OperationPanel::pauseRequested);
     QSignalSpy resumes(&panel, &rfm::app::OperationPanel::resumeRequested);
     QSignalSpy cancellations(&panel, &rfm::app::OperationPanel::cancelRequested);
-    panel.updateOperation(rfm::core::operationProgress(
-        progress(301, rfm::core::TransferState::Transferring, 1, 10)));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(301, rfm::core::TransferState::Transferring, 1, 10)));
     auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const int row = rowForId(table, 301);
@@ -1360,8 +1433,8 @@ void MainWindowTest::exposesPauseResumeAndCancelIntentions()
     QCOMPARE(pauseResume->text(), QStringLiteral("Resume"));
     QTest::mouseClick(pauseResume, Qt::LeftButton);
     QCOMPARE(resumes.size(), 1);
-    panel.updateOperation(rfm::core::operationProgress(
-        progress(301, rfm::core::TransferState::Transferring, 2, 10)));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(301, rfm::core::TransferState::Transferring, 2, 10)));
     QCOMPARE(pauseResume->text(), QStringLiteral("Pause"));
     QTest::mouseClick(cancel, Qt::LeftButton);
     QCOMPARE(cancellations.size(), 1);
@@ -1373,8 +1446,8 @@ void MainWindowTest::displaysTerminalTransferStatesAndErrors()
 {
     rfm::app::OperationPanel panel;
     panel.show();
-    panel.updateOperation(rfm::core::operationProgress(
-        progress(401, rfm::core::TransferState::Completed, 10, 10)));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(401, rfm::core::TransferState::Completed, 10, 10)));
     auto failure = progress(402, rfm::core::TransferState::Failed, 4, 10);
     failure.error = QStringLiteral("/srv/archive: permission denied");
     panel.updateOperation(rfm::core::operationProgress(failure));
@@ -1417,7 +1490,7 @@ void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
     QVERIFY(timer->isActive());
     table->selectRow(0);
 
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
     QCOMPARE(requested.size(), 1);
@@ -1428,8 +1501,7 @@ void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
     const quint64 requestId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
-        Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     QCOMPARE(table->selectionModel()->selectedRows(0).size(), 1);
     QCOMPARE(table->item(table->selectionModel()->selectedRows(0).constFirst().row(), 0)->text(),
              QStringLiteral("selected.txt"));
@@ -1444,7 +1516,7 @@ void MainWindowTest::refreshesAfterCompletedUpload()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
     QVERIFY(debounce != nullptr);
@@ -1463,8 +1535,7 @@ void MainWindowTest::refreshesAfterCompletedUpload()
     const quint64 requestId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
-        Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     requested.clear();
     auto download = progress(502, rfm::core::TransferState::Completed, 10, 10);
     download.direction = rfm::core::TransferDirection::Download;
@@ -1480,7 +1551,7 @@ void MainWindowTest::appliesOnlyExpectedDirectoryResult()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
     QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
@@ -1490,17 +1561,17 @@ void MainWindowTest::appliesOnlyExpectedDirectoryResult()
     const QList<rfm::core::RemoteEntry> expectedEntries{
         {QStringLiteral("expected.txt"), 1, {}, false, false}};
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, expectedId + 100), Q_ARG(QString, QStringLiteral("/wrong")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, wrongEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, expectedId + 100),
+                                      Q_ARG(QString, QStringLiteral("/wrong")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, wrongEntries)));
     auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
     QCOMPARE(pane->currentPath(), QStringLiteral("/srv"));
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, expectedId),
-        Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, expectedEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, expectedId),
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, expectedEntries)));
     QCOMPARE(pane->fileTable()->rowCount(), 1);
     QCOMPARE(pane->fileTable()->item(0, 0)->text(), QStringLiteral("expected.txt"));
 }
@@ -1511,7 +1582,7 @@ void MainWindowTest::distinguishesRequestsForSamePath()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
     auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
@@ -1525,8 +1596,7 @@ void MainWindowTest::distinguishesRequestsForSamePath()
 
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, firstId),
-        Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, oldEntries)));
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, oldEntries)));
     QCOMPARE(requested.size(), 2);
     const quint64 secondId = requested.at(1).constFirst().toULongLong();
     QVERIFY(firstId != secondId);
@@ -1535,8 +1605,7 @@ void MainWindowTest::distinguishesRequestsForSamePath()
 
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, secondId),
-        Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, newEntries)));
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, newEntries)));
     QCOMPARE(pane->fileTable()->item(0, 0)->text(), QStringLiteral("new.txt"));
 }
 
@@ -1546,7 +1615,7 @@ void MainWindowTest::newNavigationMakesActiveResultObsolete()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
     auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
@@ -1554,10 +1623,9 @@ void MainWindowTest::newNavigationMakesActiveResultObsolete()
     const quint64 oldId = requested.constFirst().constFirst().toULongLong();
     pane->navigateTo(QStringLiteral("/other"));
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, oldId),
-        Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, oldId), Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QCOMPARE(pane->currentPath(), QStringLiteral("/srv"));
     QCOMPARE(requested.size(), 2);
     QCOMPARE(requested.at(1).at(1).toString(), QStringLiteral("/other"));
@@ -1566,12 +1634,11 @@ void MainWindowTest::newNavigationMakesActiveResultObsolete()
 void MainWindowTest::handlesOnlyExpectedListingErrorWithoutDisconnecting()
 {
     rfm::app::MainWindow window;
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("kept.txt"), 1, {}, false, false}};
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("kept.txt"), 1, {}, false, false}};
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     QSignalSpy disconnected(&window, &rfm::app::MainWindow::disconnectionRequested);
     auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
@@ -1580,14 +1647,13 @@ void MainWindowTest::handlesOnlyExpectedListingErrorWithoutDisconnecting()
     const quint64 requestId = requested.constFirst().constFirst().toULongLong();
 
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListingError", Qt::DirectConnection,
-        Q_ARG(quint64, requestId + 1), Q_ARG(QString, QStringLiteral("/wrong")),
-        Q_ARG(QString, QStringLiteral("ignored"))));
+        &window, "handleDirectoryListingError", Qt::DirectConnection, Q_ARG(quint64, requestId + 1),
+        Q_ARG(QString, QStringLiteral("/wrong")), Q_ARG(QString, QStringLiteral("ignored"))));
     QVERIFY(!window.statusBar()->currentMessage().contains(QStringLiteral("ignored")));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListingError", Qt::DirectConnection,
-        Q_ARG(quint64, requestId), Q_ARG(QString, QStringLiteral("/root")),
-        Q_ARG(QString, QStringLiteral("Permission denied"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListingError", Qt::DirectConnection,
+                                      Q_ARG(quint64, requestId),
+                                      Q_ARG(QString, QStringLiteral("/root")),
+                                      Q_ARG(QString, QStringLiteral("Permission denied"))));
 
     QCOMPARE(disconnected.size(), 0);
     QCOMPARE(pane->currentPath(), QStringLiteral("/srv"));
@@ -1603,9 +1669,9 @@ void MainWindowTest::symbolicLinkNavigationFailureDoesNotDisconnect()
     rfm::app::MainWindow window;
     const QList<rfm::core::RemoteEntry> entries{
         {QStringLiteral("broken-link"), 0, {}, false, true}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "showRemoteDirectory", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::disconnectionRequested, nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
@@ -1618,10 +1684,10 @@ void MainWindowTest::symbolicLinkNavigationFailureDoesNotDisconnect()
     QCOMPARE(listings.size(), 1);
     const quint64 requestId = listings.constFirst().constFirst().toULongLong();
     QCOMPARE(listings.constFirst().at(1).toString(), QStringLiteral("/srv/broken-link"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListingError", Qt::DirectConnection, Q_ARG(quint64, requestId),
-        Q_ARG(QString, QStringLiteral("/srv/broken-link")),
-        Q_ARG(QString, QStringLiteral("Not a directory"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListingError", Qt::DirectConnection,
+                                      Q_ARG(quint64, requestId),
+                                      Q_ARG(QString, QStringLiteral("/srv/broken-link")),
+                                      Q_ARG(QString, QStringLiteral("Not a directory"))));
 
     QCOMPARE(pane->currentPath(), QStringLiteral("/srv"));
     QCOMPARE(disconnections.size(), 0);
@@ -1637,7 +1703,7 @@ void MainWindowTest::splitRoutesSerializedListingsPerPane()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, initialEntries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const splitAction = window.findChild<QAction*>(QStringLiteral("splitViewAction"));
@@ -1655,10 +1721,10 @@ void MainWindowTest::splitRoutesSerializedListingsPerPane()
     const quint64 initialSecondaryRequest = requested.constFirst().constFirst().toULongLong();
     const QList<rfm::core::RemoteEntry> secondaryInitial{
         {QStringLiteral("secondary.txt"), 1, {}, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, initialSecondaryRequest), Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, secondaryInitial)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, initialSecondaryRequest),
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, secondaryInitial)));
     QCOMPARE(primary->fileTable()->item(0, 0)->text(), QStringLiteral("initial.txt"));
     QCOMPARE(secondary->fileTable()->item(0, 0)->text(), QStringLiteral("secondary.txt"));
 
@@ -1673,10 +1739,10 @@ void MainWindowTest::splitRoutesSerializedListingsPerPane()
 
     const QList<rfm::core::RemoteEntry> obsoleteEntries{
         {QStringLiteral("obsolete.txt"), 1, {}, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, obsoleteSecondaryId), Q_ARG(QString, QStringLiteral("/same")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, obsoleteEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, obsoleteSecondaryId),
+                                      Q_ARG(QString, QStringLiteral("/same")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, obsoleteEntries)));
     QCOMPARE(requested.size(), 2);
     QCOMPARE(requested.at(1).at(1).toString(), QStringLiteral("/same"));
     QCOMPARE(secondary->currentPath(), QStringLiteral("/srv"));
@@ -1684,10 +1750,10 @@ void MainWindowTest::splitRoutesSerializedListingsPerPane()
     const quint64 primaryId = requested.at(1).constFirst().toULongLong();
     const QList<rfm::core::RemoteEntry> primaryEntries{
         {QStringLiteral("primary-new.txt"), 1, {}, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, primaryId),
-        Q_ARG(QString, QStringLiteral("/same")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, primaryEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, primaryId),
+                                      Q_ARG(QString, QStringLiteral("/same")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, primaryEntries)));
     QCOMPARE(requested.size(), 3);
     QCOMPARE(requested.at(2).at(1).toString(), QStringLiteral("/latest"));
     QCOMPARE(primary->currentPath(), QStringLiteral("/same"));
@@ -1696,10 +1762,10 @@ void MainWindowTest::splitRoutesSerializedListingsPerPane()
     const quint64 secondaryId = requested.at(2).constFirst().toULongLong();
     const QList<rfm::core::RemoteEntry> latestEntries{
         {QStringLiteral("secondary-new.txt"), 1, {}, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, secondaryId),
-        Q_ARG(QString, QStringLiteral("/latest")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, latestEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, secondaryId),
+                                      Q_ARG(QString, QStringLiteral("/latest")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, latestEntries)));
     QCOMPARE(secondary->currentPath(), QStringLiteral("/latest"));
     QCOMPARE(primary->fileTable()->item(0, 0)->text(), QStringLiteral("primary-new.txt"));
 
@@ -1724,7 +1790,7 @@ void MainWindowTest::activePaneOwnsNavigationRefreshAndUploadTargets()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/one")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
@@ -1750,20 +1816,20 @@ void MainWindowTest::activePaneOwnsNavigationRefreshAndUploadTargets()
     const quint64 refreshId = listings.constFirst().constFirst().toULongLong();
     const QList<rfm::core::RemoteEntry> refreshedEntries{
         {QStringLiteral("selected.txt"), 1, {}, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, refreshId),
-        Q_ARG(QString, QStringLiteral("/two/child")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, refreshedEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, refreshId),
+                                      Q_ARG(QString, QStringLiteral("/two/child")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, refreshedEntries)));
 
     listings.clear();
     window.findChild<QAction*>(QStringLiteral("upAction"))->trigger();
     QCOMPARE(listings.size(), 1);
     QCOMPARE(listings.constFirst().at(1).toString(), QStringLiteral("/two"));
     const quint64 parentId = listings.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, parentId),
-        Q_ARG(QString, QStringLiteral("/two")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, refreshedEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, parentId),
+                                      Q_ARG(QString, QStringLiteral("/two")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, refreshedEntries)));
 
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
@@ -1796,8 +1862,8 @@ void MainWindowTest::navigationKeepsInitiatingPaneActive_data()
                                   QStringLiteral("back"), QStringLiteral("forward"),
                                   QStringLiteral("refresh")};
     for (const bool useSecondaryPane : {false, true}) {
-        const QString paneName = useSecondaryPane ? QStringLiteral("right")
-                                                  : QStringLiteral("left");
+        const QString paneName =
+            useSecondaryPane ? QStringLiteral("right") : QStringLiteral("left");
         for (const QString& navigation : navigations) {
             QTest::newRow(qPrintable(paneName + QLatin1Char('-') + navigation))
                 << useSecondaryPane << navigation;
@@ -1815,25 +1881,22 @@ void MainWindowTest::navigationKeepsInitiatingPaneActive()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/root")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     rfm::app::FileBrowserPane* const secondary = workspace->otherVisiblePane();
     const quint64 initialRequestId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, initialRequestId), Q_ARG(QString, QStringLiteral("/root")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, initialRequestId),
+        Q_ARG(QString, QStringLiteral("/root")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
 
-    rfm::app::FileBrowserPane* const pane =
-        useSecondaryPane ? secondary : workspace->primaryPane();
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("child"), 0, {}, true, false}};
+    rfm::app::FileBrowserPane* const pane = useSecondaryPane ? secondary : workspace->primaryPane();
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("child"), 0, {}, true, false}};
     pane->showDirectory(QStringLiteral("/root"), QStringLiteral("/root"), {},
                         rfm::app::PaneNavigation::Initial);
-    pane->showDirectory(QStringLiteral("/root/current"), QStringLiteral("/root/current"),
-                        entries, rfm::app::PaneNavigation::Normal);
+    pane->showDirectory(QStringLiteral("/root/current"), QStringLiteral("/root/current"), entries,
+                        rfm::app::PaneNavigation::Normal);
     if (navigation == QStringLiteral("forward")) {
         pane->showDirectory(QStringLiteral("/root"), QStringLiteral("/root"), entries,
                             rfm::app::PaneNavigation::Back);
@@ -1861,9 +1924,9 @@ void MainWindowTest::navigationKeepsInitiatingPaneActive()
     QCOMPARE(workspace->activePane(), pane);
     const quint64 requestId = requested.constFirst().constFirst().toULongLong();
     const QString resultPath = requested.constFirst().at(1).toString();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
-        Q_ARG(QString, resultPath), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, requestId), Q_ARG(QString, resultPath),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     QCoreApplication::processEvents();
 
     QCOMPARE(workspace->activePane(), pane);
@@ -1877,21 +1940,20 @@ void MainWindowTest::splitListingErrorLeavesOtherPaneUntouched()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, primaryEntries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     auto* const secondary = workspace->otherVisiblePane();
     const quint64 requestId = requested.constFirst().constFirst().toULongLong();
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListingError", Qt::DirectConnection,
-        Q_ARG(quint64, requestId), Q_ARG(QString, QStringLiteral("/srv")),
-        Q_ARG(QString, QStringLiteral("Permission denied"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListingError", Qt::DirectConnection,
+                                      Q_ARG(quint64, requestId),
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QString, QStringLiteral("Permission denied"))));
 
     QCOMPARE(workspace->primaryPane()->currentPath(), QStringLiteral("/srv"));
-    QCOMPARE(workspace->primaryPane()->fileTable()->item(0, 0)->text(),
-             QStringLiteral("kept.txt"));
+    QCOMPARE(workspace->primaryPane()->fileTable()->item(0, 0)->text(), QStringLiteral("kept.txt"));
     QVERIFY(secondary->currentPath().isEmpty());
     QVERIFY(secondary->fileTable()->isEnabled());
     QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("Permission denied")));
@@ -1904,7 +1966,7 @@ void MainWindowTest::historyActionsFollowActivePaneAndIgnoreFailedOrObsoleteList
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/a")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const back = window.findChild<QAction*>(QStringLiteral("backAction"));
@@ -1915,9 +1977,9 @@ void MainWindowTest::historyActionsFollowActivePaneAndIgnoreFailedOrObsoleteList
 
     primary->navigateTo(QStringLiteral("/b"));
     const quint64 toB = requested.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, toB),
-        Q_ARG(QString, QStringLiteral("/b")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, toB), Q_ARG(QString, QStringLiteral("/b")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QVERIFY(back->isEnabled());
     QVERIFY(!forward->isEnabled());
 
@@ -1925,9 +1987,8 @@ void MainWindowTest::historyActionsFollowActivePaneAndIgnoreFailedOrObsoleteList
     auto* const secondary = workspace->otherVisiblePane();
     const quint64 secondaryInitial = requested.constLast().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, secondaryInitial), Q_ARG(QString, QStringLiteral("/b")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, secondaryInitial),
+        Q_ARG(QString, QStringLiteral("/b")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QTest::mouseClick(secondary->fileTable()->viewport(), Qt::LeftButton);
     QVERIFY(!back->isEnabled());
     QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
@@ -1963,7 +2024,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/source")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, sourceEntries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::copyRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::moveRequested, nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
@@ -1981,8 +2042,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     const quint64 initialId = listings.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, initialId),
-        Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QTest::mouseClick(workspace->primaryPane()->fileTable()->viewport(), Qt::LeftButton);
     workspace->primaryPane()->fileTable()->clearSelection();
     QVERIFY(!copyOther->isEnabled());
@@ -2008,8 +2068,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QCOMPARE(copiedSources.constFirst().path, QStringLiteral("/source/file.txt"));
     QCOMPARE(copies.constFirst().at(2).toString(), destinationPane->currentPath());
     const quint64 copyId = copies.constFirst().constFirst().toULongLong();
-    auto* const operationTable =
-        window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    auto* const operationTable = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(operationTable != nullptr);
     const int copyRow = rowForId(operationTable, copyId);
     QVERIFY(copyRow >= 0);
@@ -2023,8 +2082,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QVERIFY(cancelCopy != nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::cancelRemoteOperationRequested, nullptr,
                         nullptr);
-    QSignalSpy copyCancellations(&window,
-                                 &rfm::app::MainWindow::cancelRemoteOperationRequested);
+    QSignalSpy copyCancellations(&window, &rfm::app::MainWindow::cancelRemoteOperationRequested);
     cancelCopy->click();
     QCOMPARE(copyCancellations.size(), 1);
     QCOMPARE(copyCancellations.constFirst().constFirst().toULongLong(), copyId);
@@ -2032,16 +2090,14 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
         copyId,
         rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
     QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Completed"));
 
     auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
     debounce->stop();
-    destinationPane->showDirectory(
-        QStringLiteral("/destination"), QStringLiteral("/destination"),
-        {{QStringLiteral("back.txt"), 1, {}, false, false}});
+    destinationPane->showDirectory(QStringLiteral("/destination"), QStringLiteral("/destination"),
+                                   {{QStringLiteral("back.txt"), 1, {}, false, false}});
     QTest::mouseClick(destinationPane->fileTable()->viewport(), Qt::LeftButton);
     destinationPane->fileTable()->selectRow(0);
     QCOMPARE(workspace->activePane(), destinationPane);
@@ -2064,18 +2120,17 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
         moveId,
         rfm::core::RemoteOperationKind::Move,
         {{QStringLiteral("/destination/back.txt"), QStringLiteral("/source/back.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
     QCOMPARE(operationTable->item(moveRow, 3)->text(), QStringLiteral("Completed"));
     const int operationCount = operationTable->rowCount();
     const rfm::core::RemoteOperationResult createDirectoryResult{
         moveId + 100,
         rfm::core::RemoteOperationKind::CreateDirectory,
         {{QStringLiteral("/source"), QStringLiteral("/source/new"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, createDirectoryResult)));
+    QVERIFY(
+        QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                  Q_ARG(rfm::core::RemoteOperationResult, createDirectoryResult)));
     QCOMPARE(operationTable->rowCount(), operationCount);
     QVERIFY(!workspace->isSplit());
 }
@@ -2083,12 +2138,11 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
 void MainWindowTest::rejectsOtherPaneOperationsForSameDirectory()
 {
     rfm::app::MainWindow window;
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("file.txt"), 1, {}, false, false}};
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("file.txt"), 1, {}, false, false}};
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/same")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     QSignalSpy copies(&window, &rfm::app::MainWindow::copyRequested);
     QSignalSpy moves(&window, &rfm::app::MainWindow::moveRequested);
@@ -2100,8 +2154,7 @@ void MainWindowTest::rejectsOtherPaneOperationsForSameDirectory()
     const quint64 listingId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
-        Q_ARG(QString, QStringLiteral("/same/./")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+        Q_ARG(QString, QStringLiteral("/same/./")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     QTest::mouseClick(workspace->primaryPane()->fileTable()->viewport(), Qt::LeftButton);
     workspace->primaryPane()->fileTable()->selectRow(0);
 
@@ -2113,8 +2166,7 @@ void MainWindowTest::rejectsOtherPaneOperationsForSameDirectory()
     QCOMPARE(moves.size(), 0);
 
     workspace->primaryPane()->showDirectory(QStringLiteral("rfm-sprint4"),
-                                             QStringLiteral("sftp://host/~/rfm-sprint4"),
-                                             entries);
+                                            QStringLiteral("sftp://host/~/rfm-sprint4"), entries);
     workspace->otherVisiblePane()->showDirectory(
         QStringLiteral("/home/gabriel/rfm-sprint4"),
         QStringLiteral("sftp://host/home/gabriel/rfm-sprint4"), entries);
@@ -2134,7 +2186,7 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("rfm-sprint4/source")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::copyRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::moveRequested, nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
@@ -2149,12 +2201,9 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         QVERIFY(menu != nullptr);
         const QList<QAction*> actions = menu->actions();
         QCOMPARE(actions.size(), 12);
-        QCOMPARE(actions.at(0),
-                 window.findChild<QAction*>(QStringLiteral("clipboardCopyAction")));
-        QCOMPARE(actions.at(1),
-                 window.findChild<QAction*>(QStringLiteral("clipboardCutAction")));
-        QCOMPARE(actions.at(2),
-                 window.findChild<QAction*>(QStringLiteral("clipboardPasteAction")));
+        QCOMPARE(actions.at(0), window.findChild<QAction*>(QStringLiteral("clipboardCopyAction")));
+        QCOMPARE(actions.at(1), window.findChild<QAction*>(QStringLiteral("clipboardCutAction")));
+        QCOMPARE(actions.at(2), window.findChild<QAction*>(QStringLiteral("clipboardPasteAction")));
         QVERIFY(!actions.at(2)->isEnabled());
         QVERIFY(actions.at(3)->isSeparator());
         QCOMPARE(actions.at(4), window.findChild<QAction*>(QStringLiteral("copyAction")));
@@ -2166,10 +2215,10 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         QVERIFY(actions.at(10)->isSeparator());
         QCOMPARE(actions.at(11),
                  window.findChild<QAction*>(QStringLiteral("createDirectoryAction")));
-        QVERIFY(!actions.contains(
-            window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))));
-        QVERIFY(!actions.contains(
-            window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"))));
+        QVERIFY(
+            !actions.contains(window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))));
+        QVERIFY(
+            !actions.contains(window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"))));
         menu->close();
     });
     QVERIFY(QMetaObject::invokeMethod(
@@ -2178,10 +2227,10 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
 
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     const quint64 listingId = listings.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
-        Q_ARG(QString, QStringLiteral("rfm-sprint4/dossier-test")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, listingId),
+                                      Q_ARG(QString, QStringLiteral("rfm-sprint4/dossier-test")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
     sourcePane->fileTable()->selectRow(0);
 
@@ -2190,12 +2239,9 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         QVERIFY(menu != nullptr);
         const QList<QAction*> actions = menu->actions();
         QCOMPARE(actions.size(), 14);
-        QCOMPARE(actions.at(0),
-                 window.findChild<QAction*>(QStringLiteral("clipboardCopyAction")));
-        QCOMPARE(actions.at(1),
-                 window.findChild<QAction*>(QStringLiteral("clipboardCutAction")));
-        QCOMPARE(actions.at(2),
-                 window.findChild<QAction*>(QStringLiteral("clipboardPasteAction")));
+        QCOMPARE(actions.at(0), window.findChild<QAction*>(QStringLiteral("clipboardCopyAction")));
+        QCOMPARE(actions.at(1), window.findChild<QAction*>(QStringLiteral("clipboardCutAction")));
+        QCOMPARE(actions.at(2), window.findChild<QAction*>(QStringLiteral("clipboardPasteAction")));
         QVERIFY(actions.at(3)->isSeparator());
         QCOMPARE(actions.at(4),
                  window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction")));
@@ -2245,12 +2291,14 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
              QStringLiteral("rfm-sprint4/source/deplacement.txt"));
     QCOMPARE(copies.constFirst().at(2).toString(), QStringLiteral("rfm-sprint4/dossier-test"));
     const rfm::core::RemoteOperationResult copyResult{
-        copies.constFirst().constFirst().toULongLong(), rfm::core::RemoteOperationKind::Copy,
+        copies.constFirst().constFirst().toULongLong(),
+        rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("rfm-sprint4/source/deplacement.txt"),
-          QStringLiteral("rfm-sprint4/dossier-test/deplacement.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+          QStringLiteral("rfm-sprint4/dossier-test/deplacement.txt"),
+          true,
+          {}}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     sourcePane->fileTable()->selectRow(0);
@@ -2284,38 +2332,37 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
     const quint64 listingId = listings.constFirst().constFirst().toULongLong();
     const QList<rfm::core::RemoteEntry> destinationEntries{
         {QStringLiteral("folder"), 0, {}, true, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
-        Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, destinationEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, listingId),
+                                      Q_ARG(QString, QStringLiteral("/destination")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, destinationEntries)));
     auto* const destinationPane = workspace->otherVisiblePane();
 
-    const auto triggerContextAction =
-        [&](rfm::app::FileBrowserPane* pane, const QPoint& position,
-            const QString& actionName, const QString& explicitDestination = QString{}) {
-            QAction* const sharedAction = window.findChild<QAction*>(actionName);
-            QVERIFY(sharedAction != nullptr);
-            QTimer::singleShot(0, [&window, sharedAction, explicitDestination] {
-                auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
-                QVERIFY(menu != nullptr);
-                QVERIFY(menu->actions().contains(sharedAction));
-                QVERIFY(sharedAction->isEnabled());
-                if (!explicitDestination.isEmpty()) {
-                    QTimer::singleShot(0, [explicitDestination] {
-                        auto* const dialog =
-                            qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
-                        QVERIFY(dialog != nullptr);
-                        dialog->setTextValue(explicitDestination);
-                        dialog->accept();
-                    });
-                }
-                sharedAction->trigger();
-                menu->close();
-            });
-            QVERIFY(QMetaObject::invokeMethod(
-                pane->fileTable(), "customContextMenuRequested", Qt::DirectConnection,
-                Q_ARG(QPoint, position)));
-        };
+    const auto triggerContextAction = [&](rfm::app::FileBrowserPane* pane, const QPoint& position,
+                                          const QString& actionName,
+                                          const QString& explicitDestination = QString{}) {
+        QAction* const sharedAction = window.findChild<QAction*>(actionName);
+        QVERIFY(sharedAction != nullptr);
+        QTimer::singleShot(0, [&window, sharedAction, explicitDestination] {
+            auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            QVERIFY(menu != nullptr);
+            QVERIFY(menu->actions().contains(sharedAction));
+            QVERIFY(sharedAction->isEnabled());
+            if (!explicitDestination.isEmpty()) {
+                QTimer::singleShot(0, [explicitDestination] {
+                    auto* const dialog =
+                        qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+                    QVERIFY(dialog != nullptr);
+                    dialog->setTextValue(explicitDestination);
+                    dialog->accept();
+                });
+            }
+            sharedAction->trigger();
+            menu->close();
+        });
+        QVERIFY(QMetaObject::invokeMethod(pane->fileTable(), "customContextMenuRequested",
+                                          Qt::DirectConnection, Q_ARG(QPoint, position)));
+    };
 
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
     sourcePane->fileTable()->selectAll();
@@ -2337,14 +2384,15 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
     QCOMPARE(copies.constFirst().at(2).toString(), QStringLiteral("/destination"));
     const quint64 firstPasteId = copies.constFirst().constFirst().toULongLong();
     const rfm::core::RemoteOperationResult firstPasteResult{
-        firstPasteId, rfm::core::RemoteOperationKind::Copy,
-        {{QStringLiteral("/source/first.txt"), QStringLiteral("/destination/first.txt"), true,
-          {}},
-         {QStringLiteral("/source/second.txt"), QStringLiteral("/destination/second.txt"), true,
+        firstPasteId,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/first.txt"), QStringLiteral("/destination/first.txt"), true, {}},
+         {QStringLiteral("/source/second.txt"),
+          QStringLiteral("/destination/second.txt"),
+          true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, firstPasteResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, firstPasteResult)));
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     const QPoint folderRow = destinationPane->fileTable()
@@ -2356,14 +2404,15 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
     QCOMPARE(copies.at(1).at(2).toString(), QStringLiteral("/destination"));
     const quint64 secondPasteId = copies.at(1).constFirst().toULongLong();
     const rfm::core::RemoteOperationResult secondPasteResult{
-        secondPasteId, rfm::core::RemoteOperationKind::Copy,
-        {{QStringLiteral("/source/first.txt"), QStringLiteral("/destination/first.txt"), true,
-          {}},
-         {QStringLiteral("/source/second.txt"), QStringLiteral("/destination/second.txt"), true,
+        secondPasteId,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/first.txt"), QStringLiteral("/destination/first.txt"), true, {}},
+         {QStringLiteral("/source/second.txt"),
+          QStringLiteral("/destination/second.txt"),
+          true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, secondPasteResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, secondPasteResult)));
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
@@ -2380,12 +2429,14 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
     QCOMPARE(copies.at(2).at(2).toString(), QStringLiteral("/manual-copy"));
     const quint64 manualCopyId = copies.at(2).constFirst().toULongLong();
     const rfm::core::RemoteOperationResult manualCopyResult{
-        manualCopyId, rfm::core::RemoteOperationKind::Copy,
-        {{QStringLiteral("/source/first.txt"), QStringLiteral("/manual-copy/first.txt"), true,
+        manualCopyId,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/first.txt"),
+          QStringLiteral("/manual-copy/first.txt"),
+          true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, manualCopyResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, manualCopyResult)));
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     sourcePane->fileTable()->selectRow(0);
@@ -2401,11 +2452,10 @@ void MainWindowTest::buildsCanonicalInterPanePathsThroughTheRealUiChain()
     window.show();
     const QList<rfm::core::RemoteEntry> fileEntry{
         {QStringLiteral("fichier.txt"), 1, {}, false, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "showRemoteDirectory", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral("rfm-sprint4/dossier-test/./")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, fileEntry)));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("rfm-sprint4/dossier-test/./")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, fileEntry)));
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::copyRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::moveRequested, nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
@@ -2420,10 +2470,10 @@ void MainWindowTest::buildsCanonicalInterPanePathsThroughTheRealUiChain()
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     auto* const secondary = workspace->otherVisiblePane();
     const quint64 initialListingId = listings.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, initialListingId), Q_ARG(QString, QStringLiteral("rfm-sprint4/./")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, fileEntry)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, initialListingId),
+                                      Q_ARG(QString, QStringLiteral("rfm-sprint4/./")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, fileEntry)));
     QCOMPARE(secondary->currentPath(), QStringLiteral("rfm-sprint4"));
 
     QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
@@ -2452,19 +2502,17 @@ void MainWindowTest::buildsCanonicalInterPanePathsThroughTheRealUiChain()
     const rfm::core::RemoteOperationResult completedCopy{
         copies.constFirst().constFirst().toULongLong(), rfm::core::RemoteOperationKind::Copy,
         relativeResult.items};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, completedCopy)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, completedCopy)));
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     primary->showDirectory(
         QStringLiteral("/home/gabriel/rfm-sprint4/dossier-test/"),
         QStringLiteral("sftp://gabriel@example.test/home/gabriel/rfm-sprint4/dossier-test"),
         fileEntry, rfm::app::PaneNavigation::Initial);
-    secondary->showDirectory(
-        QStringLiteral("/home/gabriel/rfm-sprint4/./"),
-        QStringLiteral("sftp://gabriel@example.test/home/gabriel/rfm-sprint4"), fileEntry,
-        rfm::app::PaneNavigation::Initial);
+    secondary->showDirectory(QStringLiteral("/home/gabriel/rfm-sprint4/./"),
+                             QStringLiteral("sftp://gabriel@example.test/home/gabriel/rfm-sprint4"),
+                             fileEntry, rfm::app::PaneNavigation::Initial);
     QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
     primary->fileTable()->selectRow(0);
     acceptNextQuestion();
@@ -2496,7 +2544,7 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/source")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
@@ -2504,8 +2552,7 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     const quint64 initialId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, initialId),
-        Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     requested.clear();
     auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
 
@@ -2513,9 +2560,8 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
         700,
         rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/a"), QStringLiteral("/destination/a"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
     debounce->stop();
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
     QCOMPARE(requested.size(), 1);
@@ -2523,17 +2569,15 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     const quint64 copyRefresh = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, copyRefresh),
-        Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
 
     requested.clear();
     const rfm::core::RemoteOperationResult moveResult{
         701,
         rfm::core::RemoteOperationKind::Move,
         {{QStringLiteral("/source/a"), QStringLiteral("/destination/a"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
     debounce->stop();
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
     QCOMPARE(requested.size(), 1);
@@ -2544,18 +2588,18 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
                                        ? QStringLiteral("/destination")
                                        : QStringLiteral("/source");
     const quint64 sourceRefresh = requested.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, sourceRefresh),
-        Q_ARG(QString, firstMovePath), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, sourceRefresh), Q_ARG(QString, firstMovePath),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QCOMPARE(requested.size(), 2);
     QCOMPARE(requested.at(1).at(1).toString(), secondMovePath);
     const quint64 destinationRefresh = requested.at(1).constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, destinationRefresh), Q_ARG(QString, secondMovePath),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, destinationRefresh),
+        Q_ARG(QString, secondMovePath), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
 
-    workspace->primaryPane()->showDirectory(QStringLiteral("/destination"), QStringLiteral("/destination"), {});
+    workspace->primaryPane()->showDirectory(QStringLiteral("/destination"),
+                                            QStringLiteral("/destination"), {});
     secondary->showDirectory(QStringLiteral("/destination"), QStringLiteral("/destination"), {});
     requested.clear();
     auto upload = progress(702, rfm::core::TransferState::Completed, 10, 10);
@@ -2568,16 +2612,14 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     QCOMPARE(requested.size(), 1);
     const quint64 firstUploadRefresh = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, firstUploadRefresh), Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, firstUploadRefresh),
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QCOMPARE(requested.size(), 2);
 
     const quint64 secondUploadRefresh = requested.at(1).constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection,
-        Q_ARG(quint64, secondUploadRefresh), Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, secondUploadRefresh),
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     requested.clear();
     auto download = progress(703, rfm::core::TransferState::Completed, 10, 10);
     download.direction = rfm::core::TransferDirection::Download;
@@ -2597,9 +2639,8 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         auto completed = progress(901, rfm::core::TransferState::Completed, 10, 10);
         auto failed = progress(902, rfm::core::TransferState::Failed, 3, 10);
         failed.error = QStringLiteral("permission denied");
-        QVERIFY(QMetaObject::invokeMethod(
-            &window, "handleTransferProgress", Qt::DirectConnection,
-            Q_ARG(rfm::core::TransferProgress, completed)));
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                          Q_ARG(rfm::core::TransferProgress, completed)));
         QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                           Q_ARG(rfm::core::TransferProgress, failed)));
         auto* const saveTimer =
@@ -2660,9 +2701,8 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
 {
     rfm::app::MainWindow window;
     window.show();
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("file.txt"), 1, {}, false, false},
-        {QStringLiteral("folder"), 0, {}, true, false}};
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("file.txt"), 1, {}, false, false},
+                                                {QStringLiteral("folder"), 0, {}, true, false}};
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/source")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
@@ -2675,17 +2715,14 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
     const quint64 listingId = listings.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
-        Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
 
     auto* const sourcePane = workspace->primaryPane();
     auto* const destinationPane = workspace->otherVisiblePane();
     sourcePane->fileTable()->selectRow(0);
-    auto* const copyAction =
-        window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"));
+    auto* const copyAction = window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"));
     auto* const cutAction = window.findChild<QAction*>(QStringLiteral("clipboardCutAction"));
-    auto* const pasteAction =
-        window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"));
+    auto* const pasteAction = window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"));
     auto* const cancelCut = window.findChild<QAction*>(QStringLiteral("cancelCutAction"));
     QVERIFY(copyAction != nullptr);
     QVERIFY(cutAction != nullptr);
@@ -2703,12 +2740,11 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
     const quint64 copyId = copies.constFirst().constFirst().toULongLong();
     QCOMPARE(copies.constFirst().at(2).toString(), QStringLiteral("/destination"));
     const rfm::core::RemoteOperationResult copyResult{
-        copyId, rfm::core::RemoteOperationKind::Copy,
-        {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true,
-          {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+        copyId,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
     QVERIFY(pasteAction->isEnabled());
 
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
@@ -2722,12 +2758,11 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
     QCOMPARE(moves.size(), 1);
     const quint64 moveId = moves.constFirst().constFirst().toULongLong();
     const rfm::core::RemoteOperationResult moveResult{
-        moveId, rfm::core::RemoteOperationKind::Move,
-        {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true,
-          {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+        moveId,
+        rfm::core::RemoteOperationKind::Move,
+        {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
     QVERIFY(!pasteAction->isEnabled());
     QVERIFY(!sourcePane->fileTable()->item(0, 0)->font().italic());
 
@@ -2754,10 +2789,9 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
     const QList<rfm::core::RemoteEntry> sourceEntries{
         {QStringLiteral("a.txt"), 1, {}, false, false},
         {QStringLiteral("folder"), 0, {}, true, false}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "showRemoteDirectory", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral("/source")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, sourceEntries)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, sourceEntries)));
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
@@ -2765,13 +2799,11 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
     const quint64 listingId = listings.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
-        Q_ARG(QString, QStringLiteral("/destination")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     auto* const sourcePane = workspace->primaryPane();
     auto* const destinationPane = workspace->otherVisiblePane();
     sourcePane->fileTable()->selectAll();
-    const auto payload =
-        rfm::core::decodeInternalTransfer(sourcePane->createInternalDragData());
+    const auto payload = rfm::core::decodeInternalTransfer(sourcePane->createInternalDragData());
     QVERIFY(payload.has_value());
     QCOMPARE(payload->sources.size(), 2);
 
@@ -2782,8 +2814,7 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
     const quint64 destinationPaneId = workspace->paneId(destinationPane);
     auto choose = [](const QString& buttonName) {
         QTimer::singleShot(0, [buttonName] {
-            auto* const messageBox =
-                qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
             QVERIFY(messageBox != nullptr);
             auto* const button = messageBox->findChild<QPushButton*>(buttonName);
             QVERIFY(button != nullptr);
@@ -2792,43 +2823,41 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
     };
 
     choose(QStringLiteral("dropCopyButton"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleInternalDrop", Qt::DirectConnection,
-        Q_ARG(rfm::core::InternalTransferPayload, *payload),
-        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, QStringLiteral("/destination"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::InternalTransferPayload, *payload),
+                                      Q_ARG(quint64, destinationPaneId),
+                                      Q_ARG(QString, QStringLiteral("/destination"))));
     QCOMPARE(copies.size(), 1);
     QCOMPARE(moves.size(), 0);
     const quint64 copyId = copies.constFirst().constFirst().toULongLong();
     const rfm::core::RemoteOperationResult copyResult{
-        copyId, rfm::core::RemoteOperationKind::Copy,
+        copyId,
+        rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
-         {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true,
-          {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+         {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
 
     choose(QStringLiteral("dropMoveButton"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleInternalDrop", Qt::DirectConnection,
-        Q_ARG(rfm::core::InternalTransferPayload, *payload),
-        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, QStringLiteral("/destination"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::InternalTransferPayload, *payload),
+                                      Q_ARG(quint64, destinationPaneId),
+                                      Q_ARG(QString, QStringLiteral("/destination"))));
     QCOMPARE(moves.size(), 1);
     const quint64 moveId = moves.constFirst().constFirst().toULongLong();
     const rfm::core::RemoteOperationResult moveResult{
-        moveId, rfm::core::RemoteOperationKind::Move,
+        moveId,
+        rfm::core::RemoteOperationKind::Move,
         {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
-         {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true,
-          {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+         {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
 
     choose(QStringLiteral("dropCancelButton"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleInternalDrop", Qt::DirectConnection,
-        Q_ARG(rfm::core::InternalTransferPayload, *payload),
-        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, QStringLiteral("/destination"))));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::InternalTransferPayload, *payload),
+                                      Q_ARG(quint64, destinationPaneId),
+                                      Q_ARG(QString, QStringLiteral("/destination"))));
     QCOMPARE(copies.size(), 1);
     QCOMPARE(moves.size(), 1);
 }
@@ -2837,9 +2866,8 @@ void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
 {
     rfm::app::MainWindow window;
     window.show();
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("file.txt"), 1, {}, false, false},
-        {QStringLiteral("folder"), 0, {}, true, false}};
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("file.txt"), 1, {}, false, false},
+                                                {QStringLiteral("folder"), 0, {}, true, false}};
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/one/two")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
@@ -2861,8 +2889,7 @@ void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
              QKeySequence(QStringLiteral("Alt+Up")));
     QCOMPARE(action(QStringLiteral("focusLocationAction"))->shortcut(),
              QKeySequence(QStringLiteral("Ctrl+L")));
-    QCOMPARE(action(QStringLiteral("switchPaneAction"))->shortcut(),
-             QKeySequence(Qt::Key_F6));
+    QCOMPARE(action(QStringLiteral("switchPaneAction"))->shortcut(), QKeySequence(Qt::Key_F6));
 
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
@@ -2886,12 +2913,11 @@ void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
     QCOMPARE(renames.size(), 1);
     const quint64 renameId = renames.constFirst().constFirst().toULongLong();
     const rfm::core::RemoteOperationResult renameResult{
-        renameId, rfm::core::RemoteOperationKind::Rename,
-        {{QStringLiteral("/one/two/file.txt"), QStringLiteral("/one/two/renamed.txt"), true,
-          {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, renameResult)));
+        renameId,
+        rfm::core::RemoteOperationKind::Rename,
+        {{QStringLiteral("/one/two/file.txt"), QStringLiteral("/one/two/renamed.txt"), true, {}}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, renameResult)));
 
     QObject::disconnect(&window, &rfm::app::MainWindow::removeRequested, nullptr, nullptr);
     QSignalSpy removals(&window, &rfm::app::MainWindow::removeRequested);
@@ -2900,14 +2926,13 @@ void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
     QCOMPARE(removals.size(), 1);
     const quint64 removeId = removals.constFirst().constFirst().toULongLong();
     const rfm::core::RemoteOperationResult removeResult{
-        removeId, rfm::core::RemoteOperationKind::Remove,
+        removeId,
+        rfm::core::RemoteOperationKind::Remove,
         {{QStringLiteral("/one/two/file.txt"), {}, true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleOperationResult", Qt::DirectConnection,
-        Q_ARG(rfm::core::RemoteOperationResult, removeResult)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, removeResult)));
 
-    QSignalSpy navigation(workspace->activePane(),
-                          &rfm::app::FileBrowserPane::navigationRequested);
+    QSignalSpy navigation(workspace->activePane(), &rfm::app::FileBrowserPane::navigationRequested);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
     action(QStringLiteral("upAction"))->trigger();
     QCOMPARE(navigation.size(), 1);
@@ -2931,8 +2956,7 @@ void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
     listingId = listings.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
-        Q_ARG(QString, QStringLiteral("/other")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+        Q_ARG(QString, QStringLiteral("/other")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     auto* const firstPane = workspace->activePane();
     action(QStringLiteral("switchPaneAction"))->trigger();
     QVERIFY(workspace->activePane() != firstPane);

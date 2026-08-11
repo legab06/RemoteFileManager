@@ -3,6 +3,7 @@
 #include "remotefilemanager/core/RemotePath.hpp"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QRegularExpression>
 
 #include <algorithm>
@@ -114,6 +115,7 @@ RemoteStorageScanStep RemoteStorageScanner::step()
         return {};
     }
     case Stage::ParseMountInfo: {
+        m_mountInfoFingerprint = QCryptographicHash::hash(m_mountInfo, QCryptographicHash::Sha256);
         m_mounts = rfm::core::parseLinuxMountInfo(m_mountInfo);
         m_mountInfo.clear();
         if (m_mounts.size() > m_limits.maximumMounts) {
@@ -318,6 +320,8 @@ QList<rfm::core::StorageVolume> RemoteStorageScanner::takeVolumes()
 {
     return std::exchange(m_volumes, {});
 }
+
+QByteArray RemoteStorageScanner::mountInfoFingerprint() const { return m_mountInfoFingerprint; }
 
 RemoteStorageScanStep RemoteStorageScanner::terminalStep() const
 {

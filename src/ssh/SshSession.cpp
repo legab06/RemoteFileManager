@@ -17,6 +17,7 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QMetaObject>
@@ -667,6 +668,13 @@ class SshSession::Impl final
 
     void reset()
     {
+        if (storageProbeFile != nullptr) {
+            sftp_close(storageProbeFile);
+            storageProbeFile = nullptr;
+        }
+        storageProbeData.clear();
+        storageProbeRequestId = 0;
+        storageProbeStepScheduled = false;
         if (storageScanner != nullptr) {
             storageScanner->cancel();
         }
@@ -711,10 +719,14 @@ class SshSession::Impl final
     std::unique_ptr<SshServerSideCopyBackend> copyBackend;
     std::unique_ptr<rfm::core::ServerSideCopyJob> activeCopyJob;
     std::unique_ptr<rfm::ssh::RemoteStorageScanner> storageScanner;
+    sftp_file storageProbeFile{nullptr};
+    QByteArray storageProbeData;
+    quint64 storageProbeRequestId{0};
     rfm::core::TransferQueue transferQueue;
     bool transferStepScheduled{false};
     bool copyStepScheduled{false};
     bool storageStepScheduled{false};
+    bool storageProbeStepScheduled{false};
     bool shuttingDown{false};
     bool disconnecting{false};
 };
@@ -937,6 +949,7 @@ void SshSession::listStorageVolumes(quint64 requestId)
         emit storageVolumeListingFailed(requestId, tr("No active SFTP connection."));
         return;
     }
+    cancelStorageProbe();
     cancelStorageScan();
     m_impl->storageScanner = std::make_unique<rfm::ssh::RemoteStorageScanner>(
         std::make_unique<SftpRemoteStorageReader>(m_impl->session, m_impl->sftp), requestId);
@@ -965,7 +978,9 @@ void SshSession::processStorageScanStep()
         return;
     case rfm::ssh::RemoteStorageScanStatus::Completed: {
         QList<rfm::core::StorageVolume> volumes = m_impl->storageScanner->takeVolumes();
+        const QByteArray fingerprint = m_impl->storageScanner->mountInfoFingerprint();
         m_impl->storageScanner.reset();
+        emit storageMountInfoFingerprint(requestId, fingerprint);
         emit storageVolumesListed(requestId, std::move(volumes));
         return;
     }
@@ -992,6 +1007,84 @@ void SshSession::cancelStorageScan()
         m_impl->storageScanner.reset();
     }
     m_impl->storageStepScheduled = false;
+}
+
+void SshSession::probeStorageMounts(quint64 requestId)
+{
+    if (m_impl->sftp == nullptr) {
+        emit storageMountProbeFailed(requestId, tr("No active SFTP connection."));
+        return;
+    }
+    if (m_impl->storageScanner != nullptr || m_impl->storageProbeRequestId != 0) {
+        return;
+    }
+    const QByteArray path = QByteArrayLiteral("/proc/self/mountinfo");
+    m_impl->storageProbeFile = sftp_open(m_impl->sftp, path.constData(), O_RDONLY, 0);
+    if (m_impl->storageProbeFile == nullptr) {
+        emit storageMountProbeFailed(requestId, tr("Unable to open remote mount information."));
+        return;
+    }
+    m_impl->storageProbeRequestId = requestId;
+    m_impl->storageProbeData.clear();
+    scheduleStorageProbeStep();
+}
+
+void SshSession::scheduleStorageProbeStep()
+{
+    if (m_impl->storageProbeRequestId != 0 && !m_impl->storageProbeStepScheduled) {
+        m_impl->storageProbeStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processStorageProbeStep, Qt::QueuedConnection);
+    }
+}
+
+void SshSession::processStorageProbeStep()
+{
+    m_impl->storageProbeStepScheduled = false;
+    if (m_impl->storageProbeRequestId == 0 || m_impl->storageProbeFile == nullptr) {
+        return;
+    }
+    constexpr qsizetype maximumMountInfoBytes = 1024 * 1024;
+    char buffer[4096];
+    const ssize_t count = sftp_read(m_impl->storageProbeFile, buffer, sizeof(buffer));
+    if (count < 0) {
+        const quint64 requestId = m_impl->storageProbeRequestId;
+        const rfm::ssh::RemoteStorageError error = storageError(m_impl->session, m_impl->sftp);
+        cancelStorageProbe();
+        if (error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+            fail(tr("The SSH connection was lost while probing storage."));
+        } else {
+            emit storageMountProbeFailed(requestId, tr("Unable to read remote mount information."));
+        }
+        return;
+    }
+    if (count == 0) {
+        const quint64 requestId = m_impl->storageProbeRequestId;
+        const QByteArray fingerprint =
+            QCryptographicHash::hash(m_impl->storageProbeData, QCryptographicHash::Sha256);
+        cancelStorageProbe();
+        emit storageMountsProbed(requestId, fingerprint);
+        return;
+    }
+    if (m_impl->storageProbeData.size() > maximumMountInfoBytes - count) {
+        const quint64 requestId = m_impl->storageProbeRequestId;
+        cancelStorageProbe();
+        emit storageMountProbeFailed(requestId,
+                                     tr("Remote mount information exceeds the safety limit."));
+        return;
+    }
+    m_impl->storageProbeData.append(buffer, static_cast<qsizetype>(count));
+    scheduleStorageProbeStep();
+}
+
+void SshSession::cancelStorageProbe()
+{
+    if (m_impl->storageProbeFile != nullptr) {
+        sftp_close(m_impl->storageProbeFile);
+        m_impl->storageProbeFile = nullptr;
+    }
+    m_impl->storageProbeData.clear();
+    m_impl->storageProbeRequestId = 0;
+    m_impl->storageProbeStepScheduled = false;
 }
 
 void SshSession::createDirectory(quint64 id, QString parent, QString name)
@@ -1157,6 +1250,7 @@ void SshSession::cancelRemoteOperation(quint64 id)
 
 void SshSession::shutdownTransfers()
 {
+    cancelStorageProbe();
     cancelStorageScan();
     m_impl->transferQueue.clear();
     m_impl->shuttingDown = true;
@@ -1273,6 +1367,7 @@ void SshSession::completeShutdownIfReady()
 
 void SshSession::disconnectFromHost()
 {
+    cancelStorageProbe();
     cancelStorageScan();
     m_impl->transferQueue.clear();
     m_impl->disconnecting = true;

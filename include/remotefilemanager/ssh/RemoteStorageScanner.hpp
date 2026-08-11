@@ -103,6 +103,7 @@ class RemoteStorageScanner final
     [[nodiscard]] RemoteStorageScanStep step();
     void cancel();
     [[nodiscard]] QList<rfm::core::StorageVolume> takeVolumes();
+    [[nodiscard]] QByteArray mountInfoFingerprint() const;
 
   private:
     enum class Stage {
@@ -134,6 +135,7 @@ class RemoteStorageScanner final
     Stage m_stage{Stage::BeginMountInfo};
     QString m_error;
     QByteArray m_mountInfo;
+    QByteArray m_mountInfoFingerprint;
     QList<rfm::core::LinuxMountInfo> m_mounts;
     QList<rfm::core::StorageVolume> m_volumes;
     QHash<QString, QString> m_labels;

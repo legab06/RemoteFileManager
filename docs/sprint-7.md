@@ -47,9 +47,11 @@ distant.
 
 `LocalFileSystemWorker` vit dans un `QThread` distinct. Une activation dans l'arbre,
 un changement de dossier, Parent, Back, Forward ou Refresh émet une requête identifiée.
-`MainWindow` n'applique que la réponse encore attendue par le panneau. Une réponse
-ancienne ne peut donc pas écraser une navigation plus récente. Les erreurs indiquent
-le chemin local concerné et ne modifient pas la session SSH.
+Chaque panneau possède une génération de navigation unique, partagée entre les requêtes
+locales et SSH : une réponse n'est appliquée que si son panneau, sa génération, sa source
+et, pour SSH, sa session restent attendus. Une réponse ancienne ne peut donc pas écraser
+une navigation plus récente, y compris après un changement Local ↔ SSH. Les erreurs
+indiquent le chemin local concerné et ne modifient pas la session SSH.
 
 ## Modèle d'arborescence et chargement paresseux
 
@@ -189,6 +191,17 @@ volumes locaux puis, lorsqu'une session est active, les volumes distants sans
 reconnexion ni navigation. Chaque source reste affichée sous sa machine et le contenu
 du panneau ouvert est remplacé en place, sans duplication.
 
+Toutes les trois secondes, le même timer qui entretient les panneaux SSH lance aussi un
+probe Storage léger. Côté client, le worker construit une empreinte des identités de
+montage fournies par `QStorageInfo`, sans commande shell ni enrichissement sysfs. Côté
+serveur, le worker SSH lit `/proc/self/mountinfo` par morceaux bornés via la session
+SFTP existante, sans nouvelle connexion ni commande distante. Une découverte complète
+(labels, sysfs et capacités distantes) n'est relancée que lorsque l'empreinte change.
+Les probes et scans sont coalescés, annulés à la déconnexion et leurs résultats sont
+liés à la session active. Le bouton reste un force-refresh immédiat et conserve sa
+coalescence pendant un scan complet. Cette passe reste limitée à la découverte : elle
+n'ajoute aucune opération de montage, démontage ou éjection.
+
 Les deux collectes s'exécutent dans leurs workers existants. Une requête déjà en cours
 n'est pas réémise ; l'action est réactivée quand les réponses attendues sont revenues.
 Sans serveur connecté, seule la collecte locale est déclenchée et aucune erreur SSH
@@ -288,8 +301,9 @@ connexion transitoire complète et le rejet d'un résultat Storage de A après c
 - Les créations, renommages, déplacements et suppressions locales sont différés.
 - Les transferts local-local et les copies directes entre panneaux local/SSH ne sont
   pas encore exposés ; Upload et Download conservent leurs dialogues du Sprint 6.
-- Le refresh périodique reste réservé aux panneaux SSH ; un panneau local dispose du
-  Refresh manuel et n'utilise pas encore `QFileSystemWatcher`.
+- Le polling Storage est volontairement périodique (trois secondes) plutôt
+  qu'événementiel : le Sprint 7 évite d'ajouter des implémentations natives distinctes
+  par OS. Il ne lance une découverte complète qu'après changement d'empreinte.
 - L'état développé/replié reste stable pendant l'utilisation, mais n'est pas persisté
   entre deux lancements.
 - Le collecteur de volumes distant est actuellement propre aux serveurs Linux qui

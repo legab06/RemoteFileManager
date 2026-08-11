@@ -64,6 +64,7 @@ class LocalFileSystemTest final : public QObject
     void selectsHumanStorageNameByPriority();
     void keepsRemoteUsbClassificationAfterMetadataEnrichment();
     void parsesLinuxMountInformation();
+    void preservesNavigableFuseMountsAndFiltersPseudoFileSystems();
     void filtersBindMountsAndKeepsVisibleOvermount();
     void selectsOvermountsFromParentRelationships();
     void preservesDistinctBtrfsAndAmbiguousAttachments();
@@ -366,6 +367,32 @@ void LocalFileSystemTest::parsesLinuxMountInformation()
     QCOMPARE(mounts.at(2).device, QStringLiteral("server:/share\\name"));
     QCOMPARE(mounts.at(2).fileSystemType, QByteArrayLiteral("nfs"));
     QVERIFY(mounts.at(2).readOnly);
+}
+
+void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystems()
+{
+    const QByteArray fixture = "24 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+                               "25 24 0:44 / /media/ntfs rw - fuseblk ntfs-3g rw\n"
+                               "26 24 0:45 / /home/alice/cloud rw - fuse.rclone rclone rw\n"
+                               "27 24 0:46 / /mnt/nfs rw - nfs server:/export rw\n"
+                               "28 24 0:47 / /mnt/cifs rw - cifs //server/share rw\n"
+                               "29 24 0:48 / /proc rw - proc proc rw\n"
+                               "30 24 0:49 / /sys rw - sysfs sysfs rw\n"
+                               "31 24 0:50 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+                               "32 24 0:51 / /run/user/1000/doc rw - fuse.portal portal rw\n";
+
+    const QList<rfm::core::LinuxMountInfo> mounts = rfm::core::parseLinuxMountInfo(fixture);
+    QCOMPARE(mounts.size(), 6);
+    QCOMPARE(mounts.at(1).fileSystemType, QByteArrayLiteral("fuse.rclone"));
+    QCOMPARE(mounts.at(2).fileSystemType, QByteArrayLiteral("fuseblk"));
+    QCOMPARE(mounts.at(3).fileSystemType, QByteArrayLiteral("cifs"));
+    QCOMPARE(mounts.at(4).fileSystemType, QByteArrayLiteral("nfs"));
+    QCOMPARE(mounts.at(5).fileSystemType, QByteArrayLiteral("fuse.portal"));
+    QVERIFY(std::ranges::none_of(mounts, [](const rfm::core::LinuxMountInfo& mount) {
+        return mount.fileSystemType == QByteArrayLiteral("proc") ||
+               mount.fileSystemType == QByteArrayLiteral("sysfs") ||
+               mount.fileSystemType == QByteArrayLiteral("cgroup2");
+    }));
 }
 
 void LocalFileSystemTest::filtersBindMountsAndKeepsVisibleOvermount()

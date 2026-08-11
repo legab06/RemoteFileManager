@@ -134,6 +134,22 @@ bool demonstratedAttachmentAlias(const LinuxMountInfo& candidate, const LinuxMou
            strictMountRootAncestor(current.mountRoot, candidate.mountRoot);
 }
 
+bool isPseudoFileSystem(const QByteArray& fileSystemType)
+{
+    static const QSet<QByteArray> pseudoTypes{
+        QByteArrayLiteral("autofs"),     QByteArrayLiteral("bpf"),
+        QByteArrayLiteral("cgroup"),     QByteArrayLiteral("cgroup2"),
+        QByteArrayLiteral("configfs"),   QByteArrayLiteral("debugfs"),
+        QByteArrayLiteral("devpts"),     QByteArrayLiteral("devtmpfs"),
+        QByteArrayLiteral("efivarfs"),   QByteArrayLiteral("fusectl"),
+        QByteArrayLiteral("hugetlbfs"),  QByteArrayLiteral("mqueue"),
+        QByteArrayLiteral("nsfs"),       QByteArrayLiteral("proc"),
+        QByteArrayLiteral("pstore"),     QByteArrayLiteral("ramfs"),
+        QByteArrayLiteral("rpc_pipefs"), QByteArrayLiteral("securityfs"),
+        QByteArrayLiteral("sysfs"),      QByteArrayLiteral("tracefs")};
+    return pseudoTypes.contains(fileSystemType.trimmed().toLower());
+}
+
 QList<QByteArray> splitMountInfoFields(const QByteArray& value)
 {
     QList<QByteArray> fields;
@@ -285,9 +301,7 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
             !mountRoot.startsWith(QChar{'/'}) || !rootPath.startsWith(QChar{'/'})) {
             continue;
         }
-        const bool potentiallyBlockBacked = !deviceNumber.startsWith(QStringLiteral("0:"));
-        if (rootPath != QStringLiteral("/") && !potentiallyBlockBacked &&
-            !isNetworkFileSystem(fileSystemType)) {
+        if (rootPath != QStringLiteral("/") && isPseudoFileSystem(fileSystemType)) {
             continue;
         }
         const QList<QByteArray> options = left.at(5).split(',');

@@ -2,11 +2,13 @@
 
 #include "LocalStorageTopology.hpp"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QSet>
 #include <QStorageInfo>
+#include <QStringList>
 
 #include <algorithm>
 #include <utility>
@@ -297,6 +299,28 @@ QList<StorageVolume> LocalFileSystem::mountedVolumes()
     return volumes;
 }
 
+QByteArray LocalFileSystem::mountedVolumeFingerprint()
+{
+    QStringList identities;
+    for (const QStorageInfo& storage : QStorageInfo::mountedVolumes()) {
+        if (!storage.isValid() || !storage.isReady() || storage.rootPath().isEmpty()) {
+            continue;
+        }
+        const QString rootPath = QDir::cleanPath(storage.rootPath());
+        if (rootPath.isEmpty()) {
+            continue;
+        }
+        identities.push_back(
+            QStringLiteral("%1\n%2\n%3\n%4")
+                .arg(rootPath, QFile::decodeName(storage.device()),
+                     QString::fromLatin1(storage.fileSystemType()),
+                     storage.isReadOnly() ? QStringLiteral("ro") : QStringLiteral("rw")));
+    }
+    std::ranges::sort(identities);
+    return QCryptographicHash::hash(identities.join(QChar{'\n'}).toUtf8(),
+                                    QCryptographicHash::Sha256);
+}
+
 void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
 {
     LocalDirectoryResult result = LocalFileSystem::listDirectory(path);
@@ -307,6 +331,15 @@ void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
     }
 }
 
-void LocalFileSystemWorker::listVolumes() { emit volumesListed(LocalFileSystem::mountedVolumes()); }
+void LocalFileSystemWorker::listVolumes()
+{
+    const QList<StorageVolume> volumes = LocalFileSystem::mountedVolumes();
+    emit volumesListed(volumes, LocalFileSystem::mountedVolumeFingerprint());
+}
+
+void LocalFileSystemWorker::probeVolumes(quint64 requestId)
+{
+    emit volumesProbed(requestId, LocalFileSystem::mountedVolumeFingerprint());
+}
 
 } // namespace rfm::core

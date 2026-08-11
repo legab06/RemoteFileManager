@@ -179,6 +179,8 @@ class RemoteStorageScannerTest final : public QObject
     void disappearingTopologyStaysUnknown();
     void rejectsTruncatedAndExcessiveMountInformation();
     void capsLabelsAndTopologyWorkConservatively();
+    void exposesMountInfoFingerprintAfterSuccessfulScan();
+    void keepsFuseVolumesNavigableWhenNoBlockDeviceExists();
 };
 
 void RemoteStorageScannerTest::yieldsAndCompletesAClassifiedScan()
@@ -344,6 +346,36 @@ void RemoteStorageScannerTest::capsLabelsAndTopologyWorkConservatively()
     QCOMPARE(volumes.size(), 2);
     QCOMPARE(volumes.at(0).kind, rfm::core::StorageKind::Unknown);
     QCOMPARE(volumes.at(1).kind, rfm::core::StorageKind::Unknown);
+}
+
+void RemoteStorageScannerTest::exposesMountInfoFingerprintAfterSuccessfulScan()
+{
+    auto reader = std::make_unique<FakeRemoteStorageReader>();
+    reader->mountInfo = blockMount(24, "8:1", "/data", "/dev/sda1");
+    rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 12);
+
+    QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::Completed);
+    const QByteArray fingerprint = scanner.mountInfoFingerprint();
+    QVERIFY(!fingerprint.isEmpty());
+    QCOMPARE(fingerprint.size(), 32);
+}
+
+void RemoteStorageScannerTest::keepsFuseVolumesNavigableWhenNoBlockDeviceExists()
+{
+    auto reader = std::make_unique<FakeRemoteStorageReader>();
+    reader->mountInfo = "24 1 0:44 / /media/ntfs rw - fuseblk ntfs-3g rw\n"
+                        "25 1 0:45 / /home/alice/cloud rw - fuse.rclone rclone rw\n"
+                        "26 1 0:46 / /mnt/share rw - nfs server:/share rw\n";
+    rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 13);
+
+    QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::Completed);
+    const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
+    QCOMPARE(volumes.size(), 3);
+    QCOMPARE(volumes.at(0).fileSystemType, QByteArrayLiteral("fuse.rclone"));
+    QCOMPARE(volumes.at(0).kind, rfm::core::StorageKind::Unknown);
+    QCOMPARE(volumes.at(1).fileSystemType, QByteArrayLiteral("fuseblk"));
+    QCOMPARE(volumes.at(1).kind, rfm::core::StorageKind::Unknown);
+    QCOMPARE(volumes.at(2).kind, rfm::core::StorageKind::Network);
 }
 
 QTEST_MAIN(RemoteStorageScannerTest)
