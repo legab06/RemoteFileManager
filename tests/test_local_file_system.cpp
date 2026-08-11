@@ -65,6 +65,7 @@ class LocalFileSystemTest final : public QObject
     void keepsRemoteUsbClassificationAfterMetadataEnrichment();
     void parsesLinuxMountInformation();
     void preservesNavigableFuseMountsAndFiltersPseudoFileSystems();
+    void preservesVisiblePseudoFileSystemsAtRoot();
     void filtersBindMountsAndKeepsVisibleOvermount();
     void filtersVisiblePseudoOvermountsWithoutRestoringHiddenStorage();
     void selectsOvermountsFromParentRelationships();
@@ -409,6 +410,27 @@ void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystem
                mount.fileSystemType == QByteArrayLiteral("tmpfs") ||
                mount.fileSystemType == QByteArrayLiteral("fuse.portal");
     }));
+}
+
+void LocalFileSystemTest::preservesVisiblePseudoFileSystemsAtRoot()
+{
+    const QByteArray tmpfsRoot = "24 1 0:44 / / rw - tmpfs tmpfs rw\n"
+                                 "25 24 0:45 / /run rw - tmpfs tmpfs rw\n"
+                                 "26 24 0:46 / /dev/shm rw - tmpfs shm rw\n";
+    const QList<rfm::core::LinuxMountInfo> tmpfsMounts = rfm::core::parseLinuxMountInfo(tmpfsRoot);
+    QCOMPARE(tmpfsMounts.size(), 1);
+    QCOMPARE(tmpfsMounts.constFirst().rootPath, QStringLiteral("/"));
+    QCOMPARE(tmpfsMounts.constFirst().fileSystemType, QByteArrayLiteral("tmpfs"));
+
+    const QList<rfm::core::LinuxMountInfo> ramfsMounts =
+        rfm::core::parseLinuxMountInfo("30 1 0:47 / / rw - ramfs ramfs rw\n");
+    QCOMPARE(ramfsMounts.size(), 1);
+    QCOMPARE(ramfsMounts.constFirst().fileSystemType, QByteArrayLiteral("ramfs"));
+
+    const QList<rfm::core::LinuxMountInfo> ext4Mounts =
+        rfm::core::parseLinuxMountInfo("40 1 8:1 / / rw - ext4 /dev/sda1 rw\n");
+    QCOMPARE(ext4Mounts.size(), 1);
+    QCOMPARE(ext4Mounts.constFirst().fileSystemType, QByteArrayLiteral("ext4"));
 }
 
 void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()

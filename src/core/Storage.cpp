@@ -329,7 +329,8 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
     visibleMounts.reserve(mountPointGroups.size());
     for (const QList<LinuxMountInfo>& group : std::as_const(mountPointGroups)) {
         LinuxMountInfo visible = visibleOvermount(group);
-        if (!isPseudoFileSystem(visible.fileSystemType)) {
+        if (visible.rootPath == QStringLiteral("/") ||
+            !isPseudoFileSystem(visible.fileSystemType)) {
             visibleMounts.push_back(std::move(visible));
         }
     }
