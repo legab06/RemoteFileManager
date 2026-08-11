@@ -31,6 +31,16 @@ target_link_libraries(rfm_transfer_tests PRIVATE Qt6::Test RemoteFileManager::Co
 rfm_set_project_warnings(rfm_transfer_tests)
 add_test(NAME unit.transfer_file_job COMMAND rfm_transfer_tests)
 
+qt_add_executable(rfm_local_file_system_tests test_local_file_system.cpp)
+target_link_libraries(rfm_local_file_system_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_local_file_system_tests)
+add_test(NAME unit.local_file_system COMMAND rfm_local_file_system_tests)
+
+qt_add_executable(rfm_remote_storage_scanner_tests test_remote_storage_scanner.cpp)
+target_link_libraries(rfm_remote_storage_scanner_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_remote_storage_scanner_tests)
+add_test(NAME unit.remote_storage_scanner COMMAND rfm_remote_storage_scanner_tests)
+
 qt_add_executable(rfm_ui_tests test_main_window.cpp)
 target_link_libraries(rfm_ui_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
 rfm_set_project_warnings(rfm_ui_tests)
@@ -54,3 +64,9 @@ target_link_libraries(rfm_file_browser_pane_tests PRIVATE Qt6::Test RemoteFileMa
 rfm_set_project_warnings(rfm_file_browser_pane_tests)
 add_test(NAME ui.file_browser_pane COMMAND rfm_file_browser_pane_tests)
 set_tests_properties(ui.file_browser_pane PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(rfm_navigation_tree_tests test_navigation_tree.cpp)
+target_link_libraries(rfm_navigation_tree_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
+rfm_set_project_warnings(rfm_navigation_tree_tests)
+add_test(NAME ui.navigation_tree COMMAND rfm_navigation_tree_tests)
+set_tests_properties(ui.navigation_tree PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

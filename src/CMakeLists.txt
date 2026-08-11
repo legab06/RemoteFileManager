@@ -2,21 +2,28 @@ add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
     core/InternalTransfer.cpp
+    core/LocalFileSystem.cpp
+    core/LocalStorageTopology.hpp
     core/LocalDownloadPath.cpp
     core/OperationHistoryStore.cpp
     core/OperationProgress.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp
     core/ServerProfileStore.cpp
+    core/Storage.cpp
     core/ServerSideCopyJob.cpp
     core/TransferDirectoryJob.cpp
     core/TransferFileJob.cpp
     core/TransferQueue.cpp
     ssh/LibsshRuntime.cpp
     ssh/RemoteCopyCommand.cpp
+    ssh/RemoteStorageScanner.cpp
     ssh/SshSession.cpp
     ssh/SftpTransferBackend.cpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/LocalFileSystem.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/Storage.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageScanner.hpp
 )
 add_library(RemoteFileManager::Core ALIAS rfm_core)
 
@@ -32,6 +39,7 @@ rfm_set_project_warnings(rfm_core)
 add_library(
     rfm_ui STATIC
     app/MainWindow.cpp
+    app/NavigationTree.cpp
     app/ConnectionDialog.cpp
     app/FileBrowserPane.cpp
     app/HomePage.cpp
@@ -40,6 +48,7 @@ add_library(
     app/OperationPanel.cpp
     app/TransferRequestFactory.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/MainWindow.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/NavigationTree.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ConnectionDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/FileBrowserPane.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/HomePage.hpp

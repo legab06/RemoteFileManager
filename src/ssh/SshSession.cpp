@@ -3,27 +3,34 @@
 #include "SftpTransferBackend.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/core/ServerSideCopyJob.hpp"
+#include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferDirectoryJob.hpp"
 #include "remotefilemanager/core/TransferFileJob.hpp"
 #include "remotefilemanager/core/TransferJob.hpp"
 #include "remotefilemanager/core/TransferQueue.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
+#include "remotefilemanager/ssh/RemoteStorageScanner.hpp"
 
-#include <libssh/libssh.h>
 #include <libssh/callbacks.h>
+#include <libssh/libssh.h>
 #include <libssh/sftp.h>
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QTimer>
 
 #include <algorithm>
+#include <fcntl.h>
+#include <limits>
+#include <optional>
 #include <utility>
 
-namespace {
+namespace
+{
 
 rfm::core::RemoteBackendError backendError(int sftpError)
 {
@@ -49,8 +56,290 @@ bool isFatalSftpError(int sftpError)
     return sftpError == SSH_FX_NO_CONNECTION || sftpError == SSH_FX_CONNECTION_LOST;
 }
 
-class SftpBackend final : public rfm::core::RemoteFileBackend {
-public:
+rfm::ssh::RemoteStorageError storageError(ssh_session session, sftp_session sftp)
+{
+    const int error = sftp == nullptr ? SSH_FX_NO_CONNECTION : sftp_get_error(sftp);
+    if (session == nullptr || ssh_is_connected(session) == 0 || isFatalSftpError(error)) {
+        return rfm::ssh::RemoteStorageError::ConnectionLost;
+    }
+    switch (error) {
+    case SSH_FX_NO_SUCH_FILE:
+    case SSH_FX_NO_SUCH_PATH:
+        return rfm::ssh::RemoteStorageError::NotFound;
+    case SSH_FX_PERMISSION_DENIED:
+        return rfm::ssh::RemoteStorageError::PermissionDenied;
+    default:
+        return rfm::ssh::RemoteStorageError::OtherError;
+    }
+}
+
+QString resolveRemoteLink(const QString& linkPath, const QString& target)
+{
+    if (target.startsWith(QChar{'/'})) {
+        return rfm::core::RemotePath::normalize(target);
+    }
+    return rfm::core::RemotePath::normalize(rfm::core::RemotePath::parent(linkPath) + QChar{'/'} +
+                                            target);
+}
+
+class SftpRemoteStorageReader final : public rfm::ssh::RemoteStorageReader
+{
+  public:
+    SftpRemoteStorageReader(ssh_session session, sftp_session sftp)
+        : m_session(session), m_sftp(sftp)
+    {}
+
+    ~SftpRemoteStorageReader() override
+    {
+        endMountInfo();
+        endFileSystemLabels();
+    }
+
+    rfm::ssh::RemoteStorageError beginMountInfo() override
+    {
+        endMountInfo();
+        const QByteArray encodedPath = QByteArrayLiteral("/proc/self/mountinfo");
+        m_mountInfoFile = sftp_open(m_sftp, encodedPath.constData(), O_RDONLY, 0);
+        return m_mountInfoFile == nullptr ? storageError(m_session, m_sftp)
+                                          : rfm::ssh::RemoteStorageError::None;
+    }
+
+    rfm::ssh::RemoteStorageChunkResult readMountInfoChunk(qsizetype maximumBytes) override
+    {
+        if (m_mountInfoFile == nullptr || maximumBytes <= 0) {
+            return {{}, rfm::ssh::RemoteStorageError::OtherError, false};
+        }
+        char buffer[4096];
+        const size_t requested =
+            static_cast<size_t>(std::min(maximumBytes, static_cast<qsizetype>(sizeof(buffer))));
+        const ssize_t count = sftp_read(m_mountInfoFile, buffer, requested);
+        if (count < 0) {
+            return {{}, storageError(m_session, m_sftp), false};
+        }
+        if (count == 0) {
+            return {{}, rfm::ssh::RemoteStorageError::None, true};
+        }
+        return {QByteArray(buffer, static_cast<qsizetype>(count)),
+                rfm::ssh::RemoteStorageError::None, false};
+    }
+
+    void endMountInfo() override
+    {
+        if (m_mountInfoFile != nullptr) {
+            sftp_close(m_mountInfoFile);
+            m_mountInfoFile = nullptr;
+        }
+    }
+
+    rfm::ssh::RemoteStorageByteResult readFile(const QString& path, qsizetype maximumBytes) override
+    {
+        if (maximumBytes <= 0) {
+            return {{}, rfm::ssh::RemoteStorageError::OtherError, false};
+        }
+        const QByteArray encodedPath = path.toUtf8();
+        sftp_file file = sftp_open(m_sftp, encodedPath.constData(), O_RDONLY, 0);
+        if (file == nullptr) {
+            return {{}, storageError(m_session, m_sftp), false};
+        }
+        QByteArray contents;
+        char buffer[4096];
+        const qsizetype readLimit = maximumBytes + 1;
+        while (contents.size() < readLimit) {
+            const size_t requested = static_cast<size_t>(std::min<qsizetype>(
+                static_cast<qsizetype>(sizeof(buffer)), readLimit - contents.size()));
+            const ssize_t count = sftp_read(file, buffer, requested);
+            if (count < 0) {
+                const rfm::ssh::RemoteStorageError error = storageError(m_session, m_sftp);
+                sftp_close(file);
+                return {{}, error, false};
+            }
+            if (count == 0) {
+                break;
+            }
+            contents.append(buffer, static_cast<qsizetype>(count));
+        }
+        sftp_close(file);
+        const bool truncated = contents.size() > maximumBytes;
+        if (truncated) {
+            contents.truncate(maximumBytes);
+        }
+        return {std::move(contents), rfm::ssh::RemoteStorageError::None, truncated};
+    }
+
+    rfm::ssh::RemoteStorageStringResult readLink(const QString& path) override
+    {
+        const QByteArray encodedPath = path.toUtf8();
+        char* const target = sftp_readlink(m_sftp, encodedPath.constData());
+        if (target == nullptr) {
+            return {{}, storageError(m_session, m_sftp)};
+        }
+        const QString result = QString::fromUtf8(target);
+        ssh_string_free_char(target);
+        return {result, rfm::ssh::RemoteStorageError::None};
+    }
+
+    rfm::ssh::RemoteStorageError beginFileSystemLabels() override
+    {
+        endFileSystemLabels();
+        const QByteArray encodedDirectory = labelDirectory().toUtf8();
+        m_labelDirectory = sftp_opendir(m_sftp, encodedDirectory.constData());
+        return m_labelDirectory == nullptr ? storageError(m_session, m_sftp)
+                                           : rfm::ssh::RemoteStorageError::None;
+    }
+
+    rfm::ssh::RemoteStorageLabelResult nextFileSystemLabel() override
+    {
+        if (m_labelDirectory == nullptr) {
+            return {{}, {}, rfm::ssh::RemoteStorageError::OtherError, true};
+        }
+        sftp_attributes attributes = sftp_readdir(m_sftp, m_labelDirectory);
+        if (attributes == nullptr) {
+            if (sftp_dir_eof(m_labelDirectory) != 0) {
+                return {{}, {}, rfm::ssh::RemoteStorageError::None, true};
+            }
+            return {{}, {}, storageError(m_session, m_sftp), false};
+        }
+        const QString label =
+            attributes->name == nullptr ? QString{} : QString::fromUtf8(attributes->name).trimmed();
+        sftp_attributes_free(attributes);
+        if (label.isEmpty() || label == QStringLiteral(".") || label == QStringLiteral("..")) {
+            return {};
+        }
+        const QString linkPath = labelDirectory() + QChar{'/'} + label;
+        const rfm::ssh::RemoteStorageStringResult target = readLink(linkPath);
+        if (target.error == rfm::ssh::RemoteStorageError::ConnectionLost ||
+            target.error == rfm::ssh::RemoteStorageError::Cancelled) {
+            return {{}, {}, target.error, false};
+        }
+        if (target.error != rfm::ssh::RemoteStorageError::None) {
+            return {};
+        }
+        return {label, resolveRemoteLink(linkPath, target.value),
+                rfm::ssh::RemoteStorageError::None, false};
+    }
+
+    void endFileSystemLabels() override
+    {
+        if (m_labelDirectory != nullptr) {
+            sftp_closedir(m_labelDirectory);
+            m_labelDirectory = nullptr;
+        }
+    }
+
+    rfm::ssh::RemoteStorageTopologyResult readTopologyNode(const QString& path) override
+    {
+        const QByteArray encodedPath = path.toUtf8();
+        sftp_attributes attributes = sftp_lstat(m_sftp, encodedPath.constData());
+        if (attributes == nullptr) {
+            return {{}, storageError(m_session, m_sftp), false};
+        }
+        sftp_attributes_free(attributes);
+
+        rfm::core::StorageTopologyNode node;
+        bool reliable = true;
+        const rfm::ssh::RemoteStorageByteResult removable =
+            readFile(path + QStringLiteral("/removable"), 8);
+        if (removable.error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+            return {{}, removable.error, false};
+        }
+        if (removable.error == rfm::ssh::RemoteStorageError::PermissionDenied ||
+            removable.error == rfm::ssh::RemoteStorageError::OtherError || removable.truncated) {
+            reliable = false;
+        }
+        node.removable = removable.error == rfm::ssh::RemoteStorageError::None &&
+                         removable.data.trimmed() == QByteArrayLiteral("1");
+
+        const rfm::ssh::RemoteStorageStringResult subsystem =
+            readLink(path + QStringLiteral("/subsystem"));
+        if (subsystem.error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+            return {{}, subsystem.error, false};
+        }
+        if (subsystem.error == rfm::ssh::RemoteStorageError::PermissionDenied ||
+            subsystem.error == rfm::ssh::RemoteStorageError::OtherError) {
+            reliable = false;
+        }
+        if (subsystem.error == rfm::ssh::RemoteStorageError::None) {
+            node.subsystem = rfm::core::RemotePath::fileName(subsystem.value);
+        }
+
+        rfm::ssh::RemoteStorageByteResult model = readFile(path + QStringLiteral("/model"), 256);
+        if (model.error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+            return {{}, model.error, false};
+        }
+        if (model.error != rfm::ssh::RemoteStorageError::None || model.data.trimmed().isEmpty()) {
+            model = readFile(path + QStringLiteral("/device/model"), 256);
+            if (model.error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+                return {{}, model.error, false};
+            }
+        }
+        if (model.error == rfm::ssh::RemoteStorageError::None) {
+            node.deviceModel = QString::fromUtf8(model.data.trimmed());
+        }
+
+        // Optional children may legitimately be absent. Revalidate the node so
+        // that NotFound can also reveal removal during this composite read.
+        attributes = sftp_lstat(m_sftp, encodedPath.constData());
+        if (attributes == nullptr) {
+            const rfm::ssh::RemoteStorageError error = storageError(m_session, m_sftp);
+            if (error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+                return {{}, error, false};
+            }
+            reliable = false;
+        } else {
+            sftp_attributes_free(attributes);
+        }
+        return {std::move(node), rfm::ssh::RemoteStorageError::None, reliable};
+    }
+
+    rfm::ssh::RemoteStorageStringResult deviceIdentity(const QString& device) override
+    {
+        const QString normalized = rfm::core::RemotePath::normalize(device);
+        if (!normalized.startsWith(QChar{'/'})) {
+            return {normalized, rfm::ssh::RemoteStorageError::None};
+        }
+        const rfm::ssh::RemoteStorageStringResult target = readLink(normalized);
+        if (target.error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+            return target;
+        }
+        return {target.error == rfm::ssh::RemoteStorageError::None
+                    ? resolveRemoteLink(normalized, target.value)
+                    : normalized,
+                rfm::ssh::RemoteStorageError::None};
+    }
+
+    rfm::ssh::RemoteStorageSizeResult storageSize(const QString& mountPoint) override
+    {
+        const QByteArray encodedPath = mountPoint.toUtf8();
+        sftp_statvfs_t attributes = sftp_statvfs(m_sftp, encodedPath.constData());
+        if (attributes == nullptr) {
+            return {0, storageError(m_session, m_sftp)};
+        }
+        quint64 bytes = 0;
+        if (attributes->f_frsize > 0 &&
+            attributes->f_blocks <= std::numeric_limits<quint64>::max() / attributes->f_frsize) {
+            bytes = attributes->f_blocks * attributes->f_frsize;
+        }
+        sftp_statvfs_free(attributes);
+        return {bytes, rfm::ssh::RemoteStorageError::None};
+    }
+
+    bool connectionAlive() const override
+    {
+        return m_session != nullptr && m_sftp != nullptr && ssh_is_connected(m_session) != 0;
+    }
+
+  private:
+    static QString labelDirectory() { return QStringLiteral("/dev/disk/by-label"); }
+
+    ssh_session m_session{nullptr};
+    sftp_session m_sftp{nullptr};
+    sftp_file m_mountInfoFile{nullptr};
+    sftp_dir m_labelDirectory{nullptr};
+};
+
+class SftpBackend final : public rfm::core::RemoteFileBackend
+{
+  public:
     explicit SftpBackend(sftp_session sftp) : m_sftp(sftp) {}
 
     rfm::core::RemoteProbeResult probe(const QString& path) override
@@ -94,14 +383,13 @@ public:
         return {backendError(sftp_get_error(m_sftp)), {}};
     }
 
-    rfm::core::RemoteBackendResult rename(
-        const QString& source, const QString& destination) override
+    rfm::core::RemoteBackendResult rename(const QString& source,
+                                          const QString& destination) override
     {
         const QByteArray encodedSource = source.toUtf8();
         const QByteArray encodedDestination = destination.toUtf8();
-        if (sftp_rename(
-                m_sftp, encodedSource.constData(), encodedDestination.constData())
-            == SSH_OK) {
+        if (sftp_rename(m_sftp, encodedSource.constData(), encodedDestination.constData()) ==
+            SSH_OK) {
             return {};
         }
         return {backendError(sftp_get_error(m_sftp)), {}};
@@ -125,20 +413,20 @@ public:
         return {backendError(sftp_get_error(m_sftp)), {}};
     }
 
-    rfm::core::RemoteBackendResult copyOnServer(
-        const QString&, const QString&, bool) override
+    rfm::core::RemoteBackendResult copyOnServer(const QString&, const QString&, bool) override
     {
         return {rfm::core::RemoteBackendError::Unsupported,
-                QCoreApplication::translate(
-                    "SftpBackend", "Server-side copies use the cooperative copy worker.")};
+                QCoreApplication::translate("SftpBackend",
+                                            "Server-side copies use the cooperative copy worker.")};
     }
 
-private:
+  private:
     sftp_session m_sftp;
 };
 
-class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend {
-public:
+class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
+{
+  public:
     SshServerSideCopyBackend(ssh_session session, sftp_session sftp)
         : m_session(session), m_sftp(sftp)
     {}
@@ -213,8 +501,7 @@ public:
                                             "The remote copy channel is not active.")};
         }
         char buffer[512];
-        const int errorBytes =
-            ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 1);
+        const int errorBytes = ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 1);
         if (errorBytes > 0 && m_errorOutput.size() < 2048) {
             const int remaining = 2048 - static_cast<int>(m_errorOutput.size());
             m_errorOutput.append(buffer, std::min(errorBytes, remaining));
@@ -225,8 +512,7 @@ public:
                 QCoreApplication::translate("SshServerSideCopyBackend",
                                             "Unable to read the remote copy result.")};
         }
-        const int outputBytes =
-            ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 0);
+        const int outputBytes = ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 0);
         if (outputBytes == SSH_ERROR) {
             closeChannel();
             return rfm::core::RemoteBackendResult{
@@ -302,17 +588,14 @@ public:
             return rfm::core::RemoteBackendResult{};
         }
         char buffer[512];
-        const int errorBytes =
-            ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 1);
-        const int outputBytes =
-            ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 0);
+        const int errorBytes = ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 1);
+        const int outputBytes = ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 0);
         if (errorBytes == SSH_ERROR || outputBytes == SSH_ERROR) {
             closeChannel();
             return rfm::core::RemoteBackendResult{
                 rfm::core::RemoteBackendError::Failure,
-                QCoreApplication::translate(
-                    "SshServerSideCopyBackend",
-                    "Unable to confirm termination of the remote copy.")};
+                QCoreApplication::translate("SshServerSideCopyBackend",
+                                            "Unable to confirm termination of the remote copy.")};
         }
         if (ssh_channel_is_eof(m_channel) != 0 || ssh_channel_is_closed(m_channel) != 0) {
             closeChannel();
@@ -330,7 +613,7 @@ public:
                 "The remote copy did not terminate within the cancellation timeout.")};
     }
 
-private:
+  private:
     enum class CancellationPhase { NotRequested, RequestingTermination, AwaitingTermination };
 
     static constexpr qint64 terminationRequestTimeoutMs = 1000;
@@ -373,19 +656,30 @@ private:
     QElapsedTimer m_cancellationTimer;
 };
 
-}  // namespace
+} // namespace
 
-namespace rfm::ssh {
+namespace rfm::ssh
+{
 
-class SshSession::Impl final {
-public:
-    ~Impl()
-    {
-        reset();
-    }
+class SshSession::Impl final
+{
+  public:
+    ~Impl() { reset(); }
 
     void reset()
     {
+        if (storageProbeFile != nullptr) {
+            sftp_close(storageProbeFile);
+            storageProbeFile = nullptr;
+        }
+        storageProbeData.clear();
+        storageProbeRequestId = 0;
+        storageProbeStepScheduled = false;
+        if (storageScanner != nullptr) {
+            storageScanner->cancel();
+        }
+        storageScanner.reset();
+        storageStepScheduled = false;
         if (activeCopyJob != nullptr && !activeCopyJob->isFinished()) {
             static_cast<void>(activeCopyJob->requestCancel());
         }
@@ -424,18 +718,20 @@ public:
     std::unique_ptr<rfm::core::TransferJob> activeTransferJob;
     std::unique_ptr<SshServerSideCopyBackend> copyBackend;
     std::unique_ptr<rfm::core::ServerSideCopyJob> activeCopyJob;
+    std::unique_ptr<rfm::ssh::RemoteStorageScanner> storageScanner;
+    sftp_file storageProbeFile{nullptr};
+    QByteArray storageProbeData;
+    quint64 storageProbeRequestId{0};
     rfm::core::TransferQueue transferQueue;
     bool transferStepScheduled{false};
     bool copyStepScheduled{false};
+    bool storageStepScheduled{false};
+    bool storageProbeStepScheduled{false};
     bool shuttingDown{false};
     bool disconnecting{false};
 };
 
-SshSession::SshSession(QObject* parent)
-    : QObject(parent)
-    , m_impl(std::make_unique<Impl>())
-{
-}
+SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_unique<Impl>()) {}
 
 SshSession::~SshSession() = default;
 
@@ -463,18 +759,18 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
     const QByteArray user = m_impl->profile.username.trimmed().toUtf8();
     unsigned int port = m_impl->profile.port;
     long timeout = 15;
-    if (ssh_options_set(m_impl->session, SSH_OPTIONS_HOST, host.constData()) != SSH_OK
-        || ssh_options_set(m_impl->session, SSH_OPTIONS_USER, user.constData()) != SSH_OK
-        || ssh_options_set(m_impl->session, SSH_OPTIONS_PORT, &port) != SSH_OK
-        || ssh_options_set(m_impl->session, SSH_OPTIONS_TIMEOUT, &timeout) != SSH_OK) {
+    if (ssh_options_set(m_impl->session, SSH_OPTIONS_HOST, host.constData()) != SSH_OK ||
+        ssh_options_set(m_impl->session, SSH_OPTIONS_USER, user.constData()) != SSH_OK ||
+        ssh_options_set(m_impl->session, SSH_OPTIONS_PORT, &port) != SSH_OK ||
+        ssh_options_set(m_impl->session, SSH_OPTIONS_TIMEOUT, &timeout) != SSH_OK) {
         fail(tr("Unable to configure SSH: %1")
                  .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
 
     if (ssh_connect(m_impl->session) != SSH_OK) {
-        fail(tr("SSH connection failed: %1")
-                 .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+        fail(
+            tr("SSH connection failed: %1").arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
 
@@ -492,10 +788,8 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         ssh_key key = nullptr;
         unsigned char* hash = nullptr;
         size_t hashLength = 0;
-        if (ssh_get_server_publickey(m_impl->session, &key) != SSH_OK
-            || ssh_get_publickey_hash(
-                   key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLength)
-                != SSH_OK) {
+        if (ssh_get_server_publickey(m_impl->session, &key) != SSH_OK ||
+            ssh_get_publickey_hash(key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hashLength) != SSH_OK) {
             if (key != nullptr) {
                 ssh_key_free(key);
             }
@@ -504,9 +798,8 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         }
         char* const fingerprintText =
             ssh_get_fingerprint_hash(SSH_PUBLICKEY_HASH_SHA256, hash, hashLength);
-        const QString fingerprint = fingerprintText == nullptr
-            ? tr("Unavailable")
-            : QString::fromUtf8(fingerprintText);
+        const QString fingerprint =
+            fingerprintText == nullptr ? tr("Unavailable") : QString::fromUtf8(fingerprintText);
         ssh_string_free_char(fingerprintText);
         ssh_clean_pubkey_hash(&hash);
         ssh_key_free(key);
@@ -564,8 +857,7 @@ void SshSession::authenticateAndOpen()
                  .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
-    const QString initialPath =
-        rfm::core::RemotePath::normalize(QString::fromUtf8(canonicalHome));
+    const QString initialPath = rfm::core::RemotePath::normalize(QString::fromUtf8(canonicalHome));
     ssh_string_free_char(canonicalHome);
     if (!initialPath.startsWith(QChar{'/'})) {
         fail(tr("The server returned an invalid remote home directory."));
@@ -584,8 +876,7 @@ void SshSession::authenticateAndOpen()
     while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
         const QString name = QString::fromUtf8(attributes->name);
         if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
-            entries.push_back({name,
-                               attributes->size,
+            entries.push_back({name, attributes->size,
                                QDateTime::fromSecsSinceEpoch(attributes->mtime),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
                                attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
@@ -627,8 +918,7 @@ void SshSession::listDirectory(quint64 requestId, QString path)
     while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
         const QString name = QString::fromUtf8(attributes->name);
         if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
-            entries.push_back({name,
-                               attributes->size,
+            entries.push_back({name, attributes->size,
                                QDateTime::fromSecsSinceEpoch(attributes->mtime),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
                                attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
@@ -653,6 +943,150 @@ void SshSession::listDirectory(quint64 requestId, QString path)
     emit directoryListed(requestId, path, entries);
 }
 
+void SshSession::listStorageVolumes(quint64 requestId)
+{
+    if (m_impl->sftp == nullptr) {
+        emit storageVolumeListingFailed(requestId, tr("No active SFTP connection."));
+        return;
+    }
+    cancelStorageProbe();
+    cancelStorageScan();
+    m_impl->storageScanner = std::make_unique<rfm::ssh::RemoteStorageScanner>(
+        std::make_unique<SftpRemoteStorageReader>(m_impl->session, m_impl->sftp), requestId);
+    scheduleStorageScanStep();
+}
+
+void SshSession::scheduleStorageScanStep()
+{
+    if (m_impl->storageScanner != nullptr && !m_impl->storageStepScheduled) {
+        m_impl->storageStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processStorageScanStep, Qt::QueuedConnection);
+    }
+}
+
+void SshSession::processStorageScanStep()
+{
+    m_impl->storageStepScheduled = false;
+    if (m_impl->storageScanner == nullptr) {
+        return;
+    }
+    const quint64 requestId = m_impl->storageScanner->requestId();
+    const rfm::ssh::RemoteStorageScanStep result = m_impl->storageScanner->step();
+    switch (result.status) {
+    case rfm::ssh::RemoteStorageScanStatus::Pending:
+        scheduleStorageScanStep();
+        return;
+    case rfm::ssh::RemoteStorageScanStatus::Completed: {
+        QList<rfm::core::StorageVolume> volumes = m_impl->storageScanner->takeVolumes();
+        const QByteArray fingerprint = m_impl->storageScanner->mountInfoFingerprint();
+        m_impl->storageScanner.reset();
+        emit storageMountInfoFingerprint(requestId, fingerprint);
+        emit storageVolumesListed(requestId, std::move(volumes));
+        return;
+    }
+    case rfm::ssh::RemoteStorageScanStatus::Failed:
+        m_impl->storageScanner.reset();
+        emit storageVolumeListingFailed(requestId, result.error);
+        return;
+    case rfm::ssh::RemoteStorageScanStatus::ConnectionLost: {
+        const QString error = result.error;
+        m_impl->storageScanner.reset();
+        fail(error.isEmpty() ? tr("The SSH connection was lost during storage discovery.") : error);
+        return;
+    }
+    case rfm::ssh::RemoteStorageScanStatus::Cancelled:
+        m_impl->storageScanner.reset();
+        return;
+    }
+}
+
+void SshSession::cancelStorageScan()
+{
+    if (m_impl->storageScanner != nullptr) {
+        m_impl->storageScanner->cancel();
+        m_impl->storageScanner.reset();
+    }
+    m_impl->storageStepScheduled = false;
+}
+
+void SshSession::probeStorageMounts(quint64 requestId)
+{
+    if (m_impl->sftp == nullptr) {
+        emit storageMountProbeFailed(requestId, tr("No active SFTP connection."));
+        return;
+    }
+    if (m_impl->storageScanner != nullptr || m_impl->storageProbeRequestId != 0) {
+        return;
+    }
+    const QByteArray path = QByteArrayLiteral("/proc/self/mountinfo");
+    m_impl->storageProbeFile = sftp_open(m_impl->sftp, path.constData(), O_RDONLY, 0);
+    if (m_impl->storageProbeFile == nullptr) {
+        emit storageMountProbeFailed(requestId, tr("Unable to open remote mount information."));
+        return;
+    }
+    m_impl->storageProbeRequestId = requestId;
+    m_impl->storageProbeData.clear();
+    scheduleStorageProbeStep();
+}
+
+void SshSession::scheduleStorageProbeStep()
+{
+    if (m_impl->storageProbeRequestId != 0 && !m_impl->storageProbeStepScheduled) {
+        m_impl->storageProbeStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processStorageProbeStep, Qt::QueuedConnection);
+    }
+}
+
+void SshSession::processStorageProbeStep()
+{
+    m_impl->storageProbeStepScheduled = false;
+    if (m_impl->storageProbeRequestId == 0 || m_impl->storageProbeFile == nullptr) {
+        return;
+    }
+    constexpr qsizetype maximumMountInfoBytes = 1024 * 1024;
+    char buffer[4096];
+    const ssize_t count = sftp_read(m_impl->storageProbeFile, buffer, sizeof(buffer));
+    if (count < 0) {
+        const quint64 requestId = m_impl->storageProbeRequestId;
+        const rfm::ssh::RemoteStorageError error = storageError(m_impl->session, m_impl->sftp);
+        cancelStorageProbe();
+        if (error == rfm::ssh::RemoteStorageError::ConnectionLost) {
+            fail(tr("The SSH connection was lost while probing storage."));
+        } else {
+            emit storageMountProbeFailed(requestId, tr("Unable to read remote mount information."));
+        }
+        return;
+    }
+    if (count == 0) {
+        const quint64 requestId = m_impl->storageProbeRequestId;
+        const QByteArray fingerprint =
+            QCryptographicHash::hash(m_impl->storageProbeData, QCryptographicHash::Sha256);
+        cancelStorageProbe();
+        emit storageMountsProbed(requestId, fingerprint);
+        return;
+    }
+    if (m_impl->storageProbeData.size() > maximumMountInfoBytes - count) {
+        const quint64 requestId = m_impl->storageProbeRequestId;
+        cancelStorageProbe();
+        emit storageMountProbeFailed(requestId,
+                                     tr("Remote mount information exceeds the safety limit."));
+        return;
+    }
+    m_impl->storageProbeData.append(buffer, static_cast<qsizetype>(count));
+    scheduleStorageProbeStep();
+}
+
+void SshSession::cancelStorageProbe()
+{
+    if (m_impl->storageProbeFile != nullptr) {
+        sftp_close(m_impl->storageProbeFile);
+        m_impl->storageProbeFile = nullptr;
+    }
+    m_impl->storageProbeData.clear();
+    m_impl->storageProbeRequestId = 0;
+    m_impl->storageProbeStepScheduled = false;
+}
+
 void SshSession::createDirectory(quint64 id, QString parent, QString name)
 {
     if (m_impl->sftp == nullptr) {
@@ -675,8 +1109,8 @@ void SshSession::renameEntry(quint64 id, QString source, QString newName)
     emit operationFinished(operations.rename(id, source, newName));
 }
 
-void SshSession::moveEntries(
-    quint64 id, QList<rfm::core::RemoteSelection> sources, QString destinationDirectory)
+void SshSession::moveEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
+                             QString destinationDirectory)
 {
     if (m_impl->sftp == nullptr) {
         emit failed(tr("Aucune connexion SFTP active."));
@@ -687,8 +1121,8 @@ void SshSession::moveEntries(
     emit operationFinished(operations.move(id, sources, destinationDirectory));
 }
 
-void SshSession::copyEntries(
-    quint64 id, QList<rfm::core::RemoteSelection> sources, QString destinationDirectory)
+void SshSession::copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
+                             QString destinationDirectory)
 {
     if (m_impl->sftp == nullptr) {
         emit failed(tr("Aucune connexion SFTP active."));
@@ -697,22 +1131,21 @@ void SshSession::copyEntries(
     if (m_impl->activeCopyJob != nullptr) {
         rfm::core::RemoteOperationResult rejected{id, rfm::core::RemoteOperationKind::Copy, {}};
         for (const rfm::core::RemoteSelection& source : std::as_const(sources)) {
-            rejected.items.push_back({source.path, {}, false,
-                                      tr("Another server-side copy is already active.")});
+            rejected.items.push_back(
+                {source.path, {}, false, tr("Another server-side copy is already active.")});
         }
         emit operationFinished(rejected);
         return;
     }
-    m_impl->copyBackend =
-        std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp);
+    m_impl->copyBackend = std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp);
     m_impl->activeCopyJob = std::make_unique<rfm::core::ServerSideCopyJob>(
         *m_impl->copyBackend, id, std::move(sources), std::move(destinationDirectory));
     emit operationUpdated(m_impl->activeCopyJob->progress());
     scheduleCopyStep();
 }
 
-void SshSession::removeEntries(
-    quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive)
+void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
+                               bool recursive)
 {
     if (m_impl->sftp == nullptr) {
         emit failed(tr("Aucune connexion SFTP active."));
@@ -817,6 +1250,8 @@ void SshSession::cancelRemoteOperation(quint64 id)
 
 void SshSession::shutdownTransfers()
 {
+    cancelStorageProbe();
+    cancelStorageScan();
     m_impl->transferQueue.clear();
     m_impl->shuttingDown = true;
     if (m_impl->activeTransferJob != nullptr) {
@@ -915,8 +1350,8 @@ void SshSession::processCopyStep()
 
 void SshSession::completeShutdownIfReady()
 {
-    if ((!m_impl->shuttingDown && !m_impl->disconnecting) ||
-        m_impl->activeTransferJob != nullptr || m_impl->activeCopyJob != nullptr) {
+    if ((!m_impl->shuttingDown && !m_impl->disconnecting) || m_impl->activeTransferJob != nullptr ||
+        m_impl->activeCopyJob != nullptr) {
         return;
     }
     const bool emitTransfersShutdown = m_impl->shuttingDown;
@@ -932,6 +1367,8 @@ void SshSession::completeShutdownIfReady()
 
 void SshSession::disconnectFromHost()
 {
+    cancelStorageProbe();
+    cancelStorageScan();
     m_impl->transferQueue.clear();
     m_impl->disconnecting = true;
     if (m_impl->activeTransferJob != nullptr && !m_impl->activeTransferJob->isFinished()) {
@@ -951,4 +1388,4 @@ void SshSession::fail(const QString& message)
     emit failed(message);
 }
 
-}  // namespace rfm::ssh
+} // namespace rfm::ssh

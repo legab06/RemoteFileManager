@@ -2,11 +2,12 @@
 
 RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche de Dolphin sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
 
-> État actuel : **Sprint 6 — profils de serveurs et connexion rapide,
-> version 0.7.0**. Plusieurs serveurs SSH peuvent être enregistrés localement,
-> modifiés, supprimés et ouverts depuis le dock Places. Le dialogue de connexion
-> reste visible pendant SSH et permet de corriger puis relancer immédiatement une
-> tentative échouée.
+> État actuel : **Sprint 7 — système de fichiers local et arbre de navigation,
+> version 0.8.0**. Les panneaux naviguent dans une source locale ou SSH, tandis que
+> Places organise la machine locale et le serveur connecté, avec leurs volumes et
+> périphériques externes détectés et nommés par label ou modèle lorsque disponible,
+> dans une arborescence paresseuse actualisable. Une seule session SSH reste active à
+> la fois.
 
 ## Principes
 
@@ -16,6 +17,8 @@ RemoteFileManager est un gestionnaire de fichiers graphique natif pour administr
 - opérations distantes exécutées côté serveur quand c’est pertinent ;
 - sécurité explicite : vérification de la clé d’hôte et aucun secret en clair ;
 - interface inspirée d’un navigateur de fichiers natif.
+- navigation locale multiplateforme fondée sur Qt, sans commande système ni SSHFS ;
+- panneaux à source explicite, permettant notamment un affichage scindé local/SSH.
 
 ## Dépendances
 
@@ -72,7 +75,8 @@ docs/                        architecture, sécurité et sprints
 
 Les choix structurants sont détaillés dans
 [l’ADR de la stack](docs/adr/0001-technical-stack.md), et les livrables de la
-version 0.7.0 dans [docs/sprint-6.md](docs/sprint-6.md).
+version 0.8.0 dans [docs/sprint-7.md](docs/sprint-7.md). Le comportement antérieur des
+profils est décrit dans [docs/sprint-6.md](docs/sprint-6.md).
 
 ## Licence
 

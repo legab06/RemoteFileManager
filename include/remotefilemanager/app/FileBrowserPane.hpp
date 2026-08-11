@@ -1,5 +1,6 @@
 #pragma once
 
+#include "remotefilemanager/core/BrowserLocation.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
@@ -26,6 +27,9 @@ class FileBrowserPane final : public QWidget
     explicit FileBrowserPane(QWidget* parent = nullptr);
 
     [[nodiscard]] QString currentPath() const;
+    [[nodiscard]] rfm::core::BrowserLocation currentLocation() const;
+    [[nodiscard]] rfm::core::FileSource source() const;
+    [[nodiscard]] bool hasLocation() const;
     [[nodiscard]] QList<rfm::core::RemoteSelection> selectedEntries() const;
     [[nodiscard]] QLineEdit* pathEdit() const;
     [[nodiscard]] QTableWidget* fileTable() const;
@@ -36,7 +40,11 @@ class FileBrowserPane final : public QWidget
     void showDirectory(const QString& path, const QString& displayPath,
                        const QList<rfm::core::RemoteEntry>& entries,
                        PaneNavigation navigation = PaneNavigation::Refresh);
+    void showDirectory(const rfm::core::BrowserLocation& location, const QString& displayPath,
+                       const QList<rfm::core::RemoteEntry>& entries,
+                       PaneNavigation navigation = PaneNavigation::Refresh);
     void clear();
+    void removeHistoryForSource(rfm::core::FileSource source);
     void setPendingSelectionNames(QStringList names);
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
@@ -54,6 +62,8 @@ class FileBrowserPane final : public QWidget
   signals:
     void activated();
     void navigationRequested(QString path, rfm::app::PaneNavigation navigation);
+    void locationNavigationRequested(rfm::core::BrowserLocation location,
+                                     rfm::app::PaneNavigation navigation);
     void historyChanged();
     void selectionChanged();
     void contextMenuRequested(QPoint globalPosition);
@@ -71,13 +81,16 @@ class FileBrowserPane final : public QWidget
                  const QString& destination) const;
     void updateDropAppearance(bool active, bool valid, int folderRow = -1);
     void updateCutAppearance();
+    [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
+    void requestLocation(const rfm::core::BrowserLocation& location,
+                         PaneNavigation navigation);
 
     QLineEdit* m_pathEdit{nullptr};
     QTableWidget* m_fileTable{nullptr};
-    QString m_currentPath;
+    rfm::core::BrowserLocation m_currentLocation;
     QStringList m_pendingSelectionNames;
-    QStringList m_backHistory;
-    QStringList m_forwardHistory;
+    QList<rfm::core::BrowserLocation> m_backHistory;
+    QList<rfm::core::BrowserLocation> m_forwardHistory;
     QString m_applicationInstanceId;
     rfm::core::RemoteConnectionIdentity m_connectionIdentity;
     quint64 m_paneId{0};

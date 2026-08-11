@@ -4,31 +4,35 @@
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 
+#include <QByteArray>
 #include <QObject>
 #include <memory>
 
-namespace rfm::ssh {
+namespace rfm::ssh
+{
 
-class SshSession final : public QObject {
+class SshSession final : public QObject
+{
     Q_OBJECT
 
-public:
+  public:
     explicit SshSession(QObject* parent = nullptr);
     ~SshSession() override;
 
-public slots:
+  public slots:
     void connectToHost(rfm::core::ConnectionProfile profile, QString password);
     void confirmUnknownHost(bool accepted);
     void listDirectory(quint64 requestId, QString path);
+    void listStorageVolumes(quint64 requestId);
+    void probeStorageMounts(quint64 requestId);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
-    void moveEntries(quint64 id,
-                     QList<rfm::core::RemoteSelection> sources,
+    void moveEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
                      QString destinationDirectory);
-    void copyEntries(quint64 id,
-                     QList<rfm::core::RemoteSelection> sources,
+    void copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
                      QString destinationDirectory);
     void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
     void enqueueTransfer(rfm::core::TransferRequest request);
@@ -39,12 +43,16 @@ public slots:
     void shutdownTransfers();
     void disconnectFromHost();
 
-signals:
+  signals:
     void hostKeyConfirmationRequired(QString host, QString fingerprint);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
-    void directoryListed(quint64 requestId, QString path,
-                         QList<rfm::core::RemoteEntry> entries);
+    void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
+    void storageVolumesListed(quint64 requestId, QList<rfm::core::StorageVolume> volumes);
+    void storageMountInfoFingerprint(quint64 requestId, QByteArray fingerprint);
+    void storageMountsProbed(quint64 requestId, QByteArray fingerprint);
+    void storageMountProbeFailed(quint64 requestId, QString error);
+    void storageVolumeListingFailed(quint64 requestId, QString error);
     void operationFinished(rfm::core::RemoteOperationResult result);
     void operationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
@@ -53,7 +61,7 @@ signals:
     void failed(QString message);
     void disconnected();
 
-private:
+  private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
 
@@ -62,8 +70,14 @@ private:
     void scheduleTransferStep();
     void processCopyStep();
     void scheduleCopyStep();
+    void processStorageScanStep();
+    void scheduleStorageScanStep();
+    void cancelStorageScan();
+    void processStorageProbeStep();
+    void scheduleStorageProbeStep();
+    void cancelStorageProbe();
     void completeShutdownIfReady();
     void fail(const QString& message);
 };
 
-}  // namespace rfm::ssh
+} // namespace rfm::ssh
