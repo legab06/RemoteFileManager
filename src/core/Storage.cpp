@@ -305,9 +305,6 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
             !mountRoot.startsWith(QChar{'/'}) || !rootPath.startsWith(QChar{'/'})) {
             continue;
         }
-        if (rootPath != QStringLiteral("/") && isPseudoFileSystem(fileSystemType)) {
-            continue;
-        }
         const QList<QByteArray> options = left.at(5).split(',');
         LinuxMountInfo mount{rootPath,
                              device,
@@ -331,7 +328,10 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
     QList<LinuxMountInfo> visibleMounts;
     visibleMounts.reserve(mountPointGroups.size());
     for (const QList<LinuxMountInfo>& group : std::as_const(mountPointGroups)) {
-        visibleMounts.push_back(visibleOvermount(group));
+        LinuxMountInfo visible = visibleOvermount(group);
+        if (!isPseudoFileSystem(visible.fileSystemType)) {
+            visibleMounts.push_back(std::move(visible));
+        }
     }
 
     // Process broad roots first so demonstrated sub-root binds can reuse their

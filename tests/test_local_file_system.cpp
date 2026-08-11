@@ -66,6 +66,7 @@ class LocalFileSystemTest final : public QObject
     void parsesLinuxMountInformation();
     void preservesNavigableFuseMountsAndFiltersPseudoFileSystems();
     void filtersBindMountsAndKeepsVisibleOvermount();
+    void filtersVisiblePseudoOvermountsWithoutRestoringHiddenStorage();
     void selectsOvermountsFromParentRelationships();
     void preservesDistinctBtrfsAndAmbiguousAttachments();
     void reportsPortableMountedVolumes();
@@ -451,6 +452,29 @@ void LocalFileSystemTest::filtersBindMountsAndKeepsVisibleOvermount()
     QCOMPARE(mounts.at(1).device, QStringLiteral("/dev/sdb1"));
     QCOMPARE(mounts.at(1).mountId, quint64{41});
     QVERIFY(mounts.at(1).readOnly);
+}
+
+void LocalFileSystemTest::filtersVisiblePseudoOvermountsWithoutRestoringHiddenStorage()
+{
+    const QByteArray tmpfsOvermount = "40 1 8:17 / /mnt/data rw - ext4 /dev/sdb1 rw\n"
+                                      "41 40 0:50 / /mnt/data rw - tmpfs tmpfs rw\n";
+    const QList<rfm::core::LinuxMountInfo> tmpfsMounts =
+        rfm::core::parseLinuxMountInfo(tmpfsOvermount);
+    QVERIFY(tmpfsMounts.isEmpty());
+
+    const QByteArray portalOvermount = "50 1 8:18 / /some/path rw - ext4 /dev/sdc1 rw\n"
+                                       "51 50 0:51 / /some/path rw - fuse.portal portal rw\n";
+    const QList<rfm::core::LinuxMountInfo> portalMounts =
+        rfm::core::parseLinuxMountInfo(portalOvermount);
+    QVERIFY(portalMounts.isEmpty());
+
+    const QByteArray storageOvermount = "60 1 0:52 / /mnt/real rw - tmpfs tmpfs rw\n"
+                                        "61 60 8:19 / /mnt/real rw - xfs /dev/sdd1 rw\n";
+    const QList<rfm::core::LinuxMountInfo> storageMounts =
+        rfm::core::parseLinuxMountInfo(storageOvermount);
+    QCOMPARE(storageMounts.size(), 1);
+    QCOMPARE(storageMounts.constFirst().fileSystemType, QByteArrayLiteral("xfs"));
+    QCOMPARE(storageMounts.constFirst().device, QStringLiteral("/dev/sdd1"));
 }
 
 void LocalFileSystemTest::selectsOvermountsFromParentRelationships()
