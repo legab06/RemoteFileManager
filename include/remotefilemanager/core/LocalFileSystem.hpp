@@ -19,12 +19,34 @@ struct LocalDirectoryResult {
     [[nodiscard]] bool succeeded() const { return error.isEmpty(); }
 };
 
+// Raw fields captured from one QStorageInfo enumeration. Keeping this value type
+// separate makes it possible to derive the displayed volumes and their identity
+// fingerprint from exactly the same mount snapshot.
+struct LocalStorageMount {
+    QString rootPath;
+    QString device;
+    QByteArray fileSystemType;
+    QString fileSystemLabel;
+    qint64 bytesTotal{0};
+    bool readOnly{false};
+    bool valid{false};
+    bool ready{false};
+};
+
+struct LocalStorageSnapshot {
+    QList<StorageVolume> volumes;
+    QByteArray fingerprint;
+};
+
 class LocalFileSystem final
 {
   public:
     [[nodiscard]] static LocalDirectoryResult listDirectory(const QString& path);
     [[nodiscard]] static QList<StorageVolume> mountedVolumes();
+    [[nodiscard]] static LocalStorageSnapshot mountedVolumeSnapshot();
     [[nodiscard]] static QByteArray mountedVolumeFingerprint();
+    [[nodiscard]] static LocalStorageSnapshot
+    makeStorageSnapshot(const QList<LocalStorageMount>& mounts);
 };
 
 class LocalFileSystemWorker final : public QObject

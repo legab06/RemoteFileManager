@@ -69,6 +69,7 @@ class LocalFileSystemTest final : public QObject
     void selectsOvermountsFromParentRelationships();
     void preservesDistinctBtrfsAndAmbiguousAttachments();
     void reportsPortableMountedVolumes();
+    void buildsVolumesAndFingerprintFromOneSnapshot();
 };
 
 void LocalFileSystemTest::listsOnlyImmediateEntriesFromTemporaryDirectory()
@@ -379,20 +380,61 @@ void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystem
                                "29 24 0:48 / /proc rw - proc proc rw\n"
                                "30 24 0:49 / /sys rw - sysfs sysfs rw\n"
                                "31 24 0:50 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
-                               "32 24 0:51 / /run/user/1000/doc rw - fuse.portal portal rw\n";
+                               "32 24 0:51 / /run/user/1000/doc rw - fuse.portal portal rw\n"
+                               "33 24 0:52 / /run rw - tmpfs tmpfs rw\n"
+                               "34 24 0:53 / /dev/shm rw - tmpfs shm rw\n"
+                               "35 24 8:2 / /srv rw - xfs /dev/sdb1 rw\n"
+                               "36 24 8:3 /@ /work rw - btrfs /dev/sdc1 rw\n";
 
     const QList<rfm::core::LinuxMountInfo> mounts = rfm::core::parseLinuxMountInfo(fixture);
-    QCOMPARE(mounts.size(), 6);
-    QCOMPARE(mounts.at(1).fileSystemType, QByteArrayLiteral("fuse.rclone"));
-    QCOMPARE(mounts.at(2).fileSystemType, QByteArrayLiteral("fuseblk"));
-    QCOMPARE(mounts.at(3).fileSystemType, QByteArrayLiteral("cifs"));
-    QCOMPARE(mounts.at(4).fileSystemType, QByteArrayLiteral("nfs"));
-    QCOMPARE(mounts.at(5).fileSystemType, QByteArrayLiteral("fuse.portal"));
+    QCOMPARE(mounts.size(), 7);
+    const auto hasType = [&mounts](const QByteArray& fileSystemType) {
+        return std::ranges::any_of(mounts,
+                                   [&fileSystemType](const rfm::core::LinuxMountInfo& mount) {
+                                       return mount.fileSystemType == fileSystemType;
+                                   });
+    };
+    QVERIFY(hasType(QByteArrayLiteral("fuse.rclone")));
+    QVERIFY(hasType(QByteArrayLiteral("fuseblk")));
+    QVERIFY(hasType(QByteArrayLiteral("nfs")));
+    QVERIFY(hasType(QByteArrayLiteral("cifs")));
+    QVERIFY(hasType(QByteArrayLiteral("ext4")));
+    QVERIFY(hasType(QByteArrayLiteral("xfs")));
+    QVERIFY(hasType(QByteArrayLiteral("btrfs")));
     QVERIFY(std::ranges::none_of(mounts, [](const rfm::core::LinuxMountInfo& mount) {
         return mount.fileSystemType == QByteArrayLiteral("proc") ||
                mount.fileSystemType == QByteArrayLiteral("sysfs") ||
-               mount.fileSystemType == QByteArrayLiteral("cgroup2");
+               mount.fileSystemType == QByteArrayLiteral("cgroup2") ||
+               mount.fileSystemType == QByteArrayLiteral("tmpfs") ||
+               mount.fileSystemType == QByteArrayLiteral("fuse.portal");
     }));
+}
+
+void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()
+{
+    QTemporaryDir first;
+    QTemporaryDir second;
+    QVERIFY(first.isValid());
+    QVERIFY(second.isValid());
+    const QList<rfm::core::LocalStorageMount> firstSnapshot{
+        {first.path(), QStringLiteral("/dev/first"), QByteArrayLiteral("ext4"),
+         QStringLiteral("First"), 1024, false, true, true}};
+    const QList<rfm::core::LocalStorageMount> secondSnapshot{
+        firstSnapshot.constFirst(),
+        {second.path(), QStringLiteral("/dev/second"), QByteArrayLiteral("vfat"),
+         QStringLiteral("Second"), 2048, false, true, true}};
+
+    const rfm::core::LocalStorageSnapshot firstResult =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(firstSnapshot);
+    const rfm::core::LocalStorageSnapshot unchangedResult =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(firstSnapshot);
+    const rfm::core::LocalStorageSnapshot secondResult =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(secondSnapshot);
+    QCOMPARE(firstResult.volumes.size(), 1);
+    QCOMPARE(firstResult.volumes.constFirst().rootPath, first.path());
+    QCOMPARE(firstResult.fingerprint, unchangedResult.fingerprint);
+    QCOMPARE(secondResult.volumes.size(), 2);
+    QVERIFY(firstResult.fingerprint != secondResult.fingerprint);
 }
 
 void LocalFileSystemTest::filtersBindMountsAndKeepsVisibleOvermount()

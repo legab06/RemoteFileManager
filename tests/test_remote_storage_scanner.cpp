@@ -181,6 +181,7 @@ class RemoteStorageScannerTest final : public QObject
     void capsLabelsAndTopologyWorkConservatively();
     void exposesMountInfoFingerprintAfterSuccessfulScan();
     void keepsFuseVolumesNavigableWhenNoBlockDeviceExists();
+    void filtersPseudoMountsBeforeApplyingTheMountLimit();
 };
 
 void RemoteStorageScannerTest::yieldsAndCompletesAClassifiedScan()
@@ -376,6 +377,25 @@ void RemoteStorageScannerTest::keepsFuseVolumesNavigableWhenNoBlockDeviceExists(
     QCOMPARE(volumes.at(1).fileSystemType, QByteArrayLiteral("fuseblk"));
     QCOMPARE(volumes.at(1).kind, rfm::core::StorageKind::Unknown);
     QCOMPARE(volumes.at(2).kind, rfm::core::StorageKind::Network);
+}
+
+void RemoteStorageScannerTest::filtersPseudoMountsBeforeApplyingTheMountLimit()
+{
+    auto reader = std::make_unique<FakeRemoteStorageReader>();
+    for (int index = 1; index <= 160; ++index) {
+        reader->mountInfo += QByteArray::number(index) + " 1 0:" + QByteArray::number(index) +
+                             " / /run/container/" + QByteArray::number(index) +
+                             " rw - tmpfs tmpfs rw\n";
+    }
+    reader->mountInfo += blockMount(200, "8:1", "/data", "/dev/sda1");
+    rfm::ssh::RemoteStorageScanner::Limits limits;
+    limits.maximumMounts = 1;
+    rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 14, limits);
+
+    QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::Completed);
+    const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
+    QCOMPARE(volumes.size(), 1);
+    QCOMPARE(volumes.constFirst().rootPath, QStringLiteral("/data"));
 }
 
 QTEST_MAIN(RemoteStorageScannerTest)

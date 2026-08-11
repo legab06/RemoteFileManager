@@ -136,17 +136,21 @@ bool demonstratedAttachmentAlias(const LinuxMountInfo& candidate, const LinuxMou
 
 bool isPseudoFileSystem(const QByteArray& fileSystemType)
 {
+    // These filesystems expose kernel, session or RAM-backed state rather than
+    // durable user storage. Keep this explicit list narrow: generic fuse.* and
+    // fuseblk are intentionally absent because they can be navigable volumes.
     static const QSet<QByteArray> pseudoTypes{
         QByteArrayLiteral("autofs"),     QByteArrayLiteral("bpf"),
         QByteArrayLiteral("cgroup"),     QByteArrayLiteral("cgroup2"),
         QByteArrayLiteral("configfs"),   QByteArrayLiteral("debugfs"),
         QByteArrayLiteral("devpts"),     QByteArrayLiteral("devtmpfs"),
-        QByteArrayLiteral("efivarfs"),   QByteArrayLiteral("fusectl"),
-        QByteArrayLiteral("hugetlbfs"),  QByteArrayLiteral("mqueue"),
-        QByteArrayLiteral("nsfs"),       QByteArrayLiteral("proc"),
-        QByteArrayLiteral("pstore"),     QByteArrayLiteral("ramfs"),
-        QByteArrayLiteral("rpc_pipefs"), QByteArrayLiteral("securityfs"),
-        QByteArrayLiteral("sysfs"),      QByteArrayLiteral("tracefs")};
+        QByteArrayLiteral("efivarfs"),   QByteArrayLiteral("fuse.portal"),
+        QByteArrayLiteral("fusectl"),    QByteArrayLiteral("hugetlbfs"),
+        QByteArrayLiteral("mqueue"),     QByteArrayLiteral("nsfs"),
+        QByteArrayLiteral("proc"),       QByteArrayLiteral("pstore"),
+        QByteArrayLiteral("ramfs"),      QByteArrayLiteral("rpc_pipefs"),
+        QByteArrayLiteral("securityfs"), QByteArrayLiteral("sysfs"),
+        QByteArrayLiteral("tmpfs"),      QByteArrayLiteral("tracefs")};
     return pseudoTypes.contains(fileSystemType.trimmed().toLower());
 }
 

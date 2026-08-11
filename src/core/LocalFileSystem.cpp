@@ -38,6 +38,45 @@ QString rootIdentity(const QString& rootPath)
     return identity;
 }
 
+QList<LocalStorageMount> mountedStorageSnapshot()
+{
+    QList<LocalStorageMount> snapshot;
+    const QList<QStorageInfo> mountedVolumes = QStorageInfo::mountedVolumes();
+    snapshot.reserve(mountedVolumes.size());
+    for (const QStorageInfo& storage : mountedVolumes) {
+        snapshot.push_back({storage.rootPath(), QFile::decodeName(storage.device()),
+                            storage.fileSystemType(), storage.name(), storage.bytesTotal(),
+                            storage.isReadOnly(), storage.isValid(), storage.isReady()});
+    }
+    return snapshot;
+}
+
+QString storageMountIdentity(const LocalStorageMount& storage)
+{
+    const QString rootPath = QDir::cleanPath(storage.rootPath);
+    return QStringLiteral("%1\n%2\n%3\n%4")
+        .arg(rootPath, storage.device, QString::fromLatin1(storage.fileSystemType),
+             storage.readOnly ? QStringLiteral("ro") : QStringLiteral("rw"));
+}
+
+QByteArray storageFingerprint(const QList<LocalStorageMount>& snapshot)
+{
+    QStringList identities;
+    identities.reserve(snapshot.size());
+    for (const LocalStorageMount& storage : snapshot) {
+        if (!storage.valid || !storage.ready || storage.rootPath.isEmpty()) {
+            continue;
+        }
+        const QString rootPath = QDir::cleanPath(storage.rootPath);
+        if (!rootPath.isEmpty()) {
+            identities.push_back(storageMountIdentity(storage));
+        }
+    }
+    std::ranges::sort(identities);
+    return QCryptographicHash::hash(identities.join(QChar{'\n'}).toUtf8(),
+                                    QCryptographicHash::Sha256);
+}
+
 } // namespace
 
 #ifdef Q_OS_LINUX
@@ -256,38 +295,45 @@ LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
     return {directory.absolutePath(), std::move(entries), {}};
 }
 
-QList<StorageVolume> LocalFileSystem::mountedVolumes()
+QList<StorageVolume> LocalFileSystem::mountedVolumes() { return mountedVolumeSnapshot().volumes; }
+
+LocalStorageSnapshot LocalFileSystem::mountedVolumeSnapshot()
+{
+    return makeStorageSnapshot(mountedStorageSnapshot());
+}
+
+LocalStorageSnapshot LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot)
 {
     QList<StorageVolume> volumes;
     QSet<QString> roots;
     const QString systemRootIdentity = rootIdentity(QDir::rootPath());
-    for (const QStorageInfo& storage : QStorageInfo::mountedVolumes()) {
-        if (!storage.isValid() || !storage.isReady() || storage.rootPath().isEmpty()) {
+    for (const LocalStorageMount& storage : snapshot) {
+        if (!storage.valid || !storage.ready || storage.rootPath.isEmpty()) {
             continue;
         }
-        const QString rootPath = QDir::cleanPath(storage.rootPath());
+        const QString rootPath = QDir::cleanPath(storage.rootPath);
         const QString identity = rootIdentity(rootPath);
         if (!QFileInfo(rootPath).isDir() || identity.isEmpty() || roots.contains(identity)) {
             continue;
         }
         roots.insert(identity);
-        const QString device = QFile::decodeName(storage.device());
+        const QString device = storage.device;
         const StorageDeviceEvidence platformDetails = platformStorageDetails(device);
         const StorageClassificationEvidence evidence{
-            identity == systemRootIdentity,    isNetworkFileSystem(storage.fileSystemType()),
+            identity == systemRootIdentity,    isNetworkFileSystem(storage.fileSystemType),
             platformDetails.blockDevice,       platformDetails.virtualBlockDevice,
             platformDetails.externalTransport, platformDetails.topologyComplete};
-        const qint64 signedTotal = storage.bytesTotal();
+        const qint64 signedTotal = storage.bytesTotal;
         StorageVolume volume;
         volume.rootPath = rootPath;
         volume.device = device;
-        volume.fileSystemType = storage.fileSystemType();
+        volume.fileSystemType = storage.fileSystemType;
         volume.bytesTotal = signedTotal > 0 ? static_cast<quint64>(signedTotal) : quint64{0};
         volume.kind = classifyStorage(evidence);
         volume.removable = platformDetails.removable;
         volume.ejectable = platformDetails.ejectable;
-        volume.readOnly = storage.isReadOnly();
-        volume.fileSystemLabel = storage.name().trimmed();
+        volume.readOnly = storage.readOnly;
+        volume.fileSystemLabel = storage.fileSystemLabel.trimmed();
         volume.deviceModel = platformDetails.deviceModel;
         volume.displayName = storageDisplayName(volume.fileSystemLabel, volume.deviceModel,
                                                 volume.device, volume.rootPath);
@@ -296,29 +342,12 @@ QList<StorageVolume> LocalFileSystem::mountedVolumes()
     std::ranges::sort(volumes, [](const StorageVolume& first, const StorageVolume& second) {
         return first.rootPath.compare(second.rootPath, Qt::CaseInsensitive) < 0;
     });
-    return volumes;
+    return {std::move(volumes), storageFingerprint(snapshot)};
 }
 
 QByteArray LocalFileSystem::mountedVolumeFingerprint()
 {
-    QStringList identities;
-    for (const QStorageInfo& storage : QStorageInfo::mountedVolumes()) {
-        if (!storage.isValid() || !storage.isReady() || storage.rootPath().isEmpty()) {
-            continue;
-        }
-        const QString rootPath = QDir::cleanPath(storage.rootPath());
-        if (rootPath.isEmpty()) {
-            continue;
-        }
-        identities.push_back(
-            QStringLiteral("%1\n%2\n%3\n%4")
-                .arg(rootPath, QFile::decodeName(storage.device()),
-                     QString::fromLatin1(storage.fileSystemType()),
-                     storage.isReadOnly() ? QStringLiteral("ro") : QStringLiteral("rw")));
-    }
-    std::ranges::sort(identities);
-    return QCryptographicHash::hash(identities.join(QChar{'\n'}).toUtf8(),
-                                    QCryptographicHash::Sha256);
+    return storageFingerprint(mountedStorageSnapshot());
 }
 
 void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
@@ -333,8 +362,8 @@ void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
 
 void LocalFileSystemWorker::listVolumes()
 {
-    const QList<StorageVolume> volumes = LocalFileSystem::mountedVolumes();
-    emit volumesListed(volumes, LocalFileSystem::mountedVolumeFingerprint());
+    LocalStorageSnapshot snapshot = LocalFileSystem::mountedVolumeSnapshot();
+    emit volumesListed(std::move(snapshot.volumes), std::move(snapshot.fingerprint));
 }
 
 void LocalFileSystemWorker::probeVolumes(quint64 requestId)
