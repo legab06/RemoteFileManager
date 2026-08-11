@@ -161,6 +161,8 @@ class MainWindowTest final : public QObject
     void symbolicLinkNavigationFailureDoesNotDisconnect();
     void splitRoutesSerializedListingsPerPane();
     void activePaneOwnsNavigationRefreshAndUploadTargets();
+    void navigationKeepsInitiatingPaneActive_data();
+    void navigationKeepsInitiatingPaneActive();
     void splitListingErrorLeavesOtherPaneUntouched();
     void historyActionsFollowActivePaneAndIgnoreFailedOrObsoleteListings();
     void copiesAndMovesSelectionToOtherPane();
@@ -1470,6 +1472,88 @@ void MainWindowTest::activePaneOwnsNavigationRefreshAndUploadTargets()
     QCOMPARE(transfers.size(), 2);
     const auto download = transfers.at(1).constFirst().value<rfm::core::TransferRequest>();
     QCOMPARE(download.source, QStringLiteral("/two/selected.txt"));
+}
+
+void MainWindowTest::navigationKeepsInitiatingPaneActive_data()
+{
+    QTest::addColumn<bool>("useSecondaryPane");
+    QTest::addColumn<QString>("navigation");
+
+    const QStringList navigations{QStringLiteral("open"), QStringLiteral("parent"),
+                                  QStringLiteral("back"), QStringLiteral("forward"),
+                                  QStringLiteral("refresh")};
+    for (const bool useSecondaryPane : {false, true}) {
+        const QString paneName = useSecondaryPane ? QStringLiteral("right")
+                                                  : QStringLiteral("left");
+        for (const QString& navigation : navigations) {
+            QTest::newRow(qPrintable(paneName + QLatin1Char('-') + navigation))
+                << useSecondaryPane << navigation;
+        }
+    }
+}
+
+void MainWindowTest::navigationKeepsInitiatingPaneActive()
+{
+    QFETCH(bool, useSecondaryPane);
+    QFETCH(QString, navigation);
+
+    rfm::app::MainWindow window;
+    window.show();
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/root")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64,QString)), nullptr, nullptr);
+    QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
+    rfm::app::FileBrowserPane* const secondary = workspace->otherVisiblePane();
+    const quint64 initialRequestId = requested.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection,
+        Q_ARG(quint64, initialRequestId), Q_ARG(QString, QStringLiteral("/root")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+
+    rfm::app::FileBrowserPane* const pane =
+        useSecondaryPane ? secondary : workspace->primaryPane();
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("child"), 0, {}, true, false}};
+    pane->showDirectory(QStringLiteral("/root"), QStringLiteral("/root"), {},
+                        rfm::app::PaneNavigation::Initial);
+    pane->showDirectory(QStringLiteral("/root/current"), QStringLiteral("/root/current"),
+                        entries, rfm::app::PaneNavigation::Normal);
+    if (navigation == QStringLiteral("forward")) {
+        pane->showDirectory(QStringLiteral("/root"), QStringLiteral("/root"), entries,
+                            rfm::app::PaneNavigation::Back);
+    }
+
+    QTest::mouseClick(pane->fileTable()->viewport(), Qt::LeftButton);
+    QCOMPARE(workspace->activePane(), pane);
+    requested.clear();
+
+    if (navigation == QStringLiteral("open")) {
+        QVERIFY(QMetaObject::invokeMethod(pane->fileTable(), "cellDoubleClicked",
+                                          Qt::DirectConnection, Q_ARG(int, 0), Q_ARG(int, 0)));
+    } else if (navigation == QStringLiteral("parent")) {
+        window.findChild<QAction*>(QStringLiteral("upAction"))->trigger();
+    } else if (navigation == QStringLiteral("back")) {
+        window.findChild<QAction*>(QStringLiteral("backAction"))->trigger();
+    } else if (navigation == QStringLiteral("forward")) {
+        window.findChild<QAction*>(QStringLiteral("forwardAction"))->trigger();
+    } else {
+        window.findChild<QAction*>(QStringLiteral("refreshAction"))->trigger();
+    }
+
+    QCoreApplication::processEvents();
+    QCOMPARE(requested.size(), 1);
+    QCOMPARE(workspace->activePane(), pane);
+    const quint64 requestId = requested.constFirst().constFirst().toULongLong();
+    const QString resultPath = requested.constFirst().at(1).toString();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
+        Q_ARG(QString, resultPath), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCoreApplication::processEvents();
+
+    QCOMPARE(workspace->activePane(), pane);
 }
 
 void MainWindowTest::splitListingErrorLeavesOtherPaneUntouched()
