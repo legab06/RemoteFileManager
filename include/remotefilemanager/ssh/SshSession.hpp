@@ -82,7 +82,7 @@ class SshSession final : public QObject
     void scheduleStorageProbeStep();
     void cancelStorageProbe();
     void processVolumeCommandStep();
-    void scheduleVolumeCommandStep();
+    void scheduleVolumeCommandStep(bool activityAvailable = true);
     void startRemoteStorageScanner(quint64 requestId);
     void startPendingRemoteWork();
     void completeShutdownIfReady();

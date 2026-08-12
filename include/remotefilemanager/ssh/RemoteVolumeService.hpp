@@ -47,6 +47,31 @@ class RemoteLinuxVolumeService final
     [[nodiscard]] static rfm::core::VolumeOperationResult
     operationResult(const rfm::core::VolumeOperationRequest& request,
                     const rfm::core::VolumeCommandResult& commandResult);
+    [[nodiscard]] static rfm::core::VolumeOperationResult
+    interactiveOperationResult(const rfm::core::VolumeOperationRequest& request,
+                               const rfm::core::VolumeCommandResult& commandResult,
+                               std::optional<rfm::core::VolumeOperationError> protocolError);
+};
+
+struct SshCommandPollSchedule {
+    int delayMilliseconds{0};
+    quint64 generation{0};
+};
+
+class SshCommandPollScheduler final
+{
+  public:
+    static constexpr int idleDelayMilliseconds = 10;
+    static constexpr qint64 commandTimeoutMilliseconds = 60'000;
+
+    [[nodiscard]] std::optional<SshCommandPollSchedule> schedule(bool activityAvailable);
+    [[nodiscard]] bool consume(quint64 generation);
+    void cancel();
+    [[nodiscard]] bool pending() const;
+
+  private:
+    bool m_pending{false};
+    quint64 m_generation{0};
 };
 
 enum class RemotePolkitPromptEvent {
@@ -66,6 +91,8 @@ class RemotePolkitPromptParser final
     [[nodiscard]] bool authenticationCompleted() const;
     [[nodiscard]] bool permissionDenied() const;
     [[nodiscard]] bool volumeBusy() const;
+    [[nodiscard]] bool deviceNotFound() const;
+    [[nodiscard]] std::optional<rfm::core::VolumeOperationError> operationError() const;
     void clear();
 
   private:
@@ -73,8 +100,10 @@ class RemotePolkitPromptParser final
     bool m_passwordSent{false};
     bool m_passwordPromptSeen{false};
     bool m_authenticationCompleted{false};
+    bool m_authenticationFailed{false};
     bool m_permissionDenied{false};
     bool m_volumeBusy{false};
+    bool m_deviceNotFound{false};
 };
 
 } // namespace rfm::ssh

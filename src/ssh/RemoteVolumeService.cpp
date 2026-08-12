@@ -151,6 +151,50 @@ RemoteLinuxVolumeService::operationResult(const rfm::core::VolumeOperationReques
     return rfm::core::makeVolumeOperationResult(request, error, diagnostic);
 }
 
+rfm::core::VolumeOperationResult RemoteLinuxVolumeService::interactiveOperationResult(
+    const rfm::core::VolumeOperationRequest& request,
+    const rfm::core::VolumeCommandResult& commandResult,
+    std::optional<rfm::core::VolumeOperationError> protocolError)
+{
+    if (protocolError.has_value()) {
+        return rfm::core::makeVolumeOperationResult(request, *protocolError);
+    }
+    return operationResult(request, commandResult);
+}
+
+std::optional<SshCommandPollSchedule> SshCommandPollScheduler::schedule(bool activityAvailable)
+{
+    if (m_pending) {
+        return std::nullopt;
+    }
+    m_pending = true;
+    ++m_generation;
+    if (m_generation == 0) {
+        ++m_generation;
+    }
+    return SshCommandPollSchedule{activityAvailable ? 0 : idleDelayMilliseconds, m_generation};
+}
+
+bool SshCommandPollScheduler::consume(quint64 generation)
+{
+    if (!m_pending || generation == 0 || generation != m_generation) {
+        return false;
+    }
+    m_pending = false;
+    return true;
+}
+
+void SshCommandPollScheduler::cancel()
+{
+    m_pending = false;
+    ++m_generation;
+    if (m_generation == 0) {
+        ++m_generation;
+    }
+}
+
+bool SshCommandPollScheduler::pending() const { return m_pending; }
+
 RemotePolkitPromptEvent RemotePolkitPromptParser::consume(const QByteArray& output)
 {
     if (output.isEmpty()) {
@@ -193,11 +237,15 @@ RemotePolkitPromptEvent RemotePolkitPromptParser::consume(const QByteArray& outp
                          m_recentOutput.contains("permission denied");
     m_volumeBusy = m_volumeBusy || m_recentOutput.contains("target is busy") ||
                    m_recentOutput.contains("device is busy");
+    m_deviceNotFound = m_deviceNotFound || m_recentOutput.contains("no such file") ||
+                       m_recentOutput.contains("does not exist") ||
+                       m_recentOutput.contains("error looking up object for device");
     const bool explicitFailure = m_recentOutput.contains("authentication failed") ||
                                  m_recentOutput.contains("authentication failure") ||
                                  m_recentOutput.contains("sorry, try again");
     const bool passwordPrompt = m_recentOutput.contains("password:");
     if (explicitFailure || (m_passwordSent && passwordPrompt && !m_authenticationCompleted)) {
+        m_authenticationFailed = true;
         m_recentOutput.fill('\0');
         m_recentOutput.clear();
         return RemotePolkitPromptEvent::AuthenticationFailed;
@@ -230,6 +278,25 @@ bool RemotePolkitPromptParser::permissionDenied() const { return m_permissionDen
 
 bool RemotePolkitPromptParser::volumeBusy() const { return m_volumeBusy; }
 
+bool RemotePolkitPromptParser::deviceNotFound() const { return m_deviceNotFound; }
+
+std::optional<rfm::core::VolumeOperationError> RemotePolkitPromptParser::operationError() const
+{
+    if (m_authenticationFailed) {
+        return rfm::core::VolumeOperationError::AuthenticationFailed;
+    }
+    if (m_volumeBusy) {
+        return rfm::core::VolumeOperationError::VolumeBusy;
+    }
+    if (m_deviceNotFound) {
+        return rfm::core::VolumeOperationError::DeviceNotFound;
+    }
+    if (m_permissionDenied) {
+        return rfm::core::VolumeOperationError::PermissionDenied;
+    }
+    return std::nullopt;
+}
+
 void RemotePolkitPromptParser::clear()
 {
     m_recentOutput.fill('\0');
@@ -237,8 +304,10 @@ void RemotePolkitPromptParser::clear()
     m_passwordSent = false;
     m_passwordPromptSeen = false;
     m_authenticationCompleted = false;
+    m_authenticationFailed = false;
     m_permissionDenied = false;
     m_volumeBusy = false;
+    m_deviceNotFound = false;
 }
 
 } // namespace rfm::ssh

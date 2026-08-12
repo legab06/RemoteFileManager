@@ -326,6 +326,13 @@ MainWindow::~MainWindow()
         m_autoRefreshTimer->stop();
     }
     stopAutomaticRefresh();
+    if (m_volumeThread != nullptr && m_volumeThread->isRunning()) {
+        QObject::disconnect(m_volumeOperationWorker, nullptr, this, nullptr);
+        QObject::disconnect(this, nullptr, m_volumeOperationWorker, nullptr);
+        m_volumeOperationWorker->requestCancellation();
+        m_volumeThread->quit();
+        m_volumeThread->wait();
+    }
     if (m_sshThread != nullptr && m_sshThread->isRunning()) {
         QEventLoop shutdownLoop;
         connect(m_sshSession, &rfm::ssh::SshSession::transfersShutdown, &shutdownLoop,
@@ -338,10 +345,6 @@ MainWindow::~MainWindow()
     if (m_historySaveTimer->isActive()) {
         m_historySaveTimer->stop();
         saveOperationHistory();
-    }
-    if (m_volumeThread != nullptr && m_volumeThread->isRunning()) {
-        m_volumeThread->quit();
-        m_volumeThread->wait();
     }
     if (m_localThread != nullptr && m_localThread->isRunning()) {
         m_localThread->quit();
@@ -2554,6 +2557,8 @@ MainWindow::volumeOperationErrorMessage(const rfm::core::VolumeOperationResult& 
         return tr("Authentication is required to %1 %2.").arg(operation, result.device);
     case rfm::core::VolumeOperationError::AuthenticationFailed:
         return tr("Authentication failed while trying to %1 %2.").arg(operation, result.device);
+    case rfm::core::VolumeOperationError::Cancelled:
+        return tr("The request to %1 %2 was cancelled.").arg(operation, result.device);
     case rfm::core::VolumeOperationError::PermissionDenied:
         return tr("Permission was denied while trying to %1 %2.").arg(operation, result.device);
     case rfm::core::VolumeOperationError::DeviceNotFound:

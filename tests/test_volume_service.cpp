@@ -1,6 +1,10 @@
 #include "remotefilemanager/core/VolumeService.hpp"
 
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QHash>
+#include <QTemporaryDir>
 #include <QTest>
 
 #include <chrono>
@@ -28,7 +32,7 @@ class FakeCommandRunner final : public rfm::core::VolumeCommandRunner
     }
 
     QHash<QString, QString> executables;
-    rfm::core::VolumeCommandResult result{true, false, false, 0, {}, {}};
+    rfm::core::VolumeCommandResult result{true, false, false, 0, {}, {}, false};
     int runCount{0};
     QString lastProgram;
     QStringList lastArguments;
@@ -49,8 +53,8 @@ class BlockingCommandRunner final : public rfm::core::VolumeCommandRunner
         std::unique_lock lock(mutex);
         entered = true;
         condition.notify_all();
-        condition.wait(lock, [this] { return released; });
-        return {true, false, false, 0, {}, {}};
+        condition.wait(lock, [this] { return released || cancelled; });
+        return {true, false, false, cancelled ? -1 : 0, {}, {}, cancelled};
     }
 
     bool waitUntilEntered()
@@ -66,11 +70,19 @@ class BlockingCommandRunner final : public rfm::core::VolumeCommandRunner
         condition.notify_all();
     }
 
+    void requestCancellation() override
+    {
+        std::lock_guard lock(mutex);
+        cancelled = true;
+        condition.notify_all();
+    }
+
   private:
     std::mutex mutex;
     std::condition_variable condition;
     bool entered{false};
     bool released{false};
+    bool cancelled{false};
 };
 
 rfm::core::VolumeOperationRequest
@@ -97,6 +109,8 @@ class VolumeServiceTest final : public QObject
     void reportsUnavailableTools();
     void passesDeviceAsOneArgumentAndIgnoresPresentationMetadata();
     void preventsConcurrentOperationsOnOneDevice();
+    void cancellationInterruptsOperationAndReleasesDeviceLock();
+    void cancellationTerminatesOwnedProcessQuickly();
 };
 
 void VolumeServiceTest::refusesToUnmountRootOrSystemVolume()
@@ -122,7 +136,8 @@ void VolumeServiceTest::reportsDisappearedDevice()
     auto runner = std::make_unique<FakeCommandRunner>();
     runner->executables.insert(QStringLiteral("udisksctl"), QStringLiteral("/usr/bin/udisksctl"));
     runner->result = {true, false, false,
-                      1,    {},    QStringLiteral("Error looking up object for device /dev/sde1")};
+                      1,    {},    QStringLiteral("Error looking up object for device /dev/sde1"),
+                      false};
     rfm::core::LocalLinuxVolumeService service(std::move(runner));
 
     const auto result = service.execute(requestFor(rfm::core::VolumeOperation::Mount));
@@ -153,7 +168,7 @@ void VolumeServiceTest::mapsCommandErrors()
 
     auto runner = std::make_unique<FakeCommandRunner>();
     runner->executables.insert(QStringLiteral("udisksctl"), QStringLiteral("/usr/bin/udisksctl"));
-    runner->result = {true, false, false, 1, {}, diagnostic};
+    runner->result = {true, false, false, 1, {}, diagnostic, false};
     rfm::core::LocalLinuxVolumeService service(std::move(runner));
 
     const auto result = service.execute(requestFor(rfm::core::VolumeOperation::Unmount));
@@ -260,6 +275,84 @@ void VolumeServiceTest::preventsConcurrentOperationsOnOneDevice()
     QCOMPARE(concurrentResult.error, rfm::core::VolumeOperationError::VolumeBusy);
     QVERIFY(firstResult.has_value());
     QVERIFY(firstResult->succeeded());
+}
+
+void VolumeServiceTest::cancellationInterruptsOperationAndReleasesDeviceLock()
+{
+    auto runner = std::make_unique<BlockingCommandRunner>();
+    BlockingCommandRunner* runnerObserver = runner.get();
+    rfm::core::LocalLinuxVolumeService service(std::move(runner));
+    std::optional<rfm::core::VolumeOperationResult> result;
+
+    std::thread operation([&service, &result] {
+        result = service.execute(requestFor(rfm::core::VolumeOperation::Mount));
+    });
+    const bool entered = runnerObserver->waitUntilEntered();
+    if (!entered) {
+        runnerObserver->release();
+        operation.join();
+        QFAIL("The operation did not reach the command runner");
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    service.requestCancellation();
+    operation.join();
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    QVERIFY(elapsed < std::chrono::seconds(1));
+    QVERIFY(result.has_value());
+    QCOMPARE(result->error, rfm::core::VolumeOperationError::Cancelled);
+    const auto afterCancellation = service.execute(requestFor(rfm::core::VolumeOperation::Unmount));
+    QCOMPARE(afterCancellation.error, rfm::core::VolumeOperationError::Cancelled);
+    QVERIFY(afterCancellation.error != rfm::core::VolumeOperationError::VolumeBusy);
+}
+
+void VolumeServiceTest::cancellationTerminatesOwnedProcessQuickly()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString executable = directory.filePath(QStringLiteral("udisksctl"));
+    const QString marker = directory.filePath(QStringLiteral("started"));
+    QFile script(executable);
+    QVERIFY(script.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    const QByteArray contents =
+        QByteArrayLiteral("#!/bin/sh\n") + QByteArrayLiteral("touch '") + marker.toUtf8() +
+        QByteArrayLiteral("'\ntrap 'exit 0' TERM\nwhile :; do sleep 1; done\n");
+    QCOMPARE(script.write(contents), contents.size());
+    script.close();
+    QVERIFY(QFile::setPermissions(executable, QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                                  QFileDevice::ExeOwner));
+    const QByteArray originalPath = qgetenv("PATH");
+    struct PathRestorer {
+        QByteArray value;
+        ~PathRestorer() { qputenv("PATH", value); }
+    } pathRestorer{originalPath};
+    qputenv("PATH", directory.path().toUtf8() + ':' + originalPath);
+
+    rfm::core::LocalLinuxVolumeService service;
+    std::optional<rfm::core::VolumeOperationResult> result;
+    std::thread operation([&service, &result] {
+        result = service.execute(requestFor(rfm::core::VolumeOperation::Mount));
+    });
+    QElapsedTimer startupTimer;
+    startupTimer.start();
+    while (!QFile::exists(marker) && startupTimer.elapsed() < 2000) {
+        std::this_thread::yield();
+    }
+    if (!QFile::exists(marker)) {
+        service.requestCancellation();
+        operation.join();
+        QFAIL("The fixture process did not start");
+    }
+
+    QElapsedTimer cancellationTimer;
+    cancellationTimer.start();
+    service.requestCancellation();
+    operation.join();
+
+    QVERIFY(cancellationTimer.elapsed() < 1000);
+    QVERIFY(result.has_value());
+    QCOMPARE(result->error, rfm::core::VolumeOperationError::Cancelled);
 }
 
 QTEST_GUILESS_MAIN(VolumeServiceTest)

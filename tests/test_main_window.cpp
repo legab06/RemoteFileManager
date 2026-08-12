@@ -19,6 +19,7 @@
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QHeaderView>
 #include <QInputDialog>
@@ -42,6 +43,11 @@
 #include <QTimer>
 #include <QToolBar>
 #include <QTreeWidget>
+
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
 
 namespace
 {
@@ -92,6 +98,45 @@ class FixedVolumeService final : public rfm::core::VolumeService
 
   private:
     rfm::core::VolumeOperationError m_error;
+};
+
+struct BlockingVolumeServiceState {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool entered{false};
+    bool cancellationRequested{false};
+    bool completed{false};
+};
+
+class BlockingVolumeService final : public rfm::core::VolumeService
+{
+  public:
+    explicit BlockingVolumeService(std::shared_ptr<BlockingVolumeServiceState> state)
+        : m_state(std::move(state))
+    {}
+
+    rfm::core::VolumeOperationResult
+    execute(const rfm::core::VolumeOperationRequest& request) override
+    {
+        std::unique_lock lock(m_state->mutex);
+        m_state->entered = true;
+        m_state->condition.notify_all();
+        m_state->condition.wait(lock, [this] { return m_state->cancellationRequested; });
+        m_state->completed = true;
+        m_state->condition.notify_all();
+        return rfm::core::makeVolumeOperationResult(request,
+                                                    rfm::core::VolumeOperationError::Cancelled);
+    }
+
+    void requestCancellation() override
+    {
+        std::lock_guard lock(m_state->mutex);
+        m_state->cancellationRequested = true;
+        m_state->condition.notify_all();
+    }
+
+  private:
+    std::shared_ptr<BlockingVolumeServiceState> m_state;
 };
 
 rfm::core::TransferProgress progress(quint64 id, rfm::core::TransferState state,
@@ -276,6 +321,7 @@ class MainWindowTest final : public QObject
     void volumeOperationSuccessWaitsForSystemRefresh();
     void volumeOperationErrorsRestoreUi_data();
     void volumeOperationErrorsRestoreUi();
+    void closingWindowCancelsBusyLocalVolumeWorker();
     void successfulUnmountEvacuatesOnlyAffectedPanes_data();
     void successfulUnmountEvacuatesOnlyAffectedPanes();
     void failedUnmountDoesNotEvacuatePane();
@@ -283,7 +329,8 @@ class MainWindowTest final : public QObject
     void remoteMountWaitsForRefreshAndOpensObservedMountPoint();
     void remoteAuthenticationDialogShowsContextAndCancelReleasesBusy();
     void remoteAuthenticationSubmitsEphemeralPassword();
-    void remoteAuthenticationFailureReleasesBusy();
+    void remoteInteractiveBusinessErrorsReleaseBusy_data();
+    void remoteInteractiveBusinessErrorsReleaseBusy();
     void disconnectClosesRemoteAuthenticationDialog();
     void failedRemoteUnmountDoesNotEvacuateOrRefresh();
     void remoteTimeoutRestoresUiWithoutRefresh();
@@ -3131,6 +3178,48 @@ void MainWindowTest::volumeOperationErrorsRestoreUi()
     QCOMPARE(refreshes.size(), refreshExpected ? 1 : 0);
 }
 
+void MainWindowTest::closingWindowCancelsBusyLocalVolumeWorker()
+{
+    auto state = std::make_shared<BlockingVolumeServiceState>();
+    auto* const window =
+        new rfm::app::MainWindow(nullptr, {}, {}, std::make_unique<BlockingVolumeService>(state));
+    auto* const navigation = window->findChild<rfm::app::NavigationTree*>();
+    auto* const storageRefresh =
+        window->findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const mountButton = window->findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(storageRefresh != nullptr);
+    QVERIFY(mountButton != nullptr);
+    QTRY_VERIFY(storageRefresh->isEnabled());
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Blocking fixture");
+    volume.device = QStringLiteral("/dev/sde1");
+    volume.fileSystemType = QByteArrayLiteral("ext4");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const external =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("External devices"));
+    QVERIFY(external != nullptr);
+    navigation->tree()->setCurrentItem(external->child(0));
+    mountButton->click();
+
+    {
+        std::unique_lock lock(state->mutex);
+        QVERIFY(state->condition.wait_for(lock, std::chrono::seconds(2),
+                                          [&state] { return state->entered; }));
+    }
+    QElapsedTimer shutdownTimer;
+    shutdownTimer.start();
+    delete window;
+
+    QVERIFY(shutdownTimer.elapsed() < 1000);
+    std::lock_guard lock(state->mutex);
+    QVERIFY(state->cancellationRequested);
+    QVERIFY(state->completed);
+}
+
 void MainWindowTest::successfulUnmountEvacuatesOnlyAffectedPanes_data()
 {
     QTest::addColumn<rfm::core::FileSource>("primarySource");
@@ -3543,8 +3632,20 @@ void MainWindowTest::remoteAuthenticationSubmitsEphemeralPassword()
     QVERIFY(item->text(0).contains(QStringLiteral("Mounting")));
 }
 
-void MainWindowTest::remoteAuthenticationFailureReleasesBusy()
+void MainWindowTest::remoteInteractiveBusinessErrorsReleaseBusy_data()
 {
+    QTest::addColumn<rfm::core::VolumeOperationError>("error");
+    QTest::addColumn<QString>("message");
+    QTest::newRow("authentication-failed") << rfm::core::VolumeOperationError::AuthenticationFailed
+                                           << QStringLiteral("Authentication failed");
+    QTest::newRow("volume-busy") << rfm::core::VolumeOperationError::VolumeBusy
+                                 << QStringLiteral("is busy");
+}
+
+void MainWindowTest::remoteInteractiveBusinessErrorsReleaseBusy()
+{
+    QFETCH(rfm::core::VolumeOperationError, error);
+    QFETCH(QString, message);
     rfm::app::MainWindow window;
     QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
@@ -3591,18 +3692,15 @@ void MainWindowTest::remoteAuthenticationFailureReleasesBusy()
     QVERIFY(password != nullptr);
     password->setText(QStringLiteral("wrong fixture"));
     dialog->accept();
+    QVERIFY(password->text().isEmpty());
     const rfm::core::VolumeOperationResult failure{
-        request.id,
-        request.operation,
-        request.target.device,
-        rfm::core::VolumeOperationError::AuthenticationFailed,
-        {}};
+        request.id, request.operation, request.target.device, error, {}};
     QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
                                       Qt::DirectConnection,
                                       Q_ARG(rfm::core::VolumeOperationResult, failure)));
     QVERIFY(!item->text(0).contains(QStringLiteral("Mounting")));
     QVERIFY(mountButton->isEnabled());
-    QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("Authentication failed")));
+    QVERIFY(window.statusBar()->currentMessage().contains(message));
     QCOMPARE(storageRequests.size(), 1);
 }
 

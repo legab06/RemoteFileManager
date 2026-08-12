@@ -21,6 +21,7 @@ enum class VolumeOperationError {
     NotSupported,
     AuthenticationRequired,
     AuthenticationFailed,
+    Cancelled,
     PermissionDenied,
     DeviceNotFound,
     VolumeBusy,
@@ -60,6 +61,7 @@ struct VolumeCommandResult {
     int exitCode{-1};
     QString standardOutput;
     QString standardError;
+    bool cancelled{false};
 };
 
 [[nodiscard]] VolumeOperationError
@@ -78,6 +80,8 @@ class VolumeCommandRunner
     [[nodiscard]] virtual QString findExecutable(const QString& name) const = 0;
     [[nodiscard]] virtual VolumeCommandResult
     run(const QString& program, const QStringList& arguments, int timeoutMilliseconds) = 0;
+    // May be called from another thread while run() is active.
+    virtual void requestCancellation() {}
 };
 
 class VolumeService
@@ -85,6 +89,8 @@ class VolumeService
   public:
     virtual ~VolumeService() = default;
     [[nodiscard]] virtual VolumeOperationResult execute(const VolumeOperationRequest& request) = 0;
+    // May be called from another thread while execute() is active.
+    virtual void requestCancellation() {}
 };
 
 class LocalLinuxVolumeService final : public VolumeService
@@ -92,6 +98,7 @@ class LocalLinuxVolumeService final : public VolumeService
   public:
     explicit LocalLinuxVolumeService(std::unique_ptr<VolumeCommandRunner> runner = {});
     [[nodiscard]] VolumeOperationResult execute(const VolumeOperationRequest& request) override;
+    void requestCancellation() override;
 
   private:
     [[nodiscard]] VolumeOperationResult executeUnlocked(const VolumeOperationRequest& request,
@@ -109,6 +116,8 @@ class VolumeOperationWorker final : public QObject
   public:
     explicit VolumeOperationWorker(std::unique_ptr<VolumeService> service,
                                    QObject* parent = nullptr);
+    // Thread-safe: shutdown calls this directly because execute() may occupy the worker thread.
+    void requestCancellation();
 
   public slots:
     void execute(rfm::core::VolumeOperationRequest request);

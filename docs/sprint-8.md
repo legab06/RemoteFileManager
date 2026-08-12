@@ -70,6 +70,14 @@ spéciaux d'un chemin de périphérique restent donc dans un argument unique ; l
 métadonnées de présentation ne sont pas transmises. Une limite de temps empêche aussi
 un processus système de rester bloqué indéfiniment.
 
+L'attente locale est découpée en tranches de 20 ms et consulte entre chaque tranche
+un indicateur d'annulation atomique. À la fermeture de RFM, le thread graphique peut
+donc demander directement l'annulation sans dépendre de la boucle d'événements du
+worker occupé. Seul le `QProcess` possédé par l'opération est terminé, puis tué après
+un délai de grâce borné si nécessaire. Le signal de résultat est déconnecté avant
+l'attente du thread, les verrous de device sont libérés par le retour normal du
+service et la fermeture ne reste pas suspendue au timeout de 60 secondes.
+
 ## Protections et erreurs
 
 - le démontage de `/` et de tout volume classé `System` est rejeté avant toute
@@ -187,6 +195,21 @@ coopérative avec un délai maximal de 60 secondes ; à expiration, seul le cana
 commande est fermé. Leurs délais, pertes de connexion et codes de sortie sont
 convertis en résultats structurés sans afficher directement
 stderr à l'utilisateur.
+
+Les lectures libssh restant non bloquantes, leur polling rend toujours la main à la
+boucle d'événements Qt. Lorsqu'aucune donnée ni terminaison n'est disponible, un seul
+prochain poll est armé à 10 ms ; lorsqu'une sortie vient d'être reçue, un poll à 0 ms
+permet de la drainer sans latence perceptible. Une génération invalide les timers
+anciens après reset. Le canal de commande ordinaire et le PTY Polkit utilisent la
+même politique, tout en conservant le timeout mural de 60 secondes et la détection de
+perte SSH à chaque poll.
+
+À la frontière du PTY, les erreurs métier reconnues par la machine d'état
+(`AuthenticationFailed`, `PermissionDenied`, `VolumeBusy` et `DeviceNotFound`) sont
+transportées sous forme d'enum jusqu'au `VolumeOperationResult`. Elles ne sont ni
+reformulées puis reparsées, ni marquées comme crash. Les erreurs libssh, d'écriture ou
+de canal restent au contraire des erreurs techniques ; les timeouts et pertes de
+connexion gardent leurs classifications dédiées.
 
 Sur un serveur headless, l'authentification interactive dépend de la capacité de
 Polkit/udisks2 à fournir son dialogue dans le PTY SSH. Un compte auquel Polkit oppose

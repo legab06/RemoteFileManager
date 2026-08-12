@@ -3,12 +3,14 @@
 #include "remotefilemanager/core/RemotePath.hpp"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QMutexLocker>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
 
 #include <algorithm>
+#include <atomic>
 #include <utility>
 
 namespace rfm::core
@@ -34,27 +36,74 @@ class QProcessVolumeCommandRunner final : public VolumeCommandRunner
         process.setProgram(program);
         process.setArguments(arguments);
         process.setProcessChannelMode(QProcess::SeparateChannels);
+        QElapsedTimer timer;
+        timer.start();
         process.start(QIODevice::ReadOnly);
-        if (!process.waitForStarted()) {
-            return {};
+
+        while (!process.waitForStarted(waitSliceMilliseconds)) {
+            if (m_cancellationRequested.load(std::memory_order_acquire)) {
+                stopProcess(process);
+                return commandResult(process, false, false, true);
+            }
+            if (process.state() == QProcess::NotRunning) {
+                return {};
+            }
+            if (timer.elapsed() >= timeoutMilliseconds) {
+                stopProcess(process);
+                return commandResult(process, false, true, false);
+            }
         }
-        if (!process.waitForFinished(timeoutMilliseconds)) {
+
+        while (process.state() != QProcess::NotRunning) {
+            if (m_cancellationRequested.load(std::memory_order_acquire)) {
+                stopProcess(process);
+                return commandResult(process, true, false, true);
+            }
+            const qint64 remaining = timeoutMilliseconds - timer.elapsed();
+            if (remaining <= 0) {
+                stopProcess(process);
+                return commandResult(process, true, true, false);
+            }
+            static_cast<void>(process.waitForFinished(
+                static_cast<int>(std::min<qint64>(remaining, waitSliceMilliseconds))));
+        }
+        return commandResult(process, true, false, false);
+    }
+
+    void requestCancellation() override
+    {
+        m_cancellationRequested.store(true, std::memory_order_release);
+    }
+
+  private:
+    static constexpr int waitSliceMilliseconds = 20;
+    static constexpr int terminateGraceMilliseconds = 200;
+
+    static void stopProcess(QProcess& process)
+    {
+        if (process.state() == QProcess::NotRunning) {
+            return;
+        }
+        process.terminate();
+        if (!process.waitForFinished(terminateGraceMilliseconds)) {
             process.kill();
-            static_cast<void>(process.waitForFinished());
-            return {true,
-                    true,
-                    false,
-                    process.exitCode(),
-                    QString::fromLocal8Bit(process.readAllStandardOutput()),
-                    QString::fromLocal8Bit(process.readAllStandardError())};
+            static_cast<void>(process.waitForFinished(terminateGraceMilliseconds));
         }
-        return {true,
-                false,
-                process.exitStatus() == QProcess::CrashExit,
+    }
+
+    static VolumeCommandResult commandResult(QProcess& process, bool started, bool timedOut,
+                                             bool cancelled)
+    {
+        return {started,
+                timedOut,
+                started && !timedOut && !cancelled && process.exitStatus() == QProcess::CrashExit,
                 process.exitCode(),
                 QString::fromLocal8Bit(process.readAllStandardOutput()),
-                QString::fromLocal8Bit(process.readAllStandardError())};
+                QString::fromLocal8Bit(process.readAllStandardError()),
+                cancelled};
     }
+
+    std::atomic_bool m_cancellationRequested{false};
 };
 
 QString boundedDiagnostic(QString value)
@@ -70,6 +119,9 @@ QString boundedDiagnostic(QString value)
 
 VolumeOperationError volumeOperationErrorFromCommand(const VolumeCommandResult& result)
 {
+    if (result.cancelled) {
+        return VolumeOperationError::Cancelled;
+    }
     if (!result.started) {
         return VolumeOperationError::ToolUnavailable;
     }
@@ -134,6 +186,8 @@ LocalLinuxVolumeService::LocalLinuxVolumeService(std::unique_ptr<VolumeCommandRu
     : m_runner(runner == nullptr ? std::make_unique<QProcessVolumeCommandRunner>()
                                  : std::move(runner))
 {}
+
+void LocalLinuxVolumeService::requestCancellation() { m_runner->requestCancellation(); }
 
 VolumeOperationResult LocalLinuxVolumeService::execute(const VolumeOperationRequest& request)
 {
@@ -219,6 +273,13 @@ void VolumeOperationWorker::execute(VolumeOperationRequest request)
         return;
     }
     emit finished(m_service->execute(request));
+}
+
+void VolumeOperationWorker::requestCancellation()
+{
+    if (m_service != nullptr) {
+        m_service->requestCancellation();
+    }
 }
 
 } // namespace rfm::core

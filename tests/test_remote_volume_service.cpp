@@ -31,12 +31,15 @@ class RemoteVolumeServiceTest final : public QObject
     void rejectsUnsafeDevicePaths();
     void neverUsesPresentationMetadataOrPrivilegeEscalation();
     void buildsConstrainedInteractiveCommands();
+    void schedulesRemotePollingCooperatively();
     void mapsStructuredFailures_data();
     void mapsStructuredFailures();
     void mapsTimeoutToStructuredFailure();
     void reportsUnavailableSessionCapabilities();
     void invalidatesCapabilitiesBetweenSessions();
     void parsesBoundedPolkitConversation();
+    void preservesStructuredInteractiveErrors_data();
+    void preservesStructuredInteractiveErrors();
     void sessionLossBeforeOperationReturnsStructuredError();
 };
 
@@ -69,6 +72,36 @@ void RemoteVolumeServiceTest::buildsConstrainedInteractiveCommands()
         QVERIFY(!command.contains(QStringLiteral("su ")));
         QVERIFY(!command.contains(QStringLiteral("password"), Qt::CaseInsensitive));
     }
+}
+
+void RemoteVolumeServiceTest::schedulesRemotePollingCooperatively()
+{
+    rfm::ssh::SshCommandPollScheduler scheduler;
+    QCOMPARE(rfm::ssh::SshCommandPollScheduler::commandTimeoutMilliseconds, qint64{60'000});
+    QVERIFY(!scheduler.pending());
+
+    const auto idle = scheduler.schedule(false);
+    QVERIFY(idle.has_value());
+    QCOMPARE(idle->delayMilliseconds, rfm::ssh::SshCommandPollScheduler::idleDelayMilliseconds);
+    QVERIFY(idle->delayMilliseconds > 0);
+    QVERIFY(scheduler.pending());
+    QVERIFY(!scheduler.schedule(false).has_value());
+    QVERIFY(!scheduler.schedule(true).has_value());
+
+    QVERIFY(scheduler.consume(idle->generation));
+    QVERIFY(!scheduler.pending());
+    const auto active = scheduler.schedule(true);
+    QVERIFY(active.has_value());
+    QCOMPARE(active->delayMilliseconds, 0);
+
+    scheduler.cancel();
+    QVERIFY(!scheduler.pending());
+    QVERIFY(!scheduler.consume(active->generation));
+    const auto replacement = scheduler.schedule(false);
+    QVERIFY(replacement.has_value());
+    QVERIFY(replacement->generation != active->generation);
+    QVERIFY(!scheduler.consume(active->generation));
+    QVERIFY(scheduler.consume(replacement->generation));
 }
 
 void RemoteVolumeServiceTest::choosesUdisksctlAndFallbacks()
@@ -203,15 +236,68 @@ void RemoteVolumeServiceTest::parsesBoundedPolkitConversation()
     QCOMPARE(parser.consume(QByteArrayLiteral("Sorry, try again.\r\nPassword:")),
              rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed);
     QVERIFY(!parser.authenticationCompleted());
+    QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::AuthenticationFailed);
 
     parser.clear();
     QCOMPARE(parser.consume(QByteArrayLiteral("GDBus.Error: Not authorized")),
              rfm::ssh::RemotePolkitPromptEvent::None);
     QVERIFY(parser.permissionDenied());
+    QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::PermissionDenied);
     parser.clear();
     QCOMPARE(parser.consume(QByteArrayLiteral("target is busy")),
              rfm::ssh::RemotePolkitPromptEvent::None);
     QVERIFY(parser.volumeBusy());
+    QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::VolumeBusy);
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("device is busy")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::VolumeBusy);
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Error looking up object for device")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QVERIFY(parser.deviceNotFound());
+    QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::DeviceNotFound);
+}
+
+void RemoteVolumeServiceTest::preservesStructuredInteractiveErrors_data()
+{
+    QTest::addColumn<QByteArray>("output");
+    QTest::addColumn<bool>("credentialsWereSent");
+    QTest::addColumn<rfm::core::VolumeOperationError>("protocolError");
+    QTest::newRow("authentication-failed")
+        << QByteArrayLiteral("Sorry, try again.\r\nPassword:") << true
+        << rfm::core::VolumeOperationError::AuthenticationFailed;
+    QTest::newRow("target-busy") << QByteArrayLiteral("target is busy") << false
+                                 << rfm::core::VolumeOperationError::VolumeBusy;
+    QTest::newRow("device-busy") << QByteArrayLiteral("device is busy") << false
+                                 << rfm::core::VolumeOperationError::VolumeBusy;
+    QTest::newRow("permission-denied") << QByteArrayLiteral("GDBus.Error: Not authorized") << false
+                                       << rfm::core::VolumeOperationError::PermissionDenied;
+    QTest::newRow("device-not-found")
+        << QByteArrayLiteral("Error looking up object for device /dev/sdz1") << false
+        << rfm::core::VolumeOperationError::DeviceNotFound;
+}
+
+void RemoteVolumeServiceTest::preservesStructuredInteractiveErrors()
+{
+    QFETCH(QByteArray, output);
+    QFETCH(bool, credentialsWereSent);
+    QFETCH(rfm::core::VolumeOperationError, protocolError);
+    rfm::ssh::RemotePolkitPromptParser parser;
+    if (credentialsWereSent) {
+        QCOMPARE(parser.consume(QByteArrayLiteral("Password:")),
+                 rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+        parser.passwordSent();
+    }
+    static_cast<void>(parser.consume(output));
+    QCOMPARE(parser.operationError(), protocolError);
+    const auto result = rfm::ssh::RemoteLinuxVolumeService::interactiveOperationResult(
+        requestFor(rfm::core::VolumeOperation::Unmount), {true, false, false, 1, {}, {}, false},
+        parser.operationError());
+
+    QCOMPARE(result.error, protocolError);
+    QVERIFY(result.error != rfm::core::VolumeOperationError::SystemError);
+    QVERIFY(result.technicalMessage.isEmpty());
 }
 
 void RemoteVolumeServiceTest::mapsStructuredFailures()
@@ -221,7 +307,7 @@ void RemoteVolumeServiceTest::mapsStructuredFailures()
     const int exitCode = error == rfm::core::VolumeOperationError::ToolUnavailable ? 127 : 1;
     const auto result = rfm::ssh::RemoteLinuxVolumeService::operationResult(
         requestFor(rfm::core::VolumeOperation::Unmount),
-        {true, false, false, exitCode, {}, diagnostic});
+        {true, false, false, exitCode, {}, diagnostic, false});
     QCOMPARE(result.error, error);
     QCOMPARE(result.technicalMessage, diagnostic);
 }
@@ -230,7 +316,7 @@ void RemoteVolumeServiceTest::mapsTimeoutToStructuredFailure()
 {
     const auto result = rfm::ssh::RemoteLinuxVolumeService::operationResult(
         requestFor(rfm::core::VolumeOperation::Mount),
-        {true, true, false, -1, {}, QStringLiteral("bounded timeout fixture")});
+        {true, true, false, -1, {}, QStringLiteral("bounded timeout fixture"), false});
 
     QCOMPARE(result.error, rfm::core::VolumeOperationError::SystemError);
     QCOMPARE(result.technicalMessage, QStringLiteral("bounded timeout fixture"));
