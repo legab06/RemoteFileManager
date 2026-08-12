@@ -21,6 +21,7 @@
 #include <QCryptographicHash>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QHash>
 #include <QMetaObject>
 #include <QQueue>
 #include <QSet>
@@ -799,13 +800,223 @@ class SshCommandProcess final
     bool m_exitStatusReceived{false};
 };
 
-enum class SshVolumeCommandPurpose { Capabilities, BlockDevices, VolumeOperation };
+struct SshInteractiveCommandPollResult {
+    std::optional<rfm::core::VolumeCommandResult> result;
+    bool connectionLost{false};
+};
+
+class SshInteractivePolkitProcess final
+{
+  public:
+    explicit SshInteractivePolkitProcess(ssh_session session) : m_session(session) {}
+    ~SshInteractivePolkitProcess()
+    {
+        clearSecret();
+        m_parser.clear();
+        closeChannel();
+    }
+
+    bool start(const QString& command, QByteArray password)
+    {
+        clearSecret();
+        m_password = std::move(password);
+        if (m_session == nullptr || ssh_is_connected(m_session) == 0 || command.isEmpty() ||
+            m_password.isEmpty()) {
+            clearSecret();
+            return false;
+        }
+        m_channel = ssh_channel_new(m_session);
+        if (m_channel == nullptr) {
+            clearSecret();
+            return false;
+        }
+        m_callbacks = {};
+        ssh_callbacks_init(&m_callbacks);
+        m_callbacks.userdata = this;
+        m_callbacks.channel_exit_status_function = &handleExitStatus;
+        m_callbacks.channel_exit_signal_function = &handleExitSignal;
+        if (ssh_set_channel_callbacks(m_channel, &m_callbacks) != SSH_OK ||
+            ssh_channel_open_session(m_channel) != SSH_OK ||
+            ssh_channel_request_pty_size(m_channel, "dumb", 80, 24) != SSH_OK) {
+            clearSecret();
+            closeChannel();
+            return false;
+        }
+        const QByteArray encoded = command.toUtf8();
+        if (ssh_channel_request_exec(m_channel, encoded.constData()) != SSH_OK) {
+            clearSecret();
+            closeChannel();
+            return false;
+        }
+        m_timer.start();
+        return true;
+    }
+
+    SshInteractiveCommandPollResult poll()
+    {
+        if (m_channel == nullptr || m_session == nullptr || ssh_is_connected(m_session) == 0) {
+            clearSecret();
+            closeChannel();
+            return {{}, true};
+        }
+
+        char buffer[1024];
+        for (int stream : {1, 0}) {
+            const int bytes =
+                ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), stream);
+            if (bytes == SSH_ERROR) {
+                const bool lost = ssh_is_connected(m_session) == 0;
+                clearSecret();
+                closeChannel();
+                if (lost) {
+                    return {{}, true};
+                }
+                return {failure(QStringLiteral("The interactive SSH channel failed.")), false};
+            }
+            if (bytes > 0) {
+                const auto event = m_parser.consume(QByteArray(buffer, bytes));
+                if (event == rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt) {
+                    m_promptSeen = true;
+                    m_password.append('\n');
+                } else if (event == rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed) {
+                    clearSecret();
+                    closeChannel();
+                    return {failure(QStringLiteral("Polkit authentication failed.")), false};
+                }
+            }
+        }
+
+        if (m_promptSeen && !m_password.isEmpty()) {
+            const qsizetype remaining = m_password.size() - m_passwordOffset;
+            const int written =
+                ssh_channel_write(m_channel, m_password.constData() + m_passwordOffset,
+                                  static_cast<uint32_t>(std::min<qsizetype>(
+                                      remaining, std::numeric_limits<int>::max())));
+            if (written == SSH_ERROR) {
+                const bool lost = ssh_is_connected(m_session) == 0;
+                clearSecret();
+                closeChannel();
+                return lost ? SshInteractiveCommandPollResult{{}, true}
+                            : SshInteractiveCommandPollResult{
+                                  failure(QStringLiteral("Unable to send Polkit credentials.")),
+                                  false};
+            }
+            if (written > 0) {
+                m_passwordOffset += written;
+                if (m_passwordOffset >= m_password.size()) {
+                    clearSecret();
+                    m_parser.passwordSent();
+                    m_passwordWasSent = true;
+                }
+            }
+        }
+
+        if (m_timer.elapsed() >= timeoutMilliseconds) {
+            const auto timeout = m_parser.timedOut();
+            const QString detail = timeout == rfm::ssh::RemotePolkitPromptEvent::TimedOutAfterPrompt
+                                       ? QStringLiteral("Polkit authentication timed out.")
+                                       : QStringLiteral("Timed out waiting for the Polkit prompt.");
+            clearSecret();
+            closeChannel();
+            return {rfm::core::VolumeCommandResult{true, true, false, -1, {}, detail}, false};
+        }
+        if (ssh_channel_is_eof(m_channel) == 0) {
+            return {};
+        }
+        if (!m_exitStatusReceived && ++m_exitStatusPolls < 100) {
+            return {};
+        }
+
+        const int exitCode = m_exitStatusReceived ? m_exitCode : -1;
+        QString diagnostic;
+        if (exitCode != 0) {
+            if (m_parser.volumeBusy()) {
+                diagnostic = QStringLiteral("The remote volume is busy.");
+            } else if (m_parser.permissionDenied()) {
+                diagnostic = QStringLiteral("Polkit permission denied.");
+            } else if (m_passwordWasSent && !m_parser.authenticationCompleted()) {
+                diagnostic = QStringLiteral("Polkit authentication failed.");
+            } else {
+                diagnostic = QStringLiteral("The interactive volume command failed.");
+            }
+        }
+        clearSecret();
+        closeChannel();
+        return {rfm::core::VolumeCommandResult{true, false, false, exitCode, {}, diagnostic},
+                false};
+    }
+
+  private:
+    static constexpr qint64 timeoutMilliseconds = 60'000;
+
+    static rfm::core::VolumeCommandResult failure(QString diagnostic)
+    {
+        return {true, false, true, -1, {}, std::move(diagnostic)};
+    }
+
+    static void handleExitStatus(ssh_session, ssh_channel, int exitStatus, void* userData)
+    {
+        auto* const process = static_cast<SshInteractivePolkitProcess*>(userData);
+        process->m_exitStatusReceived = true;
+        process->m_exitCode = exitStatus;
+    }
+
+    static void handleExitSignal(ssh_session, ssh_channel, const char*, int, const char*,
+                                 const char*, void* userData)
+    {
+        auto* const process = static_cast<SshInteractivePolkitProcess*>(userData);
+        process->m_exitStatusReceived = true;
+        process->m_exitCode = -1;
+    }
+
+    void clearSecret()
+    {
+        m_password.fill('\0');
+        m_password.clear();
+        m_passwordOffset = 0;
+    }
+
+    void closeChannel()
+    {
+        if (m_channel != nullptr) {
+            static_cast<void>(ssh_channel_close(m_channel));
+            ssh_channel_free(m_channel);
+            m_channel = nullptr;
+        }
+    }
+
+    ssh_session m_session{nullptr};
+    ssh_channel m_channel{nullptr};
+    ssh_channel_callbacks_struct m_callbacks{};
+    rfm::ssh::RemotePolkitPromptParser m_parser;
+    QByteArray m_password;
+    QElapsedTimer m_timer;
+    qsizetype m_passwordOffset{0};
+    int m_exitStatusPolls{0};
+    int m_exitCode{-1};
+    bool m_exitStatusReceived{false};
+    bool m_promptSeen{false};
+    bool m_passwordWasSent{false};
+};
+
+enum class SshVolumeCommandPurpose {
+    Capabilities,
+    BlockDevices,
+    VolumeOperation,
+    InteractiveVolumeOperation
+};
 
 struct SshVolumeCommandTask {
     SshVolumeCommandPurpose purpose{SshVolumeCommandPurpose::Capabilities};
     QString command;
     quint64 storageRequestId{0};
     rfm::core::VolumeOperationRequest operationRequest;
+    QByteArray password;
+};
+
+struct AwaitingVolumeAuthentication {
+    rfm::core::VolumeOperationRequest request;
+    quint64 authenticationToken{0};
 };
 
 } // namespace
@@ -820,13 +1031,23 @@ class SshSession::Impl final
 
     void reset()
     {
+        if (activeVolumeCommand.has_value()) {
+            activeVolumeCommand->password.fill('\0');
+            activeVolumeCommand->password.clear();
+        }
+        for (SshVolumeCommandTask& task : volumeCommandQueue) {
+            task.password.fill('\0');
+            task.password.clear();
+        }
         volumeCommandProcess.reset();
+        interactiveVolumeCommandProcess.reset();
         activeVolumeCommand.reset();
         volumeCommandQueue.clear();
         activeVolumeDevices.clear();
         pendingStorageRequestId = 0;
         pendingBlockDevices.clear();
         pendingVolumeOperations.clear();
+        awaitingVolumeAuthentications.clear();
         volumeCommandStepScheduled = false;
         volumeCapabilityCache.reset();
         if (storageProbeFile != nullptr) {
@@ -881,10 +1102,12 @@ class SshSession::Impl final
     std::unique_ptr<rfm::core::ServerSideCopyJob> activeCopyJob;
     std::unique_ptr<rfm::ssh::RemoteStorageScanner> storageScanner;
     std::unique_ptr<SshCommandProcess> volumeCommandProcess;
+    std::unique_ptr<SshInteractivePolkitProcess> interactiveVolumeCommandProcess;
     std::optional<SshVolumeCommandTask> activeVolumeCommand;
     QQueue<SshVolumeCommandTask> volumeCommandQueue;
     QSet<QString> activeVolumeDevices;
     QQueue<rfm::core::VolumeOperationRequest> pendingVolumeOperations;
+    QHash<quint64, AwaitingVolumeAuthentication> awaitingVolumeAuthentications;
     QList<rfm::core::LinuxBlockDevice> pendingBlockDevices;
     rfm::ssh::RemoteLinuxVolumeCapabilityCache volumeCapabilityCache;
     sftp_file storageProbeFile{nullptr};
@@ -899,6 +1122,7 @@ class SshSession::Impl final
     bool volumeCommandStepScheduled{false};
     bool shuttingDown{false};
     bool disconnecting{false};
+    quint64 nextAuthenticationToken{0};
 };
 
 SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_unique<Impl>()) {}
@@ -1220,6 +1444,60 @@ void SshSession::operateVolume(rfm::core::VolumeOperationRequest request)
     startPendingRemoteWork();
 }
 
+void SshSession::authenticateVolume(quint64 operationId, quint64 authenticationToken,
+                                    QByteArray password)
+{
+    auto clearPassword = [&password] {
+        password.fill('\0');
+        password.clear();
+    };
+    const auto awaiting = m_impl->awaitingVolumeAuthentications.constFind(operationId);
+    if (awaiting == m_impl->awaitingVolumeAuthentications.cend() ||
+        awaiting->authenticationToken != authenticationToken || authenticationToken == 0 ||
+        password.isEmpty()) {
+        clearPassword();
+        return;
+    }
+    if (m_impl->session == nullptr || m_impl->sftp == nullptr ||
+        ssh_is_connected(m_impl->session) == 0) {
+        const auto request = awaiting->request;
+        m_impl->awaitingVolumeAuthentications.erase(awaiting);
+        m_impl->activeVolumeDevices.remove(request.target.device);
+        clearPassword();
+        emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
+            request, rfm::core::VolumeOperationError::ConnectionLost,
+            QStringLiteral("The SSH connection was lost before Polkit authentication.")));
+        return;
+    }
+
+    const rfm::core::VolumeOperationRequest request = awaiting->request;
+    m_impl->awaitingVolumeAuthentications.erase(awaiting);
+    rfm::core::VolumeOperationResult immediate;
+    const auto command = rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
+        request, m_impl->volumeCapabilityCache.value(), &immediate);
+    if (!command.has_value()) {
+        m_impl->activeVolumeDevices.remove(request.target.device);
+        clearPassword();
+        emit volumeOperationFinished(immediate);
+        return;
+    }
+    m_impl->volumeCommandQueue.prepend({SshVolumeCommandPurpose::InteractiveVolumeOperation,
+                                        *command, 0, request, std::move(password)});
+    clearPassword();
+    scheduleVolumeCommandStep();
+}
+
+void SshSession::cancelVolumeAuthentication(quint64 operationId, quint64 authenticationToken)
+{
+    const auto awaiting = m_impl->awaitingVolumeAuthentications.find(operationId);
+    if (awaiting == m_impl->awaitingVolumeAuthentications.end() || authenticationToken == 0 ||
+        awaiting->authenticationToken != authenticationToken) {
+        return;
+    }
+    m_impl->activeVolumeDevices.remove(awaiting->request.target.device);
+    m_impl->awaitingVolumeAuthentications.erase(awaiting);
+}
+
 void SshSession::startPendingRemoteWork()
 {
     if (m_impl->session == nullptr || ssh_is_connected(m_impl->session) == 0) {
@@ -1238,6 +1516,7 @@ void SshSession::startPendingRemoteWork()
                 {SshVolumeCommandPurpose::Capabilities,
                  rfm::ssh::RemoteLinuxVolumeService::capabilityProbeCommand(),
                  0,
+                 {},
                  {}});
         }
         scheduleVolumeCommandStep();
@@ -1251,6 +1530,7 @@ void SshSession::startPendingRemoteWork()
                 {SshVolumeCommandPurpose::BlockDevices,
                  rfm::ssh::RemoteLinuxVolumeService::blockDeviceDiscoveryCommand(),
                  requestId,
+                 {},
                  {}});
         } else {
             startRemoteStorageScanner(requestId);
@@ -1268,7 +1548,7 @@ void SshSession::startPendingRemoteWork()
             continue;
         }
         m_impl->volumeCommandQueue.enqueue(
-            {SshVolumeCommandPurpose::VolumeOperation, *command, 0, request});
+            {SshVolumeCommandPurpose::VolumeOperation, *command, 0, request, {}});
     }
     scheduleVolumeCommandStep();
 }
@@ -1280,19 +1560,34 @@ void SshSession::scheduleVolumeCommandStep()
             return;
         }
         m_impl->activeVolumeCommand = m_impl->volumeCommandQueue.dequeue();
-        m_impl->volumeCommandProcess = std::make_unique<SshCommandProcess>(m_impl->session);
-        if (!m_impl->volumeCommandProcess->start(m_impl->activeVolumeCommand->command)) {
-            const SshVolumeCommandTask task = *m_impl->activeVolumeCommand;
+        bool started = false;
+        if (m_impl->activeVolumeCommand->purpose ==
+            SshVolumeCommandPurpose::InteractiveVolumeOperation) {
+            m_impl->interactiveVolumeCommandProcess =
+                std::make_unique<SshInteractivePolkitProcess>(m_impl->session);
+            started = m_impl->interactiveVolumeCommandProcess->start(
+                m_impl->activeVolumeCommand->command,
+                std::move(m_impl->activeVolumeCommand->password));
+            m_impl->activeVolumeCommand->password.fill('\0');
+            m_impl->activeVolumeCommand->password.clear();
+        } else {
+            m_impl->volumeCommandProcess = std::make_unique<SshCommandProcess>(m_impl->session);
+            started = m_impl->volumeCommandProcess->start(m_impl->activeVolumeCommand->command);
+        }
+        if (!started) {
+            const SshVolumeCommandTask& task = *m_impl->activeVolumeCommand;
             const bool connectionLost =
                 m_impl->session == nullptr || ssh_is_connected(m_impl->session) == 0;
             m_impl->volumeCommandProcess.reset();
-            m_impl->activeVolumeCommand.reset();
+            m_impl->interactiveVolumeCommandProcess.reset();
             if (connectionLost) {
-                if (task.purpose == SshVolumeCommandPurpose::VolumeOperation) {
+                if (task.purpose == SshVolumeCommandPurpose::VolumeOperation ||
+                    task.purpose == SshVolumeCommandPurpose::InteractiveVolumeOperation) {
                     emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
                         task.operationRequest, rfm::core::VolumeOperationError::ConnectionLost,
                         QStringLiteral("The SSH connection was lost before the volume command.")));
                 }
+                m_impl->activeVolumeCommand.reset();
                 fail(tr("The SSH connection was lost before a remote volume command."));
                 return;
             }
@@ -1306,6 +1601,7 @@ void SshSession::scheduleVolumeCommandStep()
                     task.operationRequest, rfm::core::VolumeOperationError::ToolUnavailable,
                     QStringLiteral("The server rejected remote command execution.")));
             }
+            m_impl->activeVolumeCommand.reset();
             startPendingRemoteWork();
             scheduleVolumeCommandStep();
             return;
@@ -1321,14 +1617,30 @@ void SshSession::scheduleVolumeCommandStep()
 void SshSession::processVolumeCommandStep()
 {
     m_impl->volumeCommandStepScheduled = false;
-    if (!m_impl->activeVolumeCommand.has_value() || m_impl->volumeCommandProcess == nullptr) {
+    if (!m_impl->activeVolumeCommand.has_value() ||
+        (m_impl->volumeCommandProcess == nullptr &&
+         m_impl->interactiveVolumeCommandProcess == nullptr)) {
         scheduleVolumeCommandStep();
         return;
     }
-    const SshCommandPollResult poll = m_impl->volumeCommandProcess->poll();
-    if (poll.connectionLost) {
-        const SshVolumeCommandTask task = *m_impl->activeVolumeCommand;
-        if (task.purpose == SshVolumeCommandPurpose::VolumeOperation) {
+    const bool interactive =
+        m_impl->activeVolumeCommand->purpose == SshVolumeCommandPurpose::InteractiveVolumeOperation;
+    std::optional<rfm::core::VolumeCommandResult> commandResult;
+    bool connectionLost = false;
+    if (interactive) {
+        const SshInteractiveCommandPollResult poll =
+            m_impl->interactiveVolumeCommandProcess->poll();
+        commandResult = poll.result;
+        connectionLost = poll.connectionLost;
+    } else {
+        const SshCommandPollResult poll = m_impl->volumeCommandProcess->poll();
+        commandResult = poll.result;
+        connectionLost = poll.connectionLost;
+    }
+    if (connectionLost) {
+        const SshVolumeCommandTask& task = *m_impl->activeVolumeCommand;
+        if (task.purpose == SshVolumeCommandPurpose::VolumeOperation ||
+            task.purpose == SshVolumeCommandPurpose::InteractiveVolumeOperation) {
             emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
                 task.operationRequest, rfm::core::VolumeOperationError::ConnectionLost,
                 QStringLiteral("The SSH connection was lost during the volume operation.")));
@@ -1336,35 +1648,53 @@ void SshSession::processVolumeCommandStep()
         fail(tr("The SSH connection was lost during a remote volume command."));
         return;
     }
-    if (!poll.result.has_value()) {
+    if (!commandResult.has_value()) {
         scheduleVolumeCommandStep();
         return;
     }
 
-    const SshVolumeCommandTask task = *m_impl->activeVolumeCommand;
+    const SshVolumeCommandTask task = std::move(*m_impl->activeVolumeCommand);
     m_impl->volumeCommandProcess.reset();
+    m_impl->interactiveVolumeCommandProcess.reset();
     m_impl->activeVolumeCommand.reset();
     switch (task.purpose) {
     case SshVolumeCommandPurpose::Capabilities:
         m_impl->volumeCapabilityCache.update(
-            poll.result->exitCode == 0
+            commandResult->exitCode == 0
                 ? rfm::ssh::RemoteLinuxVolumeService::parseCapabilities(
-                      poll.result->standardOutput.toUtf8())
+                      commandResult->standardOutput.toUtf8())
                 : rfm::ssh::RemoteLinuxVolumeCapabilities{true, false, false, false, false});
         break;
     case SshVolumeCommandPurpose::BlockDevices:
-        if (poll.result->exitCode == 0) {
+        if (commandResult->exitCode == 0) {
             m_impl->pendingBlockDevices =
-                rfm::core::parseLinuxBlockDevices(poll.result->standardOutput.toUtf8());
+                rfm::core::parseLinuxBlockDevices(commandResult->standardOutput.toUtf8());
         } else {
             m_impl->pendingBlockDevices.clear();
         }
         startRemoteStorageScanner(task.storageRequestId);
         break;
-    case SshVolumeCommandPurpose::VolumeOperation:
+    case SshVolumeCommandPurpose::VolumeOperation: {
+        auto result = rfm::ssh::RemoteLinuxVolumeService::operationResult(task.operationRequest,
+                                                                          *commandResult);
+        if (result.error == rfm::core::VolumeOperationError::AuthenticationRequired) {
+            quint64 token = ++m_impl->nextAuthenticationToken;
+            if (token == 0) {
+                token = ++m_impl->nextAuthenticationToken;
+            }
+            result.authenticationToken = token;
+            m_impl->awaitingVolumeAuthentications.insert(task.operationRequest.id,
+                                                         {task.operationRequest, token});
+        } else {
+            m_impl->activeVolumeDevices.remove(task.operationRequest.target.device);
+        }
+        emit volumeOperationFinished(result);
+        break;
+    }
+    case SshVolumeCommandPurpose::InteractiveVolumeOperation:
         m_impl->activeVolumeDevices.remove(task.operationRequest.target.device);
         emit volumeOperationFinished(rfm::ssh::RemoteLinuxVolumeService::operationResult(
-            task.operationRequest, *poll.result));
+            task.operationRequest, *commandResult));
         break;
     }
     startPendingRemoteWork();

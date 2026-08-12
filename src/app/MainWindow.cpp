@@ -8,6 +8,7 @@
 #include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
+#include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
@@ -249,6 +250,10 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::ssh::SshSession::probeStorageMounts);
     connect(this, &MainWindow::remoteVolumeOperationRequested, m_sshSession,
             &rfm::ssh::SshSession::operateVolume);
+    connect(this, &MainWindow::remoteVolumeAuthenticationRequested, m_sshSession,
+            &rfm::ssh::SshSession::authenticateVolume);
+    connect(this, &MainWindow::remoteVolumeAuthenticationCancelled, m_sshSession,
+            &rfm::ssh::SshSession::cancelVolumeAuthentication);
     connect(this, &MainWindow::createDirectoryRequested, m_sshSession,
             &rfm::ssh::SshSession::createDirectory);
     connect(this, &MainWindow::renameRequested, m_sshSession, &rfm::ssh::SshSession::renameEntry);
@@ -1352,6 +1357,11 @@ void MainWindow::resetDisconnectedUi()
     m_remoteStorageFingerprint.clear();
     m_pendingRemoteStorageFingerprint.clear();
     for (const RemoteVolumeOperationContext& context : std::as_const(m_remoteVolumeOperations)) {
+        if (context.authenticationDialog != nullptr) {
+            context.authenticationDialog->reject();
+        }
+    }
+    for (const RemoteVolumeOperationContext& context : std::as_const(m_remoteVolumeOperations)) {
         m_navigationTree->setVolumeOperation(context.machineId, context.request.target.device,
                                              std::nullopt);
     }
@@ -2371,7 +2381,7 @@ void MainWindow::beginRemoteVolumeOperation(const QString& machineId,
     const quint64 id = nextOperationId();
     const rfm::core::VolumeOperationRequest request{
         id, operation, {volume.device, volume.rootPath, volume.kind}};
-    m_remoteVolumeOperations.insert(id, {request, machineId, m_connectionGeneration});
+    m_remoteVolumeOperations.insert(id, {request, machineId, m_connectionGeneration, 0, nullptr});
     m_navigationTree->setVolumeOperation(machineId, volume.device, operation);
     emit remoteVolumeOperationRequested(request);
 }
@@ -2388,6 +2398,12 @@ void MainWindow::handleRemoteVolumeOperationResult(const rfm::core::VolumeOperat
     if (completed.connectionGeneration != m_connectionGeneration ||
         completed.machineId != activeRemoteMachineId()) {
         m_remoteVolumeOperations.remove(result.id);
+        return;
+    }
+
+    if (result.error == rfm::core::VolumeOperationError::AuthenticationRequired &&
+        result.authenticationToken != 0) {
+        showRemoteVolumeAuthentication(result);
         return;
     }
 
@@ -2415,6 +2431,63 @@ void MainWindow::handleRemoteVolumeOperationResult(const rfm::core::VolumeOperat
     } else {
         refreshStorage();
     }
+}
+
+void MainWindow::showRemoteVolumeAuthentication(const rfm::core::VolumeOperationResult& result)
+{
+    auto context = m_remoteVolumeOperations.find(result.id);
+    if (context == m_remoteVolumeOperations.end() || result.authenticationToken == 0 ||
+        context->authenticationDialog != nullptr || !m_connected ||
+        context->connectionGeneration != m_connectionGeneration ||
+        context->machineId != activeRemoteMachineId()) {
+        return;
+    }
+
+    auto* const dialog = new VolumeAuthenticationDialog(m_activeProfile.host.trimmed(),
+                                                        context->request.target.device,
+                                                        context->request.operation, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    context->authenticationToken = result.authenticationToken;
+    context->authenticationDialog = dialog;
+    const quint64 operationId = result.id;
+    const quint64 authenticationToken = result.authenticationToken;
+    connect(dialog, &QDialog::accepted, this, [this, dialog, operationId, authenticationToken] {
+        QByteArray password = dialog->takePassword();
+        auto current = m_remoteVolumeOperations.find(operationId);
+        const bool valid = current != m_remoteVolumeOperations.end() && m_connected &&
+                           current->connectionGeneration == m_connectionGeneration &&
+                           current->machineId == activeRemoteMachineId() &&
+                           current->authenticationToken == authenticationToken &&
+                           current->authenticationDialog == dialog;
+        if (current != m_remoteVolumeOperations.end()) {
+            current->authenticationDialog = nullptr;
+        }
+        if (valid && !password.isEmpty()) {
+            emit remoteVolumeAuthenticationRequested(operationId, authenticationToken, password);
+        }
+        password.fill('\0');
+        password.clear();
+    });
+    connect(dialog, &QDialog::rejected, this, [this, dialog, operationId, authenticationToken] {
+        auto current = m_remoteVolumeOperations.find(operationId);
+        if (current == m_remoteVolumeOperations.end() || current->authenticationDialog != dialog) {
+            return;
+        }
+        if (!m_connected || current->connectionGeneration != m_connectionGeneration ||
+            current->machineId != activeRemoteMachineId()) {
+            current->authenticationDialog = nullptr;
+            return;
+        }
+        const RemoteVolumeOperationContext cancelled = *current;
+        m_remoteVolumeOperations.erase(current);
+        m_navigationTree->setVolumeOperation(cancelled.machineId, cancelled.request.target.device,
+                                             std::nullopt);
+        if (cancelled.authenticationToken == authenticationToken) {
+            emit remoteVolumeAuthenticationCancelled(operationId, authenticationToken);
+            statusBar()->showMessage(tr("Volume authentication was cancelled."), 5000);
+        }
+    });
+    dialog->open();
 }
 
 void MainWindow::evacuateLocalPanesFromMountPoint(const QString& mountPoint)
@@ -2477,6 +2550,10 @@ MainWindow::volumeOperationErrorMessage(const rfm::core::VolumeOperationResult& 
     switch (result.error) {
     case rfm::core::VolumeOperationError::NotSupported:
         return tr("This volume cannot be %1ed by RemoteFileManager.").arg(operation);
+    case rfm::core::VolumeOperationError::AuthenticationRequired:
+        return tr("Authentication is required to %1 %2.").arg(operation, result.device);
+    case rfm::core::VolumeOperationError::AuthenticationFailed:
+        return tr("Authentication failed while trying to %1 %2.").arg(operation, result.device);
     case rfm::core::VolumeOperationError::PermissionDenied:
         return tr("Permission was denied while trying to %1 %2.").arg(operation, result.device);
     case rfm::core::VolumeOperationError::DeviceNotFound:

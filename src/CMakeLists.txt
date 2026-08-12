@@ -51,6 +51,7 @@ add_library(
     app/ServerProfileDialog.cpp
     app/OperationPanel.cpp
     app/TransferRequestFactory.cpp
+    app/VolumeAuthenticationDialog.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/MainWindow.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/NavigationTree.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ConnectionDialog.hpp
@@ -60,6 +61,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/OperationPanel.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferRequestFactory.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/VolumeAuthenticationDialog.hpp
 )
 add_library(RemoteFileManager::Ui ALIAS rfm_ui)
 

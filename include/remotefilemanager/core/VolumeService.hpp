@@ -19,6 +19,8 @@ enum class VolumeOperation { Mount, Unmount };
 enum class VolumeOperationError {
     None,
     NotSupported,
+    AuthenticationRequired,
+    AuthenticationFailed,
     PermissionDenied,
     DeviceNotFound,
     VolumeBusy,
@@ -46,6 +48,7 @@ struct VolumeOperationResult {
     QString device;
     VolumeOperationError error{VolumeOperationError::None};
     QString technicalMessage;
+    quint64 authenticationToken{0};
 
     [[nodiscard]] bool succeeded() const { return error == VolumeOperationError::None; }
 };

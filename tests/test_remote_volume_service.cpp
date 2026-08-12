@@ -30,11 +30,13 @@ class RemoteVolumeServiceTest final : public QObject
     void rejectsUnsafeDevicePaths_data();
     void rejectsUnsafeDevicePaths();
     void neverUsesPresentationMetadataOrPrivilegeEscalation();
+    void buildsConstrainedInteractiveCommands();
     void mapsStructuredFailures_data();
     void mapsStructuredFailures();
     void mapsTimeoutToStructuredFailure();
     void reportsUnavailableSessionCapabilities();
     void invalidatesCapabilitiesBetweenSessions();
+    void parsesBoundedPolkitConversation();
     void sessionLossBeforeOperationReturnsStructuredError();
 };
 
@@ -50,6 +52,23 @@ void RemoteVolumeServiceTest::parsesCapabilitiesAndUsesOnlyFixedProbe()
     const QString probe = rfm::ssh::RemoteLinuxVolumeService::capabilityProbeCommand();
     QVERIFY(probe.contains(QStringLiteral("lsblk udisksctl mount umount")));
     QVERIFY(!probe.contains(QStringLiteral("sudo")));
+}
+
+void RemoteVolumeServiceTest::buildsConstrainedInteractiveCommands()
+{
+    for (const rfm::core::VolumeOperation operation :
+         {rfm::core::VolumeOperation::Mount, rfm::core::VolumeOperation::Unmount}) {
+        const QString command = *rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
+            requestFor(operation), allCapabilities());
+        const QString verb = operation == rfm::core::VolumeOperation::Mount
+                                 ? QStringLiteral("mount")
+                                 : QStringLiteral("unmount");
+        QCOMPARE(command, QStringLiteral("LC_ALL=C udisksctl %1 -b /dev/sdb1").arg(verb));
+        QVERIFY(!command.contains(QStringLiteral("--no-user-interaction")));
+        QVERIFY(!command.contains(QStringLiteral("sudo")));
+        QVERIFY(!command.contains(QStringLiteral("su ")));
+        QVERIFY(!command.contains(QStringLiteral("password"), Qt::CaseInsensitive));
+    }
 }
 
 void RemoteVolumeServiceTest::choosesUdisksctlAndFallbacks()
@@ -146,13 +165,53 @@ void RemoteVolumeServiceTest::mapsStructuredFailures_data()
         << rfm::core::VolumeOperationError::PermissionDenied;
     QTest::newRow("polkit-authentication-required")
         << QStringLiteral("Authentication is required to mount TOSHIBA (/dev/sdb1)")
-        << rfm::core::VolumeOperationError::PermissionDenied;
+        << rfm::core::VolumeOperationError::AuthenticationRequired;
+    QTest::newRow("polkit-can-obtain")
+        << QStringLiteral("GDBus.Error:org.freedesktop.UDisks2.Error.NotAuthorizedCanObtain: "
+                          "Not authorized to perform operation")
+        << rfm::core::VolumeOperationError::AuthenticationRequired;
+    QTest::newRow("authentication-failed") << QStringLiteral("Authentication failed")
+                                           << rfm::core::VolumeOperationError::AuthenticationFailed;
     QTest::newRow("busy") << QStringLiteral("target is busy")
                           << rfm::core::VolumeOperationError::VolumeBusy;
     QTest::newRow("device") << QStringLiteral("no such file")
                             << rfm::core::VolumeOperationError::DeviceNotFound;
     QTest::newRow("tool-unavailable") << QStringLiteral("udisksctl: command not found")
                                       << rfm::core::VolumeOperationError::ToolUnavailable;
+}
+
+void RemoteVolumeServiceTest::parsesBoundedPolkitConversation()
+{
+    rfm::ssh::RemotePolkitPromptParser parser;
+    QCOMPARE(parser.timedOut(), rfm::ssh::RemotePolkitPromptEvent::TimedOutBeforePrompt);
+    QCOMPARE(parser.consume(QByteArrayLiteral("==== AUTHENTICATING FOR org.freedesktop.")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.consume(QByteArrayLiteral("UDisks2 ====\r\nPass")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.consume(QByteArrayLiteral("word:\x1b[0m")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    QCOMPARE(parser.timedOut(), rfm::ssh::RemotePolkitPromptEvent::TimedOutAfterPrompt);
+    parser.passwordSent();
+    QCOMPARE(parser.consume(QByteArrayLiteral("\r\n==== AUTHENTICATION COMPLETE ====\r\n")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QVERIFY(parser.authenticationCompleted());
+
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password:")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    parser.passwordSent();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Sorry, try again.\r\nPassword:")),
+             rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed);
+    QVERIFY(!parser.authenticationCompleted());
+
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("GDBus.Error: Not authorized")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QVERIFY(parser.permissionDenied());
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("target is busy")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QVERIFY(parser.volumeBusy());
 }
 
 void RemoteVolumeServiceTest::mapsStructuredFailures()

@@ -1,6 +1,6 @@
 # Sprint 8 — Opérations sur les volumes
 
-Date : 11 août 2026
+Date : 12 août 2026
 
 ## Socle des opérations
 
@@ -23,9 +23,10 @@ le label et le modèle matériel ne servent jamais d'identifiant d'opération.
 
 `VolumeOperationResult` conserve l'identité de la requête, l'opération et le
 périphérique, ainsi qu'une erreur structurée : succès, opération non supportée,
-permission refusée, périphérique introuvable, volume occupé, outil indisponible ou
-autre erreur système. Un diagnostic borné peut être conservé sans journalisation
-automatique.
+authentification requise ou échouée, permission refusée, périphérique introuvable,
+volume occupé, outil indisponible ou autre erreur système. Pour une authentification
+distante, il porte aussi un jeton de défi opaque propre à la session. Un diagnostic
+borné peut être conservé sans journalisation automatique.
 
 `LocalLinuxVolumeService` fournit la première implémentation. L'exécution de processus
 est isolée derrière `VolumeCommandRunner`, ce qui rend la sélection de stratégie et
@@ -131,11 +132,51 @@ udisksctl mount -b /dev/... --no-user-interaction
 udisksctl unmount -b /dev/... --no-user-interaction
 ```
 
-L'option `--no-user-interaction` interdit au canal SSH d'attendre un dialogue Polkit.
-Une autorisation déjà accordée continue de fonctionner ; une authentification requise
-ou refusée devient immédiatement une erreur `PermissionDenied` présentée sans stderr
-brut. Si `udisksctl` est disponible mais refuse l'opération, aucune autre stratégie
-n'est lancée automatiquement. `mount -- /dev/...` ou `umount -- /dev/...` est choisi
+L'option `--no-user-interaction` interdit au premier canal SSH d'attendre un dialogue
+Polkit. Une autorisation déjà accordée continue donc de fonctionner sans popup. Un
+refus définitif, notamment `NotAuthorized`, devient `PermissionDenied`. Seule une
+réponse indiquant qu'une autorisation peut être obtenue, notamment
+`NotAuthorizedCanObtain`, devient `AuthenticationRequired` et ouvre une boîte Qt
+propre à la fenêtre RFM. Les autres erreurs de permission ne demandent jamais le mot
+de passe inutilement.
+
+Après validation de cette boîte, `SshSession` vérifie l'identifiant d'opération et le
+jeton de défi, puis ouvre un canal SSH dédié avec PTY. Ce PTY est strictement interne :
+il n'existe ni terminal graphique, ni shell libre, ni console utilisateur. La seconde
+commande appartient toujours à l'ensemble fermé du backend :
+
+```text
+LC_ALL=C udisksctl mount -b /dev/...
+LC_ALL=C udisksctl unmount -b /dev/...
+```
+
+Elle ne contient volontairement plus `--no-user-interaction`. Une petite machine
+d'état bornée reconnaît le prompt anglais `Password:`, la fin ou l'échec de
+l'authentification, la fermeture du canal et les timeouts. Elle ignore seulement les
+contrôles terminaux nécessaires à cette reconnaissance et n'émule pas un terminal.
+Le mot de passe n'est écrit dans le PTY qu'après le prompt attendu. La sortie brute du
+PTY, susceptible de contenir le dialogue Polkit, n'est jamais exposée à l'UI.
+
+Le mot de passe est celui saisi explicitement pour cette seule autorisation Polkit ;
+le mot de passe SSH initial n'est jamais réutilisé. Il traverse le signal Qt vers le
+worker SSH sous forme d'un buffer temporaire, puis le canal PTY. Les buffers
+propriétaires sont remplis de zéros et vidés après envoi, annulation, erreur, timeout
+ou déconnexion. Le secret n'est ajouté ni au profil serveur, ni aux paramètres, ni à
+l'historique, ni aux diagnostics ou logs. La persistance du mot de passe de session,
+un keyring et une gestion avancée des secrets sont explicitement hors périmètre du
+Sprint 8.
+
+Pendant la boîte, le verrou du device et l'état `Mounting…` ou `Unmounting…` restent
+actifs. `Cancel` abandonne le défi, libère ce verrou et ne déclenche aucun refresh de
+succès. Un mauvais mot de passe termine la tentative avec `AuthenticationFailed` ;
+l'utilisateur peut ensuite relancer explicitement l'opération, sans boucle de retry
+automatique. Le délai de 60 secondes couvre l'attente du prompt et la période après
+son envoi. Une perte SSH ferme la boîte ou le canal et rend le résultat obsolète. Les
+jetons ne sont pas réutilisés lors d'un reset : une réponse provenant d'une ancienne
+boîte ne peut pas atteindre une nouvelle session.
+
+Si `udisksctl` est disponible mais refuse l'opération, aucune autre stratégie n'est
+lancée automatiquement. `mount -- /dev/...` ou `umount -- /dev/...` est choisi
 uniquement lorsque `udisksctl` est absent et que l'outil correspondant a été détecté.
 
 Le device doit être un chemin Linux normalisé sous `/dev/` composé exclusivement de
@@ -147,11 +188,13 @@ commande est fermé. Leurs délais, pertes de connexion et codes de sortie sont
 convertis en résultats structurés sans afficher directement
 stderr à l'utilisateur.
 
-Sur un serveur headless, un compte sans règle udisks/polkit ni entrée `fstab` adaptée
-recevra normalement une erreur de permission. RemoteFileManager ne tente aucune
-élévation. Sur un serveur minimal refusant l'exécution de commandes SSH, la navigation
-SFTP et la découverte des montages restent possibles, mais les volumes non montés et
-les opérations ne le sont pas.
+Sur un serveur headless, l'authentification interactive dépend de la capacité de
+Polkit/udisks2 à fournir son dialogue dans le PTY SSH. Un compte auquel Polkit oppose
+un refus définitif reçoit une erreur de permission sans popup. RemoteFileManager
+n'utilise jamais `sudo`, `sudo -S`, `su`, une redirection de mot de passe, ni une
+modification de Polkit, sudoers ou `fstab`. Sur un serveur minimal refusant
+l'exécution de commandes SSH, la navigation SFTP et la découverte des montages
+restent possibles, mais les volumes non montés et les opérations ne le sont pas.
 
 ## Intégration dans le panneau Volumes
 
@@ -220,6 +263,15 @@ mutation optimiste, l'ouverture du mountpoint ré-observé, les pertes de sessio
 frontières de l'opération, ainsi que le `SafetyFallback` multi-panneau et isolé par
 machine. Ils utilisent exclusivement des sorties et résultats simulés.
 
+Les tests d'authentification ajoutent la distinction entre `NotAuthorizedCanObtain`
+et `NotAuthorized`, les commandes interactives mount/unmount sans option non
+interactive ni élévation, le protocole Polkit fragmenté et avec contrôles ANSI, le
+prompt avant envoi, le succès, le mauvais mot de passe et les timeouts avant/après
+prompt. Les tests UI vérifient la modalité fenêtre, le champ masqué, le serveur et le
+device, l'annulation sans refresh, la soumission unique du secret, le maintien de
+l'état occupé et la fermeture sûre à la déconnexion. Aucun test ne contacte un
+serveur ni ne manipule un vrai volume ou mot de passe.
+
 Les limitations volontaires de cette étape sont :
 
 - le choix ou la création d'un point de montage personnalisé n'est pas pris en charge ;
@@ -230,6 +282,12 @@ Les limitations volontaires de cette étape sont :
   distant non monté nécessite `Refresh storage`, tandis que tout succès de commande
   déclenche déjà un refresh complet ;
 - l'éjection physique et l'annulation explicite restent hors périmètre.
+- RFM ne conserve pas le secret Polkit et ne peut donc pas réauthentifier une seconde
+  opération sans une nouvelle saisie ; keyring, cache de session et gestion avancée
+  des secrets restent hors périmètre ;
+- la compatibilité réelle du dialogue texte Polkit dans un PTY dépend de la pile
+  udisks2/Polkit du serveur et doit être validée manuellement sur chaque famille de
+  serveur prise en charge.
 
 ## Validation manuelle sur un serveur Linux
 
@@ -255,6 +313,32 @@ Les limitations volontaires de cette étape sont :
    visibles ; sur un serveur sans outil de montage, vérifier l'erreur dédiée ;
 10. confirmer qu'aucune commande de formatage, partitionnement, `sudo` ou modification
     de `fstab` n'est exécutée.
+
+### Cas Polkit prévu sur `serveur-keur`
+
+Cette procédure est documentaire et ne doit pas être lancée automatiquement dans
+l'environnement de développement :
+
+1. confirmer hors RFM que `/dev/sdc1` est démonté et qu'il s'agit bien du volume de
+   test ;
+2. vérifier que `LC_ALL=C udisksctl mount -b /dev/sdc1 --no-user-interaction` renvoie
+   `NotAuthorizedCanObtain` ;
+3. dans RFM, se connecter à `serveur-keur`, rafraîchir les volumes, sélectionner
+   `/dev/sdc1`, puis cliquer sur `Mount` ;
+4. vérifier que `Mounting…` reste affiché et que la boîte `Authentication required`
+   indique le serveur, l'action mount et `/dev/sdc1`, avec un champ masqué ;
+5. tester une fois `Cancel` : aucune seconde commande, aucun refresh de succès et
+   retour immédiat de l'action `Mount` ;
+6. relancer, saisir le mot de passe Polkit de test et valider avec Entrée ; vérifier
+   qu'aucun terminal ni texte `Password:` n'apparaît ;
+7. attendre le refresh et confirmer le mountpoint observé
+   `/run/media/gabriel/CTA`, puis `Open` ;
+8. répéter avec un mauvais mot de passe et vérifier l'erreur claire ainsi que la
+   libération de l'état occupé ;
+9. tester `Unmount` de la même façon si le serveur demande une authentification, puis
+   vérifier le `SafetyFallback` des panneaux ouverts sous le mountpoint ;
+10. couper enfin SSH pendant une boîte puis pendant une tentative PTY et vérifier
+    l'absence de crash, de popup persistante et de secret réutilisé après reconnexion.
 
 ## Validation manuelle avec une clé USB
 

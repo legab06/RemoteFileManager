@@ -7,6 +7,7 @@
 #include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
+#include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
@@ -22,6 +23,7 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QItemSelectionModel>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
@@ -279,6 +281,10 @@ class MainWindowTest final : public QObject
     void failedUnmountDoesNotEvacuatePane();
     void safetyFallbackPurgesUnmountedPathsFromHistory();
     void remoteMountWaitsForRefreshAndOpensObservedMountPoint();
+    void remoteAuthenticationDialogShowsContextAndCancelReleasesBusy();
+    void remoteAuthenticationSubmitsEphemeralPassword();
+    void remoteAuthenticationFailureReleasesBusy();
+    void disconnectClosesRemoteAuthenticationDialog();
     void failedRemoteUnmountDoesNotEvacuateOrRefresh();
     void remoteTimeoutRestoresUiWithoutRefresh();
     void successfulRemoteUnmountEvacuatesOnlyMatchingNamespace();
@@ -3396,6 +3402,261 @@ void MainWindowTest::remoteMountWaitsForRefreshAndOpensObservedMountPoint()
     QCOMPARE(directoryRequests.constFirst().at(1).toString(), mounted.rootPath);
 }
 
+void MainWindowTest::remoteAuthenticationDialogShowsContextAndCancelReleasesBusy()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    QSignalSpy cancellations(&window, &rfm::app::MainWindow::remoteVolumeAuthenticationCancelled);
+    setConnectionIdentity(window, QStringLiteral("auth.example.test"), QStringLiteral("alice"),
+                          QStringLiteral("/home/alice"));
+    QCOMPARE(storageRequests.size(), 1);
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Remote USB");
+    volume.device = QStringLiteral("/dev/sdc1");
+    volume.fileSystemType = QByteArrayLiteral("ext4");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    const quint64 refreshId = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, refreshId),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{volume})));
+    QTreeWidgetItem* const item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), volume.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    mountButton->click();
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult authRequired{
+        request.id,
+        request.operation,
+        request.target.device,
+        rfm::core::VolumeOperationError::AuthenticationRequired,
+        {},
+        41};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, authRequired)));
+
+    auto* const dialog = window.findChild<rfm::app::VolumeAuthenticationDialog*>();
+    QVERIFY(dialog != nullptr);
+    QCOMPARE(dialog->windowModality(), Qt::WindowModal);
+    auto* const password =
+        dialog->findChild<QLineEdit*>(QStringLiteral("volumeAuthenticationPasswordEdit"));
+    QVERIFY(password != nullptr);
+    QCOMPARE(password->echoMode(), QLineEdit::Password);
+    QVERIFY(password->inputMethodHints().testFlag(Qt::ImhSensitiveData));
+    QCOMPARE(dialog->findChild<QLabel*>(QStringLiteral("authenticationServerLabel"))->text(),
+             QStringLiteral("auth.example.test"));
+    QCOMPARE(dialog->findChild<QLabel*>(QStringLiteral("authenticationDeviceLabel"))->text(),
+             volume.device);
+    QVERIFY(dialog->findChild<QLabel*>(QStringLiteral("authenticationExplanationLabel"))
+                ->text()
+                .contains(QStringLiteral("mount")));
+    QVERIFY(item->text(0).contains(QStringLiteral("Mounting")));
+    mountButton->click();
+    QCOMPARE(operations.size(), 1);
+    dialog->reject();
+    QCOMPARE(cancellations.size(), 1);
+    QVERIFY(!item->text(0).contains(QStringLiteral("Mounting")));
+    QVERIFY(mountButton->isEnabled());
+    QCOMPARE(storageRequests.size(), 1);
+    QCOMPARE(operations.size(), 1);
+}
+
+void MainWindowTest::remoteAuthenticationSubmitsEphemeralPassword()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    QSignalSpy authenticationRequests(&window,
+                                      &rfm::app::MainWindow::remoteVolumeAuthenticationRequested);
+    setConnectionIdentity(window, QStringLiteral("auth.example.test"), QStringLiteral("alice"),
+                          QStringLiteral("/home/alice"));
+    QCOMPARE(storageRequests.size(), 1);
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    QVERIFY(navigation != nullptr);
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Remote USB");
+    volume.device = QStringLiteral("/dev/sdc1");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    const quint64 refreshId = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, refreshId),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{volume})));
+    QTreeWidgetItem* const item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), volume.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"))->click();
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult authRequired{
+        request.id,
+        request.operation,
+        request.target.device,
+        rfm::core::VolumeOperationError::AuthenticationRequired,
+        {},
+        93};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, authRequired)));
+    auto* const dialog = window.findChild<rfm::app::VolumeAuthenticationDialog*>();
+    QVERIFY(dialog != nullptr);
+    auto* const password =
+        dialog->findChild<QLineEdit*>(QStringLiteral("volumeAuthenticationPasswordEdit"));
+    QVERIFY(password != nullptr);
+    password->setText(QStringLiteral("one-use fixture"));
+    QTest::keyClick(password, Qt::Key_Return);
+
+    QCOMPARE(authenticationRequests.size(), 1);
+    QCOMPARE(authenticationRequests.constFirst().at(0).toULongLong(), request.id);
+    QCOMPARE(authenticationRequests.constFirst().at(1).toULongLong(), quint64{93});
+    QCOMPARE(authenticationRequests.constFirst().at(2).toByteArray(),
+             QByteArrayLiteral("one-use fixture"));
+    QVERIFY(password->text().isEmpty());
+    QCOMPARE(storageRequests.size(), 1);
+
+    const rfm::core::VolumeOperationResult success{request.id,
+                                                   request.operation,
+                                                   request.target.device,
+                                                   rfm::core::VolumeOperationError::None,
+                                                   {}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, success)));
+    QCOMPARE(storageRequests.size(), 2);
+    QVERIFY(item->text(0).contains(QStringLiteral("Mounting")));
+}
+
+void MainWindowTest::remoteAuthenticationFailureReleasesBusy()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    setConnectionIdentity(window, QStringLiteral("auth.example.test"), QStringLiteral("alice"));
+    QCOMPARE(storageRequests.size(), 1);
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(mountButton != nullptr);
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Remote USB");
+    volume.device = QStringLiteral("/dev/sdc1");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    const quint64 refreshId = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, refreshId),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{volume})));
+    QTreeWidgetItem* const item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), volume.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    mountButton->click();
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult authRequired{
+        request.id,
+        request.operation,
+        request.target.device,
+        rfm::core::VolumeOperationError::AuthenticationRequired,
+        {},
+        13};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, authRequired)));
+    auto* const dialog = window.findChild<rfm::app::VolumeAuthenticationDialog*>();
+    QVERIFY(dialog != nullptr);
+    auto* const password =
+        dialog->findChild<QLineEdit*>(QStringLiteral("volumeAuthenticationPasswordEdit"));
+    QVERIFY(password != nullptr);
+    password->setText(QStringLiteral("wrong fixture"));
+    dialog->accept();
+    const rfm::core::VolumeOperationResult failure{
+        request.id,
+        request.operation,
+        request.target.device,
+        rfm::core::VolumeOperationError::AuthenticationFailed,
+        {}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, failure)));
+    QVERIFY(!item->text(0).contains(QStringLiteral("Mounting")));
+    QVERIFY(mountButton->isEnabled());
+    QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("Authentication failed")));
+    QCOMPARE(storageRequests.size(), 1);
+}
+
+void MainWindowTest::disconnectClosesRemoteAuthenticationDialog()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
+    QSignalSpy authenticationRequests(&window,
+                                      &rfm::app::MainWindow::remoteVolumeAuthenticationRequested);
+    setConnectionIdentity(window, QStringLiteral("auth.example.test"), QStringLiteral("alice"));
+    QCOMPARE(storageRequests.size(), 1);
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    QVERIFY(navigation != nullptr);
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Remote USB");
+    volume.device = QStringLiteral("/dev/sdc1");
+    volume.kind = rfm::core::StorageKind::External;
+    volume.mounted = false;
+    const quint64 refreshId = storageRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, refreshId),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{volume})));
+    QTreeWidgetItem* const item =
+        volumeItemByDevice(navigation->tree()->topLevelItem(1), volume.device);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+    window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"))->click();
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    const rfm::core::VolumeOperationResult authRequired{
+        request.id,
+        request.operation,
+        request.target.device,
+        rfm::core::VolumeOperationError::AuthenticationRequired,
+        {},
+        7};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteVolumeOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::VolumeOperationResult, authRequired)));
+    QPointer<rfm::app::VolumeAuthenticationDialog> dialog =
+        window.findChild<rfm::app::VolumeAuthenticationDialog*>();
+    QVERIFY(dialog != nullptr);
+    dialog->findChild<QLineEdit*>(QStringLiteral("volumeAuthenticationPasswordEdit"))
+        ->setText(QStringLiteral("must not escape"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    QTRY_VERIFY(dialog == nullptr);
+    QCOMPARE(authenticationRequests.size(), 0);
+}
+
 void MainWindowTest::failedRemoteUnmountDoesNotEvacuateOrRefresh()
 {
     rfm::app::MainWindow window;
@@ -3452,6 +3713,7 @@ void MainWindowTest::failedRemoteUnmountDoesNotEvacuateOrRefresh()
     QVERIFY(unmountButton->isEnabled());
     QVERIFY(window.statusBar()->currentMessage().contains(QStringLiteral("Permission")));
     QVERIFY(!window.statusBar()->currentMessage().contains(QStringLiteral("private detail")));
+    QVERIFY(window.findChild<rfm::app::VolumeAuthenticationDialog*>() == nullptr);
 }
 
 void MainWindowTest::remoteTimeoutRestoresUiWithoutRefresh()

@@ -49,6 +49,7 @@ class OperationPanel;
 class ConnectionDialog;
 class HomePage;
 class NavigationTree;
+class VolumeAuthenticationDialog;
 struct RemoteMachineDescriptor;
 
 class MainWindow final : public QMainWindow
@@ -70,6 +71,9 @@ class MainWindow final : public QMainWindow
     void localStorageProbeRequested(quint64 requestId);
     void volumeOperationRequested(rfm::core::VolumeOperationRequest request);
     void remoteVolumeOperationRequested(rfm::core::VolumeOperationRequest request);
+    void remoteVolumeAuthenticationRequested(quint64 operationId, quint64 authenticationToken,
+                                             QByteArray password);
+    void remoteVolumeAuthenticationCancelled(quint64 operationId, quint64 authenticationToken);
     void remoteStorageRequested(quint64 requestId);
     void remoteStorageProbeRequested(quint64 requestId);
     void createDirectoryRequested(quint64 id, QString parent, QString name);
@@ -193,6 +197,7 @@ class MainWindow final : public QMainWindow
                                     rfm::core::VolumeOperation operation);
     Q_INVOKABLE void
     handleRemoteVolumeOperationResult(const rfm::core::VolumeOperationResult& result);
+    void showRemoteVolumeAuthentication(const rfm::core::VolumeOperationResult& result);
     void evacuateLocalPanesFromMountPoint(const QString& mountPoint);
     void evacuateRemotePanesFromMountPoint(const QString& machineId, const QString& mountPoint);
     [[nodiscard]] QString
@@ -317,6 +322,8 @@ class MainWindow final : public QMainWindow
         rfm::core::VolumeOperationRequest request;
         QString machineId;
         quint64 connectionGeneration{0};
+        quint64 authenticationToken{0};
+        QPointer<VolumeAuthenticationDialog> authenticationDialog;
     };
     QHash<quint64, RemoteVolumeOperationContext> m_remoteVolumeOperations;
     QSet<quint64> m_remoteVolumeOperationsAwaitingRefresh;

@@ -40,9 +40,41 @@ class RemoteLinuxVolumeService final
     operationCommand(const rfm::core::VolumeOperationRequest& request,
                      const RemoteLinuxVolumeCapabilities& capabilities,
                      rfm::core::VolumeOperationResult* immediateResult = nullptr);
+    [[nodiscard]] static std::optional<QString>
+    interactiveOperationCommand(const rfm::core::VolumeOperationRequest& request,
+                                const RemoteLinuxVolumeCapabilities& capabilities,
+                                rfm::core::VolumeOperationResult* immediateResult = nullptr);
     [[nodiscard]] static rfm::core::VolumeOperationResult
     operationResult(const rfm::core::VolumeOperationRequest& request,
                     const rfm::core::VolumeCommandResult& commandResult);
+};
+
+enum class RemotePolkitPromptEvent {
+    None,
+    PasswordPrompt,
+    AuthenticationFailed,
+    TimedOutBeforePrompt,
+    TimedOutAfterPrompt
+};
+
+class RemotePolkitPromptParser final
+{
+  public:
+    [[nodiscard]] RemotePolkitPromptEvent consume(const QByteArray& output);
+    [[nodiscard]] RemotePolkitPromptEvent timedOut() const;
+    void passwordSent();
+    [[nodiscard]] bool authenticationCompleted() const;
+    [[nodiscard]] bool permissionDenied() const;
+    [[nodiscard]] bool volumeBusy() const;
+    void clear();
+
+  private:
+    QByteArray m_recentOutput;
+    bool m_passwordSent{false};
+    bool m_passwordPromptSeen{false};
+    bool m_authenticationCompleted{false};
+    bool m_permissionDenied{false};
+    bool m_volumeBusy{false};
 };
 
 } // namespace rfm::ssh

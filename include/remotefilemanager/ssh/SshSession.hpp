@@ -30,6 +30,8 @@ class SshSession final : public QObject
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
     void operateVolume(rfm::core::VolumeOperationRequest request);
+    void authenticateVolume(quint64 operationId, quint64 authenticationToken, QByteArray password);
+    void cancelVolumeAuthentication(quint64 operationId, quint64 authenticationToken);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
     void moveEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
