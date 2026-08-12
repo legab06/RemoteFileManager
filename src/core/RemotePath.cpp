@@ -2,12 +2,13 @@
 
 #include <QStringList>
 
-namespace rfm::core {
+namespace rfm::core
+{
 
 bool RemotePath::isValidName(const QString& name)
 {
-    return !name.isEmpty() && name != QStringLiteral(".") && name != QStringLiteral("..")
-        && !name.contains(QChar{'/'}) && !name.contains(QChar{'\0'});
+    return !name.isEmpty() && name != QStringLiteral(".") && name != QStringLiteral("..") &&
+           !name.contains(QChar{'/'}) && !name.contains(QChar{'\0'});
 }
 
 QString RemotePath::normalize(const QString& path)
@@ -59,8 +60,8 @@ QString RemotePath::join(const QString& directory, const QString& name)
 QString RemotePath::parent(const QString& path)
 {
     const QString normalized = normalize(path);
-    if (normalized.isEmpty() || normalized == QStringLiteral("/")
-        || normalized == QStringLiteral(".")) {
+    if (normalized.isEmpty() || normalized == QStringLiteral("/") ||
+        normalized == QStringLiteral(".")) {
         return normalized;
     }
     const qsizetype separator = normalized.lastIndexOf(QChar{'/'});
@@ -76,8 +77,8 @@ QString RemotePath::parent(const QString& path)
 QString RemotePath::fileName(const QString& path)
 {
     const QString normalized = normalize(path);
-    if (normalized.isEmpty() || normalized == QStringLiteral("/")
-        || normalized == QStringLiteral(".")) {
+    if (normalized.isEmpty() || normalized == QStringLiteral("/") ||
+        normalized == QStringLiteral(".")) {
         return {};
     }
     return normalized.mid(normalized.lastIndexOf(QChar{'/'}) + 1);
@@ -86,9 +87,20 @@ QString RemotePath::fileName(const QString& path)
 bool RemotePath::isProtected(const QString& path)
 {
     const QString normalized = normalize(path);
-    return normalized.isEmpty() || normalized == QStringLiteral("/")
-        || normalized == QStringLiteral(".") || normalized == QStringLiteral("..")
-        || normalized.startsWith(QStringLiteral("../"));
+    return normalized.isEmpty() || normalized == QStringLiteral("/") ||
+           normalized == QStringLiteral(".") || normalized == QStringLiteral("..") ||
+           normalized.startsWith(QStringLiteral("../"));
 }
 
-}  // namespace rfm::core
+bool RemotePath::isAtOrBelow(const QString& path, const QString& rootPath)
+{
+    const QString normalizedPath = normalize(path);
+    const QString normalizedRoot = normalize(rootPath);
+    if (!normalizedPath.startsWith(QChar{'/'}) || !normalizedRoot.startsWith(QChar{'/'})) {
+        return false;
+    }
+    return normalizedPath == normalizedRoot || normalizedRoot == QStringLiteral("/") ||
+           normalizedPath.startsWith(normalizedRoot + QChar{'/'});
+}
+
+} // namespace rfm::core

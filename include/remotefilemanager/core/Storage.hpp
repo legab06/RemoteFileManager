@@ -51,18 +51,21 @@ struct StorageVolume {
     StorageVolume(QString displayNameValue, QString rootPathValue, QString deviceValue,
                   QByteArray fileSystemTypeValue, quint64 bytesTotalValue, StorageKind kindValue,
                   bool removableValue, bool ejectableValue, bool readOnlyValue,
-                  QString fileSystemLabelValue = {}, QString deviceModelValue = {})
+                  QString fileSystemLabelValue = {}, QString deviceModelValue = {},
+                  bool mountedValue = true)
         : displayName(std::move(displayNameValue)), rootPath(std::move(rootPathValue)),
           device(std::move(deviceValue)), fileSystemType(std::move(fileSystemTypeValue)),
           bytesTotal(bytesTotalValue), kind(kindValue), removable(removableValue),
           ejectable(ejectableValue), readOnly(readOnlyValue),
-          fileSystemLabel(std::move(fileSystemLabelValue)), deviceModel(std::move(deviceModelValue))
+          fileSystemLabel(std::move(fileSystemLabelValue)),
+          deviceModel(std::move(deviceModelValue)), mounted(mountedValue)
     {}
 
     // Presentation only. Navigation must always use rootPath.
     QString displayName;
     // Mounted filesystem root and stable navigation destination for this snapshot.
     QString rootPath;
+    // System identity used for volume operations (for example /dev/sdb1), never presentation.
     QString device;
     QByteArray fileSystemType;
     quint64 bytesTotal{0};
@@ -72,6 +75,24 @@ struct StorageVolume {
     bool readOnly{false};
     QString fileSystemLabel;
     QString deviceModel;
+    // Explicit availability state. rootPath is a path only and is not used as this flag.
+    bool mounted{true};
+};
+
+// Common representation of one lsblk JSON object. Acquisition is platform/backend-specific;
+// parsing and conversion to StorageVolume are shared by local and SSH discovery.
+struct LinuxBlockDevice {
+    QString device;
+    QString parentDevice;
+    QString objectType;
+    QByteArray fileSystemType;
+    QString fileSystemLabel;
+    QString mountPoint;
+    QString transport;
+    QString deviceModel;
+    quint64 bytesTotal{0};
+    bool removable{false};
+    bool readOnly{false};
 };
 
 struct LinuxMountInfo {
@@ -99,6 +120,11 @@ storageDeviceEvidence(const QList<StorageTopologyNode>& ancestry, bool blockDevi
                                               const QString& fileSystemLabel = {},
                                               quint64 bytesTotal = 0);
 [[nodiscard]] QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents);
+[[nodiscard]] QList<LinuxBlockDevice> parseLinuxBlockDevices(const QByteArray& contents);
+[[nodiscard]] QList<StorageVolume>
+mergeLinuxBlockDevices(QList<StorageVolume> mountedVolumes,
+                       const QList<LinuxBlockDevice>& blockDevices);
+[[nodiscard]] QByteArray storageVolumeFingerprint(const QList<StorageVolume>& volumes);
 
 } // namespace rfm::core
 

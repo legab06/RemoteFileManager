@@ -17,7 +17,7 @@ class QTableWidget;
 namespace rfm::app
 {
 
-enum class PaneNavigation { Initial, Normal, Back, Forward, Refresh };
+enum class PaneNavigation { Initial, Normal, Back, Forward, Refresh, SafetyFallback };
 
 class FileBrowserPane final : public QWidget
 {
@@ -45,6 +45,9 @@ class FileBrowserPane final : public QWidget
                        PaneNavigation navigation = PaneNavigation::Refresh);
     void clear();
     void removeHistoryForSource(rfm::core::FileSource source);
+    void removeLocalHistoryUnderPath(const QString& rootPath);
+    void removeHistoryUnderPath(rfm::core::FileSource source, const QString& machineId,
+                                const QString& rootPath);
     void setPendingSelectionNames(QStringList names);
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
@@ -82,8 +85,7 @@ class FileBrowserPane final : public QWidget
     void updateDropAppearance(bool active, bool valid, int folderRow = -1);
     void updateCutAppearance();
     [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
-    void requestLocation(const rfm::core::BrowserLocation& location,
-                         PaneNavigation navigation);
+    void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
     QLineEdit* m_pathEdit{nullptr};
     QTableWidget* m_fileTable{nullptr};
