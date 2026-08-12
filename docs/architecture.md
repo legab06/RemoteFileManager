@@ -11,7 +11,7 @@
 
 La règle principale est que l’interface ne doit jamais manipuler directement `ssh_session`, `sftp_session` ou un autre type de libssh. Elle déclenche des intentions et reçoit des résultats métier.
 
-## Flux prévu
+## Flux actuel
 
 ```mermaid
 flowchart TD
@@ -51,13 +51,13 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
 
 ## Opérations distantes
 
-- SFTP servira à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
+- SFTP sert à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
 - Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
-- Les copies importantes entre deux chemins du même serveur devront rester côté serveur pour éviter un aller-retour des données par le client.
+- Les copies entre deux chemins du même serveur restent côté serveur pour éviter un aller-retour des données par le client.
 - `cp` n’expose pas nativement une progression exploitable. Une copie active affiche donc une
   progression indéterminée honnête ; aucun pourcentage n'est estimé ou fabriqué.
-- Les commandes distantes devront être construites et échappées dans une couche dédiée ; aucun chemin fourni par l’utilisateur ne sera concaténé naïvement dans une commande shell.
+- Les commandes distantes sont construites et échappées dans une couche dédiée ; aucun chemin fourni par l’utilisateur n’est concaténé naïvement dans une commande shell.
 - Les opérations de fichiers dépendent de `RemoteFileBackend`, dont l’implémentation libssh reste privée au transport. Les tests utilisent un double sans connexion réseau.
 - La copie distante utilise actuellement `cp -P -n` via un canal SSH non bloquant, faute de
   primitive de copie serveur exposée par SFTP/libssh. Ses arguments sont échappés séparément, les

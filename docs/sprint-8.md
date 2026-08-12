@@ -181,13 +181,19 @@ le quoting POSIX à apostrophes déjà utilisé pour les commandes distantes ; e
 apostrophes et métacaractères restent des données. Aucun fallback global n'est permis.
 La session SSH met d'abord en file un `lsblk` ciblé, puis construit la commande
 destructive uniquement à partir de cette réponse fraîche. Cette revalidation est
-répétée après l'éventuelle saisie Polkit, avant la commande PTY, car la topologie peut
-avoir changé pendant le dialogue.
+répétée après l'éventuelle saisie Polkit, car la topologie peut avoir changé pendant
+le dialogue. Si le device possède alors plusieurs attachments, la session abandonne
+la voie interactive, efface immédiatement le `SecurePassword` devenu inutile et met
+en file le seul `umount -- '<mountpoint sélectionné>'`, sans nouveau dialogue ni
+fallback vers un démontage par device. La disparition du mountpoint ou une topologie
+incohérente n'exécute aucune commande destructive.
 
 Après validation de cette boîte, `SshSession` vérifie l'identifiant d'opération et le
-jeton de défi, puis ouvre un canal SSH dédié avec PTY. Ce PTY est strictement interne :
-il n'existe ni terminal graphique, ni shell libre, ni console utilisateur. La seconde
-commande appartient toujours à l'ensemble fermé du backend :
+jeton de défi. Si la revalidation conserve un seul attachment, elle ouvre un canal SSH
+dédié avec PTY et transfère l'unique propriété du `SecurePassword`. Ce PTY est
+strictement interne : il n'existe ni terminal graphique, ni shell libre, ni console
+utilisateur. La commande interactive appartient toujours à l'ensemble fermé du
+backend :
 
 ```text
 LC_ALL=C udisksctl mount -b /dev/...

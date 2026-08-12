@@ -8,7 +8,7 @@ int main(int argc, char* argv[])
     QApplication application(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("RemoteFileManager"));
     QCoreApplication::setApplicationName(QStringLiteral("RemoteFileManager"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.8.0"));
+    QCoreApplication::setApplicationVersion(QStringLiteral("0.8.1"));
 
     rfm::app::MainWindow window;
     window.show();
