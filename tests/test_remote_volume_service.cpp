@@ -38,6 +38,8 @@ class RemoteVolumeServiceTest final : public QObject
     void reportsUnavailableSessionCapabilities();
     void invalidatesCapabilitiesBetweenSessions();
     void parsesBoundedPolkitConversation();
+    void detectsPolkitAuthenticationRetry();
+    void preservesPolkitAuthenticationSuccess();
     void preservesStructuredInteractiveErrors_data();
     void preservesStructuredInteractiveErrors();
     void sessionLossBeforeOperationReturnsStructuredError();
@@ -259,14 +261,77 @@ void RemoteVolumeServiceTest::parsesBoundedPolkitConversation()
     QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::DeviceNotFound);
 }
 
+void RemoteVolumeServiceTest::detectsPolkitAuthenticationRetry()
+{
+    rfm::ssh::RemotePolkitPromptParser parser;
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password:")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    QCOMPARE(parser.authenticationState(),
+             rfm::ssh::RemotePolkitAuthenticationState::PasswordPromptReceived);
+    parser.passwordSent();
+    QCOMPARE(parser.authenticationState(),
+             rfm::ssh::RemotePolkitAuthenticationState::WaitingForAuthenticationResult);
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password:")),
+             rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed);
+    QCOMPARE(parser.authenticationState(),
+             rfm::ssh::RemotePolkitAuthenticationState::AuthenticationFailed);
+    QCOMPARE(parser.operationError(), rfm::core::VolumeOperationError::AuthenticationFailed);
+
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Pass")), rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.consume(QByteArrayLiteral("word:")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    parser.passwordSent();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Pa")), rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.consume(QByteArrayLiteral("ss\x1b[31mwo")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.consume(QByteArrayLiteral("rd\x1b[0m:")),
+             rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed);
+
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password for alice:")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    parser.passwordSent();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password for alice:")),
+             rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed);
+
+    parser.clear();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password:")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    parser.passwordSent();
+    QCOMPARE(parser.consume(QByteArrayLiteral("Sorry, try again.\r\nPass")),
+             rfm::ssh::RemotePolkitPromptEvent::AuthenticationFailed);
+}
+
+void RemoteVolumeServiceTest::preservesPolkitAuthenticationSuccess()
+{
+    rfm::ssh::RemotePolkitPromptParser parser;
+    QCOMPARE(parser.consume(QByteArrayLiteral("Password:")),
+             rfm::ssh::RemotePolkitPromptEvent::PasswordPrompt);
+    parser.passwordSent();
+    QCOMPARE(parser.consume(QByteArrayLiteral("==== AUTHENTICATION COMPLETE ====")),
+             rfm::ssh::RemotePolkitPromptEvent::None);
+    QCOMPARE(parser.authenticationState(),
+             rfm::ssh::RemotePolkitAuthenticationState::AuthenticationSucceeded);
+    QVERIFY(parser.authenticationCompleted());
+    QVERIFY(!parser.operationError().has_value());
+
+    const auto result = rfm::ssh::RemoteLinuxVolumeService::interactiveOperationResult(
+        requestFor(rfm::core::VolumeOperation::Mount), {true, false, false, 0, {}, {}, false},
+        parser.operationError());
+    QVERIFY(result.succeeded());
+}
+
 void RemoteVolumeServiceTest::preservesStructuredInteractiveErrors_data()
 {
     QTest::addColumn<QByteArray>("output");
     QTest::addColumn<bool>("credentialsWereSent");
     QTest::addColumn<rfm::core::VolumeOperationError>("protocolError");
-    QTest::newRow("authentication-failed")
+    QTest::newRow("authentication-failed-explicit")
         << QByteArrayLiteral("Sorry, try again.\r\nPassword:") << true
         << rfm::core::VolumeOperationError::AuthenticationFailed;
+    QTest::newRow("authentication-retry") << QByteArrayLiteral("Password:") << true
+                                          << rfm::core::VolumeOperationError::AuthenticationFailed;
     QTest::newRow("target-busy") << QByteArrayLiteral("target is busy") << false
                                  << rfm::core::VolumeOperationError::VolumeBusy;
     QTest::newRow("device-busy") << QByteArrayLiteral("device is busy") << false

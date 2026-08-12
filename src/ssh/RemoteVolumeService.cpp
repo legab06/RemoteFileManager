@@ -2,6 +2,8 @@
 
 #include <QSet>
 
+#include <cctype>
+
 namespace rfm::ssh
 {
 
@@ -195,44 +197,86 @@ void SshCommandPollScheduler::cancel()
 
 bool SshCommandPollScheduler::pending() const { return m_pending; }
 
+namespace
+{
+
+bool containsPasswordPrompt(const QByteArray& output)
+{
+    qsizetype passwordOffset = output.indexOf("password");
+    while (passwordOffset >= 0) {
+        qsizetype suffixOffset = passwordOffset + qsizetype{8};
+        while (suffixOffset < output.size() &&
+               (output.at(suffixOffset) == ' ' || output.at(suffixOffset) == '\t')) {
+            ++suffixOffset;
+        }
+        if (suffixOffset < output.size() && output.at(suffixOffset) == ':') {
+            return true;
+        }
+        if (output.mid(suffixOffset, 4) == QByteArrayLiteral("for ")) {
+            const qsizetype colonOffset = output.indexOf(':', suffixOffset + 4);
+            const qsizetype lineEnd = output.indexOf('\n', suffixOffset + 4);
+            if (colonOffset >= 0 && colonOffset - suffixOffset <= 132 &&
+                (lineEnd < 0 || colonOffset < lineEnd)) {
+                return true;
+            }
+        }
+        passwordOffset = output.indexOf("password", passwordOffset + 1);
+    }
+    return false;
+}
+
+} // namespace
+
 RemotePolkitPromptEvent RemotePolkitPromptParser::consume(const QByteArray& output)
 {
     if (output.isEmpty()) {
         return RemotePolkitPromptEvent::None;
     }
-    QByteArray cleaned;
-    cleaned.reserve(output.size());
-    bool inEscapeSequence = false;
     for (const char character : output) {
         const auto byte = static_cast<unsigned char>(character);
-        if (inEscapeSequence) {
+        if (m_escapeState == EscapeState::ControlSequence) {
             if (byte >= 0x40U && byte <= 0x7eU) {
-                inEscapeSequence = false;
+                m_escapeState = EscapeState::None;
             }
+            continue;
+        }
+        if (m_escapeState == EscapeState::OperatingSystemCommand) {
+            if (byte == 0x07U) {
+                m_escapeState = EscapeState::None;
+            } else if (byte == 0x1bU) {
+                m_escapeState = EscapeState::Escape;
+            }
+            continue;
+        }
+        if (m_escapeState == EscapeState::Escape) {
+            m_escapeState = byte == static_cast<unsigned char>('[') ? EscapeState::ControlSequence
+                            : byte == static_cast<unsigned char>(']')
+                                ? EscapeState::OperatingSystemCommand
+                                : EscapeState::None;
             continue;
         }
         if (byte == 0x1bU) {
-            inEscapeSequence = true;
+            m_escapeState = EscapeState::Escape;
             continue;
         }
         if (character == '\b') {
-            if (!cleaned.isEmpty()) {
-                cleaned.chop(1);
+            if (!m_recentOutput.isEmpty()) {
+                m_recentOutput.chop(1);
             }
             continue;
         }
-        if (character != '\r') {
-            cleaned.append(character);
+        if (character != '\r' && (byte >= 0x20U || character == '\n' || character == '\t')) {
+            m_recentOutput.append(static_cast<char>(std::tolower(byte)));
         }
     }
-    m_recentOutput.append(cleaned.toLower());
     constexpr qsizetype maximumProtocolWindow = 1024;
     if (m_recentOutput.size() > maximumProtocolWindow) {
         m_recentOutput.remove(0, m_recentOutput.size() - maximumProtocolWindow);
     }
 
-    m_authenticationCompleted =
-        m_authenticationCompleted || m_recentOutput.contains("authentication complete");
+    if (m_recentOutput.contains("authentication complete")) {
+        m_authenticationState = RemotePolkitAuthenticationState::AuthenticationSucceeded;
+    }
     m_permissionDenied = m_permissionDenied || m_recentOutput.contains("not authorized") ||
                          m_recentOutput.contains("permission denied");
     m_volumeBusy = m_volumeBusy || m_recentOutput.contains("target is busy") ||
@@ -243,15 +287,19 @@ RemotePolkitPromptEvent RemotePolkitPromptParser::consume(const QByteArray& outp
     const bool explicitFailure = m_recentOutput.contains("authentication failed") ||
                                  m_recentOutput.contains("authentication failure") ||
                                  m_recentOutput.contains("sorry, try again");
-    const bool passwordPrompt = m_recentOutput.contains("password:");
-    if (explicitFailure || (m_passwordSent && passwordPrompt && !m_authenticationCompleted)) {
-        m_authenticationFailed = true;
+    const bool passwordPrompt = containsPasswordPrompt(m_recentOutput);
+    const bool authenticationRetry =
+        passwordPrompt &&
+        m_authenticationState == RemotePolkitAuthenticationState::WaitingForAuthenticationResult;
+    if (explicitFailure || authenticationRetry) {
+        m_authenticationState = RemotePolkitAuthenticationState::AuthenticationFailed;
         m_recentOutput.fill('\0');
         m_recentOutput.clear();
         return RemotePolkitPromptEvent::AuthenticationFailed;
     }
-    if (!m_passwordSent && !m_passwordPromptSeen && passwordPrompt) {
-        m_passwordPromptSeen = true;
+    if (m_authenticationState == RemotePolkitAuthenticationState::WaitingForPasswordPrompt &&
+        passwordPrompt) {
+        m_authenticationState = RemotePolkitAuthenticationState::PasswordPromptReceived;
         m_recentOutput.fill('\0');
         m_recentOutput.clear();
         return RemotePolkitPromptEvent::PasswordPrompt;
@@ -261,18 +309,29 @@ RemotePolkitPromptEvent RemotePolkitPromptParser::consume(const QByteArray& outp
 
 RemotePolkitPromptEvent RemotePolkitPromptParser::timedOut() const
 {
-    return m_passwordPromptSeen ? RemotePolkitPromptEvent::TimedOutAfterPrompt
-                                : RemotePolkitPromptEvent::TimedOutBeforePrompt;
+    return m_authenticationState == RemotePolkitAuthenticationState::WaitingForPasswordPrompt
+               ? RemotePolkitPromptEvent::TimedOutBeforePrompt
+               : RemotePolkitPromptEvent::TimedOutAfterPrompt;
 }
 
 void RemotePolkitPromptParser::passwordSent()
 {
-    m_passwordSent = true;
+    if (m_authenticationState == RemotePolkitAuthenticationState::PasswordPromptReceived) {
+        m_authenticationState = RemotePolkitAuthenticationState::WaitingForAuthenticationResult;
+    }
     m_recentOutput.fill('\0');
     m_recentOutput.clear();
 }
 
-bool RemotePolkitPromptParser::authenticationCompleted() const { return m_authenticationCompleted; }
+RemotePolkitAuthenticationState RemotePolkitPromptParser::authenticationState() const
+{
+    return m_authenticationState;
+}
+
+bool RemotePolkitPromptParser::authenticationCompleted() const
+{
+    return m_authenticationState == RemotePolkitAuthenticationState::AuthenticationSucceeded;
+}
 
 bool RemotePolkitPromptParser::permissionDenied() const { return m_permissionDenied; }
 
@@ -282,7 +341,7 @@ bool RemotePolkitPromptParser::deviceNotFound() const { return m_deviceNotFound;
 
 std::optional<rfm::core::VolumeOperationError> RemotePolkitPromptParser::operationError() const
 {
-    if (m_authenticationFailed) {
+    if (m_authenticationState == RemotePolkitAuthenticationState::AuthenticationFailed) {
         return rfm::core::VolumeOperationError::AuthenticationFailed;
     }
     if (m_volumeBusy) {
@@ -301,10 +360,8 @@ void RemotePolkitPromptParser::clear()
 {
     m_recentOutput.fill('\0');
     m_recentOutput.clear();
-    m_passwordSent = false;
-    m_passwordPromptSeen = false;
-    m_authenticationCompleted = false;
-    m_authenticationFailed = false;
+    m_authenticationState = RemotePolkitAuthenticationState::WaitingForPasswordPrompt;
+    m_escapeState = EscapeState::None;
     m_permissionDenied = false;
     m_volumeBusy = false;
     m_deviceNotFound = false;

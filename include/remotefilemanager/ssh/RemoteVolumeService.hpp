@@ -82,12 +82,21 @@ enum class RemotePolkitPromptEvent {
     TimedOutAfterPrompt
 };
 
+enum class RemotePolkitAuthenticationState {
+    WaitingForPasswordPrompt,
+    PasswordPromptReceived,
+    WaitingForAuthenticationResult,
+    AuthenticationSucceeded,
+    AuthenticationFailed
+};
+
 class RemotePolkitPromptParser final
 {
   public:
     [[nodiscard]] RemotePolkitPromptEvent consume(const QByteArray& output);
     [[nodiscard]] RemotePolkitPromptEvent timedOut() const;
     void passwordSent();
+    [[nodiscard]] RemotePolkitAuthenticationState authenticationState() const;
     [[nodiscard]] bool authenticationCompleted() const;
     [[nodiscard]] bool permissionDenied() const;
     [[nodiscard]] bool volumeBusy() const;
@@ -96,11 +105,12 @@ class RemotePolkitPromptParser final
     void clear();
 
   private:
+    enum class EscapeState { None, Escape, ControlSequence, OperatingSystemCommand };
+
     QByteArray m_recentOutput;
-    bool m_passwordSent{false};
-    bool m_passwordPromptSeen{false};
-    bool m_authenticationCompleted{false};
-    bool m_authenticationFailed{false};
+    RemotePolkitAuthenticationState m_authenticationState{
+        RemotePolkitAuthenticationState::WaitingForPasswordPrompt};
+    EscapeState m_escapeState{EscapeState::None};
     bool m_permissionDenied{false};
     bool m_volumeBusy{false};
     bool m_deviceNotFound{false};

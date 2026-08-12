@@ -3702,6 +3702,9 @@ void MainWindowTest::remoteInteractiveBusinessErrorsReleaseBusy()
     QVERIFY(mountButton->isEnabled());
     QVERIFY(window.statusBar()->currentMessage().contains(message));
     QCOMPARE(storageRequests.size(), 1);
+    mountButton->click();
+    QCOMPARE(operations.size(), 2);
+    QVERIFY(item->text(0).contains(QStringLiteral("Mounting")));
 }
 
 void MainWindowTest::disconnectClosesRemoteAuthenticationDialog()

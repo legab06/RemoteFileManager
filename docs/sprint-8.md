@@ -211,6 +211,12 @@ reformulées puis reparsées, ni marquées comme crash. Les erreurs libssh, d'é
 de canal restent au contraire des erreurs techniques ; les timeouts et pertes de
 connexion gardent leurs classifications dédiées.
 
+Après l'envoi complet du secret, la machine d'état attend explicitement le résultat
+d'authentification. Tout nouveau prompt `Password:` — y compris fragmenté entre
+plusieurs lectures PTY — termine immédiatement la tentative avec
+`AuthenticationFailed`; RFM n'attend pas le timeout et ne relance pas implicitement
+le dialogue. Le premier prompt reste normal et un succès Polkit poursuit l'opération.
+
 Sur un serveur headless, l'authentification interactive dépend de la capacité de
 Polkit/udisks2 à fournir son dialogue dans le PTY SSH. Un compte auquel Polkit oppose
 un refus définitif reçoit une erreur de permission sans popup. RemoteFileManager
