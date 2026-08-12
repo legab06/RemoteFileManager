@@ -199,6 +199,35 @@ std::optional<QString> RemoteLinuxVolumeService::interactiveOperationCommand(
     return QStringLiteral("LC_ALL=C udisksctl %1 -b %2").arg(verb, request.target.device);
 }
 
+std::optional<RemoteVolumeOperationCommand> RemoteLinuxVolumeService::revalidatedUnmountCommand(
+    const rfm::core::VolumeOperationRequest& request,
+    const rfm::core::VolumeCommandResult& topologyCommand,
+    const RemoteLinuxVolumeCapabilities& capabilities, rfm::core::SecurePassword& password,
+    rfm::core::VolumeOperationResult* immediateResult)
+{
+    const auto revalidated =
+        rfm::core::revalidatedVolumeUnmountRequest(request, topologyCommand, immediateResult);
+    if (!revalidated.has_value()) {
+        password.clear();
+        return std::nullopt;
+    }
+
+    const bool interactive =
+        !password.isEmpty() && rfm::core::volumeUnmountTargetMode(*revalidated) ==
+                                   rfm::core::VolumeUnmountTargetMode::Device;
+    if (!interactive) {
+        password.clear();
+    }
+    const auto command =
+        interactive ? interactiveOperationCommand(*revalidated, capabilities, immediateResult)
+                    : operationCommand(*revalidated, capabilities, immediateResult);
+    if (!command.has_value()) {
+        password.clear();
+        return std::nullopt;
+    }
+    return RemoteVolumeOperationCommand{*revalidated, *command, interactive};
+}
+
 rfm::core::VolumeOperationResult
 RemoteLinuxVolumeService::operationResult(const rfm::core::VolumeOperationRequest& request,
                                           const rfm::core::VolumeCommandResult& commandResult)

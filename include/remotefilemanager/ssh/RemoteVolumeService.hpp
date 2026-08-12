@@ -1,5 +1,6 @@
 #pragma once
 
+#include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/VolumeService.hpp"
 
 #include <QByteArray>
@@ -16,6 +17,12 @@ struct RemoteLinuxVolumeCapabilities {
     bool udisksctl{false};
     bool mount{false};
     bool umount{false};
+};
+
+struct RemoteVolumeOperationCommand {
+    rfm::core::VolumeOperationRequest request;
+    QString command;
+    bool interactive{false};
 };
 
 class RemoteLinuxVolumeCapabilityCache final
@@ -48,6 +55,12 @@ class RemoteLinuxVolumeService final
     interactiveOperationCommand(const rfm::core::VolumeOperationRequest& request,
                                 const RemoteLinuxVolumeCapabilities& capabilities,
                                 rfm::core::VolumeOperationResult* immediateResult = nullptr);
+    [[nodiscard]] static std::optional<RemoteVolumeOperationCommand>
+    revalidatedUnmountCommand(const rfm::core::VolumeOperationRequest& request,
+                              const rfm::core::VolumeCommandResult& topologyCommand,
+                              const RemoteLinuxVolumeCapabilities& capabilities,
+                              rfm::core::SecurePassword& password,
+                              rfm::core::VolumeOperationResult* immediateResult = nullptr);
     [[nodiscard]] static rfm::core::VolumeOperationResult
     operationResult(const rfm::core::VolumeOperationRequest& request,
                     const rfm::core::VolumeCommandResult& commandResult);

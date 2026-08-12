@@ -32,6 +32,7 @@ class RemoteVolumeServiceTest final : public QObject
   private slots:
     void parsesCapabilitiesAndUsesOnlyFixedProbe();
     void buildsAndAppliesLateUnmountTopologyProbe();
+    void preparesPostAuthenticationUnmountAfterTopologyChanges();
     void choosesUdisksctlAndFallbacks();
     void targetsSelectedMountPointForMultipleAttachments();
     void rejectsUnsafeOrInconsistentMountPoints_data();
@@ -140,6 +141,87 @@ void RemoteVolumeServiceTest::buildsAndAppliesLateUnmountTopologyProbe()
     failed.standardError = QStringLiteral("lsblk: /dev/sdb1: not found");
     QVERIFY(!rfm::core::revalidatedVolumeUnmountRequest(initial, failed, &immediate).has_value());
     QCOMPARE(immediate.error, rfm::core::VolumeOperationError::DeviceNotFound);
+}
+
+void RemoteVolumeServiceTest::preparesPostAuthenticationUnmountAfterTopologyChanges()
+{
+    const auto initial = requestFor(rfm::core::VolumeOperation::Unmount);
+    const auto topology = [](QStringList mountPoints) {
+        QStringList encodedMountPoints;
+        encodedMountPoints.reserve(mountPoints.size());
+        for (const QString& mountPoint : mountPoints) {
+            encodedMountPoints.push_back(QStringLiteral("\"%1\"").arg(mountPoint));
+        }
+        return rfm::core::VolumeCommandResult{
+            true,
+            false,
+            false,
+            0,
+            QStringLiteral("{\"blockdevices\":[{\"path\":\"/dev/sdb1\",\"mountpoints\":[%1]}]}")
+                .arg(encodedMountPoints.join(QChar{','})),
+            {},
+            false};
+    };
+
+    rfm::core::VolumeOperationResult immediate;
+    auto targetedPassword =
+        rfm::core::SecurePassword::fromUtf16(QStringLiteral("unused-polkit-password"));
+    const auto targeted = rfm::ssh::RemoteLinuxVolumeService::revalidatedUnmountCommand(
+        initial, topology({QStringLiteral("/mnt/usb"), QStringLiteral("/mnt/other")}),
+        allCapabilities(), targetedPassword, &immediate);
+    QVERIFY(targeted.has_value());
+    QVERIFY(!targeted->interactive);
+    QCOMPARE(targeted->command, QStringLiteral("LC_ALL=C umount -- '/mnt/usb'"));
+    QCOMPARE(targeted->request.target.mountPoint, QStringLiteral("/mnt/usb"));
+    QCOMPARE(targeted->request.target.knownMountPoints,
+             QStringList({QStringLiteral("/mnt/usb"), QStringLiteral("/mnt/other")}));
+    QVERIFY(!targeted->command.contains(QStringLiteral("udisksctl")));
+    QVERIFY(!targeted->command.contains(QStringLiteral("/dev/sdb1")));
+    QVERIFY(targetedPassword.isEmpty());
+    QVERIFY(targetedPassword.storageIsWiped());
+
+    auto devicePassword = rfm::core::SecurePassword::fromUtf16(QStringLiteral("polkit-password"));
+    const auto device = rfm::ssh::RemoteLinuxVolumeService::revalidatedUnmountCommand(
+        initial, topology({QStringLiteral("/mnt/usb")}), allCapabilities(), devicePassword,
+        &immediate);
+    QVERIFY(device.has_value());
+    QVERIFY(device->interactive);
+    QCOMPARE(device->command, QStringLiteral("LC_ALL=C udisksctl unmount -b /dev/sdb1"));
+    QVERIFY(!devicePassword.isEmpty());
+
+    auto missingPassword = rfm::core::SecurePassword::fromUtf16(QStringLiteral("unused"));
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::revalidatedUnmountCommand(
+                 initial, topology({QStringLiteral("/mnt/other")}), allCapabilities(),
+                 missingPassword, &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::DeviceNotFound);
+    QVERIFY(missingPassword.isEmpty());
+    QVERIFY(missingPassword.storageIsWiped());
+
+    auto rootSiblingPassword = rfm::core::SecurePassword::fromUtf16(QStringLiteral("unused"));
+    const auto rootSibling = rfm::ssh::RemoteLinuxVolumeService::revalidatedUnmountCommand(
+        initial, topology({QStringLiteral("/"), QStringLiteral("/mnt/usb")}), allCapabilities(),
+        rootSiblingPassword, &immediate);
+    QVERIFY(rootSibling.has_value());
+    QVERIFY(!rootSibling->interactive);
+    QCOMPARE(rootSibling->command, QStringLiteral("LC_ALL=C umount -- '/mnt/usb'"));
+    QVERIFY(!rootSibling->command.contains(QStringLiteral("udisksctl")));
+    QVERIFY(rootSiblingPassword.isEmpty());
+
+    const rfm::ssh::RemoteLinuxVolumeCapabilities withoutUmount{true, true, true, true, false};
+    auto unavailablePassword = rfm::core::SecurePassword::fromUtf16(QStringLiteral("unused"));
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::revalidatedUnmountCommand(
+                 initial, topology({QStringLiteral("/mnt/usb"), QStringLiteral("/mnt/other")}),
+                 withoutUmount, unavailablePassword, &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::ToolUnavailable);
+    QVERIFY(unavailablePassword.isEmpty());
+
+    const auto permissionDenied = rfm::ssh::RemoteLinuxVolumeService::operationResult(
+        targeted->request,
+        {true, false, false, 1, {}, QStringLiteral("umount: permission denied"), false});
+    QCOMPARE(permissionDenied.error, rfm::core::VolumeOperationError::PermissionDenied);
+    QVERIFY(!targeted->command.contains(QStringLiteral("udisksctl")));
 }
 
 void RemoteVolumeServiceTest::buildsConstrainedInteractiveCommands()

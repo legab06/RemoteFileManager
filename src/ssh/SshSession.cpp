@@ -1743,28 +1743,19 @@ void SshSession::processVolumeCommandStep()
         break;
     case SshVolumeCommandPurpose::RevalidateVolumeOperation: {
         rfm::core::VolumeOperationResult immediate;
-        const auto revalidated = rfm::core::revalidatedVolumeUnmountRequest(
-            task.operationRequest, *commandResult, &immediate);
-        if (!revalidated.has_value()) {
+        const auto prepared = rfm::ssh::RemoteLinuxVolumeService::revalidatedUnmountCommand(
+            task.operationRequest, *commandResult, m_impl->volumeCapabilityCache.value(),
+            task.password, &immediate);
+        if (!prepared.has_value()) {
             m_impl->activeVolumeDevices.remove(task.operationRequest.target.device);
             emit volumeOperationFinished(immediate);
             break;
         }
-        const bool interactive = !task.password.isEmpty();
-        const auto command =
-            interactive ? rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
-                              *revalidated, m_impl->volumeCapabilityCache.value(), &immediate)
-                        : rfm::ssh::RemoteLinuxVolumeService::operationCommand(
-                              *revalidated, m_impl->volumeCapabilityCache.value(), &immediate);
-        if (!command.has_value()) {
-            m_impl->activeVolumeDevices.remove(task.operationRequest.target.device);
-            emit volumeOperationFinished(immediate);
-            break;
-        }
-        m_impl->volumeCommandQueue.emplace_front(
-            SshVolumeCommandTask{interactive ? SshVolumeCommandPurpose::InteractiveVolumeOperation
-                                             : SshVolumeCommandPurpose::VolumeOperation,
-                                 *command, 0, *revalidated, std::move(task.password)});
+        m_impl->volumeCommandQueue.emplace_front(SshVolumeCommandTask{
+            prepared->interactive ? SshVolumeCommandPurpose::InteractiveVolumeOperation
+                                  : SshVolumeCommandPurpose::VolumeOperation,
+            prepared->command, 0, prepared->request,
+            prepared->interactive ? std::move(task.password) : rfm::core::SecurePassword{}});
         break;
     }
     case SshVolumeCommandPurpose::VolumeOperation: {
