@@ -108,10 +108,13 @@ QString shortStorageIdentity(const rfm::core::StorageVolume& volume, bool local)
 QString remoteStorageIdentity(const rfm::core::StorageVolume& volume)
 {
     const QString device = rfm::core::RemotePath::normalize(volume.device.trimmed());
-    if (device.startsWith(QChar{'/'})) {
+    const QString path = rfm::core::RemotePath::normalize(volume.rootPath);
+    if (volume.mounted && device.startsWith(QChar{'/'}) && path.startsWith(QChar{'/'})) {
+        return QStringLiteral("mounted-device\n%1\npath\n%2").arg(device, path);
+    }
+    if (!volume.mounted && device.startsWith(QChar{'/'})) {
         return QStringLiteral("device\n%1").arg(device);
     }
-    const QString path = rfm::core::RemotePath::normalize(volume.rootPath);
     return path.startsWith(QChar{'/'}) ? QStringLiteral("path\n%1").arg(path) : QString{};
 }
 

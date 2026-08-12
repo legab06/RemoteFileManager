@@ -3570,8 +3570,6 @@ void MainWindowTest::remoteAuthenticationSubmitsEphemeralPassword()
                         nullptr);
     QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
     QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
-    QSignalSpy authenticationRequests(&window,
-                                      &rfm::app::MainWindow::remoteVolumeAuthenticationRequested);
     setConnectionIdentity(window, QStringLiteral("auth.example.test"), QStringLiteral("alice"),
                           QStringLiteral("/home/alice"));
     QCOMPARE(storageRequests.size(), 1);
@@ -3612,11 +3610,6 @@ void MainWindowTest::remoteAuthenticationSubmitsEphemeralPassword()
     password->setText(QStringLiteral("one-use fixture"));
     QTest::keyClick(password, Qt::Key_Return);
 
-    QCOMPARE(authenticationRequests.size(), 1);
-    QCOMPARE(authenticationRequests.constFirst().at(0).toULongLong(), request.id);
-    QCOMPARE(authenticationRequests.constFirst().at(1).toULongLong(), quint64{93});
-    QCOMPARE(authenticationRequests.constFirst().at(2).toByteArray(),
-             QByteArrayLiteral("one-use fixture"));
     QVERIFY(password->text().isEmpty());
     QCOMPARE(storageRequests.size(), 1);
 
@@ -3715,8 +3708,6 @@ void MainWindowTest::disconnectClosesRemoteAuthenticationDialog()
                         nullptr);
     QSignalSpy storageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
     QSignalSpy operations(&window, &rfm::app::MainWindow::remoteVolumeOperationRequested);
-    QSignalSpy authenticationRequests(&window,
-                                      &rfm::app::MainWindow::remoteVolumeAuthenticationRequested);
     setConnectionIdentity(window, QStringLiteral("auth.example.test"), QStringLiteral("alice"));
     QCOMPARE(storageRequests.size(), 1);
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
@@ -3755,7 +3746,6 @@ void MainWindowTest::disconnectClosesRemoteAuthenticationDialog()
         ->setText(QStringLiteral("must not escape"));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
     QTRY_VERIFY(dialog == nullptr);
-    QCOMPARE(authenticationRequests.size(), 0);
 }
 
 void MainWindowTest::failedRemoteUnmountDoesNotEvacuateOrRefresh()

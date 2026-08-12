@@ -1,8 +1,8 @@
 #pragma once
 
+#include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/VolumeService.hpp"
 
-#include <QByteArray>
 #include <QDialog>
 
 class QDialogButtonBox;
@@ -22,10 +22,11 @@ class VolumeAuthenticationDialog final : public QDialog
                                         QWidget* parent = nullptr);
     ~VolumeAuthenticationDialog() override;
 
-    [[nodiscard]] QByteArray takePassword();
+    [[nodiscard]] rfm::core::SecurePassword takePassword();
 
   private:
     void clearPasswordEdit();
+    void clearPasswordEdit(QString& extractedSecret);
 
     QLineEdit* m_passwordEdit{nullptr};
     QDialogButtonBox* m_buttons{nullptr};

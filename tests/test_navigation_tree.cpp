@@ -2,11 +2,14 @@
 
 #include <QDir>
 #include <QPushButton>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
 #include <QTreeWidget>
+
+#include <utility>
 
 class NavigationTreeTest final : public QObject
 {
@@ -19,6 +22,7 @@ class NavigationTreeTest final : public QObject
     void omitsEmptyExternalDevicesCategory();
     void deduplicatesAndNavigatesExternalDevice();
     void refreshesRemoteStorageWithoutMixingMachines();
+    void preservesRemoteMountpointsForOneDevice();
     void showsHumanMetadataAndRefreshesWithoutChangingNavigation();
     void preservesLoadedTreeStateDuringStorageRefresh();
     void escapesTooltipMetadataAndDisambiguatesLabels();
@@ -68,6 +72,22 @@ QTreeWidgetItem* volumeItemByDevice(QTreeWidgetItem* root, const QString& device
         }
     }
     return nullptr;
+}
+
+QList<QTreeWidgetItem*> volumeItemsByDevice(QTreeWidgetItem* root, const QString& device)
+{
+    QList<QTreeWidgetItem*> matches;
+    if (root == nullptr) {
+        return matches;
+    }
+    if (root->data(0, Qt::UserRole + 6).isValid() &&
+        root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().device == device) {
+        matches.push_back(root);
+    }
+    for (int index = 0; index < root->childCount(); ++index) {
+        matches.append(volumeItemsByDevice(root->child(index), device));
+    }
+    return matches;
 }
 
 rfm::app::RemoteMachineDescriptor remoteMachine(const QString& id,
@@ -278,6 +298,67 @@ void NavigationTreeTest::refreshesRemoteStorageWithoutMixingMachines()
     QCOMPARE(activated.size(), 1);
     QCOMPARE(activated.constFirst().at(0).toString(), QStringLiteral("remote-id"));
     QCOMPARE(activated.constFirst().at(1).toString(), QStringLiteral("/data"));
+}
+
+void NavigationTreeTest::preservesRemoteMountpointsForOneDevice()
+{
+    rfm::app::NavigationTree navigation;
+    navigation.setProfiles({{QStringLiteral("Remote"), QStringLiteral("remote.test"),
+                             QStringLiteral("alice"), 22, QStringLiteral("remote-id")}});
+    navigation.setActiveServer(remoteMachine(QStringLiteral("remote-id")),
+                               QStringLiteral("/home/alice"));
+
+    rfm::core::StorageVolume first;
+    first.displayName = QStringLiteral("Btrfs data");
+    first.device = QStringLiteral("/dev/sda2");
+    first.rootPath = QStringLiteral("/mnt/data-a");
+    first.fileSystemType = QByteArrayLiteral("btrfs");
+    first.kind = rfm::core::StorageKind::Internal;
+    first.mounted = true;
+    rfm::core::StorageVolume second = first;
+    second.rootPath = QStringLiteral("/mnt/data-b");
+    rfm::core::StorageVolume duplicate = first;
+
+    navigation.setRemoteStorageVolumes(QStringLiteral("remote-id"), {first, second, duplicate});
+    QTreeWidgetItem* const server = navigation.tree()->topLevelItem(1)->child(0);
+    QList<QTreeWidgetItem*> items = volumeItemsByDevice(server, first.device);
+    QCOMPARE(items.size(), 2);
+    QSet<QString> paths;
+    for (QTreeWidgetItem* const item : std::as_const(items)) {
+        paths.insert(item->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().rootPath);
+    }
+    QCOMPARE(paths, QSet<QString>({QStringLiteral("/mnt/data-a"), QStringLiteral("/mnt/data-b")}));
+
+    navigation.setVolumeOperation(QStringLiteral("remote-id"), first.device,
+                                  rfm::core::VolumeOperation::Unmount);
+    items = volumeItemsByDevice(server, first.device);
+    auto* const unmountButton =
+        navigation.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
+    QVERIFY(unmountButton != nullptr);
+    for (QTreeWidgetItem* const item : std::as_const(items)) {
+        QVERIFY(item->text(0).contains(QStringLiteral("Unmounting")));
+        navigation.tree()->setCurrentItem(item);
+        QVERIFY(!unmountButton->isEnabled());
+    }
+    navigation.setVolumeOperation(QStringLiteral("remote-id"), first.device, std::nullopt);
+
+    rfm::core::StorageVolume changed = first;
+    changed.rootPath = QStringLiteral("/mnt/data-c");
+    navigation.setRemoteStorageVolumes(QStringLiteral("remote-id"), {changed});
+    items = volumeItemsByDevice(server, first.device);
+    QCOMPARE(items.size(), 1);
+    QCOMPARE(
+        items.constFirst()->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().rootPath,
+        QStringLiteral("/mnt/data-c"));
+
+    rfm::core::StorageVolume available = first;
+    available.rootPath.clear();
+    available.mounted = false;
+    rfm::core::StorageVolume duplicateAvailable = available;
+    duplicateAvailable.displayName = QStringLiteral("Duplicate available device");
+    navigation.setRemoteStorageVolumes(QStringLiteral("remote-id"),
+                                       {available, duplicateAvailable});
+    QCOMPARE(volumeItemsByDevice(server, first.device).size(), 1);
 }
 
 void NavigationTreeTest::exposesRemoteVolumeActionsInTheActiveServerNamespace()

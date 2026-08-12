@@ -250,8 +250,6 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::ssh::SshSession::probeStorageMounts);
     connect(this, &MainWindow::remoteVolumeOperationRequested, m_sshSession,
             &rfm::ssh::SshSession::operateVolume);
-    connect(this, &MainWindow::remoteVolumeAuthenticationRequested, m_sshSession,
-            &rfm::ssh::SshSession::authenticateVolume);
     connect(this, &MainWindow::remoteVolumeAuthenticationCancelled, m_sshSession,
             &rfm::ssh::SshSession::cancelVolumeAuthentication);
     connect(this, &MainWindow::createDirectoryRequested, m_sshSession,
@@ -2455,7 +2453,7 @@ void MainWindow::showRemoteVolumeAuthentication(const rfm::core::VolumeOperation
     const quint64 operationId = result.id;
     const quint64 authenticationToken = result.authenticationToken;
     connect(dialog, &QDialog::accepted, this, [this, dialog, operationId, authenticationToken] {
-        QByteArray password = dialog->takePassword();
+        rfm::core::SecurePassword password = dialog->takePassword();
         auto current = m_remoteVolumeOperations.find(operationId);
         const bool valid = current != m_remoteVolumeOperations.end() && m_connected &&
                            current->connectionGeneration == m_connectionGeneration &&
@@ -2466,10 +2464,9 @@ void MainWindow::showRemoteVolumeAuthentication(const rfm::core::VolumeOperation
             current->authenticationDialog = nullptr;
         }
         if (valid && !password.isEmpty()) {
-            emit remoteVolumeAuthenticationRequested(operationId, authenticationToken, password);
+            m_sshSession->postVolumeAuthentication(operationId, authenticationToken,
+                                                   std::move(password));
         }
-        password.fill('\0');
-        password.clear();
     });
     connect(dialog, &QDialog::rejected, this, [this, dialog, operationId, authenticationToken] {
         auto current = m_remoteVolumeOperations.find(operationId);

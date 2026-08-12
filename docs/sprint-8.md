@@ -127,6 +127,13 @@ JSON à colonnes fixes. Sa sortie passe par le même parser que la source locale
 les périphériques non montés sont fusionnés avec les montages observés. Une panne ou
 une absence de `lsblk` n'invalide donc ni la session ni les volumes déjà montés.
 
+Dans l'arbre distant, une entrée montée est identifiée par son device et son point de
+montage normalisé. Deux attachments de `/dev/sda2` vers des chemins différents restent
+donc navigables séparément, tandis qu'un doublon exact est fusionné. Une entrée non
+montée reste identifiée par le seul device. Cette identité de présentation ne change
+pas le verrou des opérations : montage et démontage restent sérialisés par machine et
+par device, et leur état busy apparaît sur toutes les entrées du même bloc.
+
 Les capacités `lsblk`, `udisksctl`, `mount` et `umount` sont détectées par une commande
 fixe lors du premier besoin. Elles sont mémorisées uniquement dans l'état de la
 session courante. `SshSession::Impl::reset()` efface ce cache, les commandes en attente
@@ -166,13 +173,25 @@ Le mot de passe n'est écrit dans le PTY qu'après le prompt attendu. La sortie 
 PTY, susceptible de contenir le dialogue Polkit, n'est jamais exposée à l'UI.
 
 Le mot de passe est celui saisi explicitement pour cette seule autorisation Polkit ;
-le mot de passe SSH initial n'est jamais réutilisé. Il traverse le signal Qt vers le
-worker SSH sous forme d'un buffer temporaire, puis le canal PTY. Les buffers
-propriétaires sont remplis de zéros et vidés après envoi, annulation, erreur, timeout
-ou déconnexion. Le secret n'est ajouté ni au profil serveur, ni aux paramètres, ni à
-l'historique, ni aux diagnostics ou logs. La persistance du mot de passe de session,
-un keyring et une gestion avancée des secrets sont explicitement hors périmètre du
-Sprint 8.
+le mot de passe SSH initial n'est jamais réutilisé. `SecurePassword` encode directement
+la vue UTF-16 dans une allocation privée, non copiable et non implicitement partagée,
+sans `QByteArray` intermédiaire. Un événement Qt dédié reçoit cette allocation par
+move et en transfère l'unique propriété au thread SSH, solution compatible avec le
+minimum Qt 6.4. Les écritures PTY partielles conservent le buffer uniquement jusqu'au
+dernier octet ; sa capacité entière est alors écrasée par des écritures volatiles. Le
+même effacement est exécuté par `clear()` et le destructeur, donc aussi lors d'une
+erreur, d'un timeout, d'une déconnexion, d'un reset ou de la destruction d'un événement
+encore en attente. Le secret n'est ajouté ni au profil serveur, ni aux paramètres, ni
+à l'historique, ni aux diagnostics ou logs.
+
+Cette garantie couvre les allocations possédées par `SecurePassword`. Qt peut garder
+des représentations internes du texte dans `QLineEdit`, l'input method ou ses
+allocateurs, que l'application ne peut ni localiser ni certifier écrasées. RFM vide le
+widget immédiatement, limite l'extraction à un seul `QString`, tente d'écraser cette
+représentation après que le widget l'a libérée, et ne crée aucun autre `QString` ou
+`QByteArray` du secret. La mémoire virtuelle, le swap et les copies réalisées hors du
+contrôle du processus ne peuvent pas recevoir une garantie absolue. La persistance,
+un keyring et une gestion avancée des secrets restent hors périmètre du Sprint 8.
 
 Pendant la boîte, le verrou du device et l'état `Mounting…` ou `Unmounting…` restent
 actifs. `Cancel` abandonne le défi, libère ce verrou et ne déclenche aucun refresh de

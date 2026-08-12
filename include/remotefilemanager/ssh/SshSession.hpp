@@ -4,6 +4,7 @@
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 #include "remotefilemanager/core/VolumeService.hpp"
@@ -22,6 +23,9 @@ class SshSession final : public QObject
   public:
     explicit SshSession(QObject* parent = nullptr);
     ~SshSession() override;
+    // Thread-safe: ownership is moved into a private Qt event for this object's thread.
+    void postVolumeAuthentication(quint64 operationId, quint64 authenticationToken,
+                                  rfm::core::SecurePassword password);
 
   public slots:
     void connectToHost(rfm::core::ConnectionProfile profile, QString password);
@@ -30,7 +34,6 @@ class SshSession final : public QObject
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
     void operateVolume(rfm::core::VolumeOperationRequest request);
-    void authenticateVolume(quint64 operationId, quint64 authenticationToken, QByteArray password);
     void cancelVolumeAuthentication(quint64 operationId, quint64 authenticationToken);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
@@ -66,6 +69,9 @@ class SshSession final : public QObject
     void failed(QString message);
     void disconnected();
 
+  protected:
+    bool event(QEvent* event) override;
+
   private:
     class Impl;
     std::unique_ptr<Impl> m_impl;
@@ -81,6 +87,8 @@ class SshSession final : public QObject
     void processStorageProbeStep();
     void scheduleStorageProbeStep();
     void cancelStorageProbe();
+    void authenticateVolume(quint64 operationId, quint64 authenticationToken,
+                            rfm::core::SecurePassword password);
     void processVolumeCommandStep();
     void scheduleVolumeCommandStep(bool activityAvailable = true);
     void startRemoteStorageScanner(quint64 requestId);

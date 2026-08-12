@@ -9,6 +9,7 @@ add_library(
     core/OperationProgress.cpp
     core/RemoteFileOperations.cpp
     core/RemotePath.cpp
+    core/SecurePassword.cpp
     core/ServerProfileStore.cpp
     core/Storage.cpp
     core/ServerSideCopyJob.cpp
@@ -24,6 +25,7 @@ add_library(
     ssh/SftpTransferBackend.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/LocalFileSystem.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/Storage.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/SecurePassword.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageScanner.hpp

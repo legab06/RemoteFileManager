@@ -71,8 +71,6 @@ class MainWindow final : public QMainWindow
     void localStorageProbeRequested(quint64 requestId);
     void volumeOperationRequested(rfm::core::VolumeOperationRequest request);
     void remoteVolumeOperationRequested(rfm::core::VolumeOperationRequest request);
-    void remoteVolumeAuthenticationRequested(quint64 operationId, quint64 authenticationToken,
-                                             QByteArray password);
     void remoteVolumeAuthenticationCancelled(quint64 operationId, quint64 authenticationToken);
     void remoteStorageRequested(quint64 requestId);
     void remoteStorageProbeRequested(quint64 requestId);

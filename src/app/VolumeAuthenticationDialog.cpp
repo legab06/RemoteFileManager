@@ -65,22 +65,32 @@ VolumeAuthenticationDialog::VolumeAuthenticationDialog(QString server, QString d
 
 VolumeAuthenticationDialog::~VolumeAuthenticationDialog() { clearPasswordEdit(); }
 
-QByteArray VolumeAuthenticationDialog::takePassword()
+rfm::core::SecurePassword VolumeAuthenticationDialog::takePassword()
 {
     QString secret = m_passwordEdit->text();
-    QByteArray bytes = secret.toUtf8();
-    clearPasswordEdit();
-    secret.fill(QChar{'\0'});
-    return bytes;
+    rfm::core::SecurePassword password = rfm::core::SecurePassword::fromUtf16(secret);
+    clearPasswordEdit(secret);
+    return password;
 }
 
 void VolumeAuthenticationDialog::clearPasswordEdit()
 {
-    if (m_passwordEdit == nullptr || m_passwordEdit->text().isEmpty()) {
+    if (m_passwordEdit == nullptr) {
         return;
     }
-    m_passwordEdit->setText(QString(m_passwordEdit->text().size(), QChar{'\0'}));
+    QString secret = m_passwordEdit->text();
+    clearPasswordEdit(secret);
+}
+
+void VolumeAuthenticationDialog::clearPasswordEdit(QString& extractedSecret)
+{
+    if (m_passwordEdit == nullptr || extractedSecret.isEmpty()) {
+        return;
+    }
+    m_passwordEdit->setText(QString(extractedSecret.size(), QChar{'\0'}));
     m_passwordEdit->clear();
+    extractedSecret.fill(QChar{'\0'});
+    extractedSecret.clear();
 }
 
 } // namespace rfm::app
