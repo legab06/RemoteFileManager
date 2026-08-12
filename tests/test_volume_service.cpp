@@ -88,9 +88,15 @@ class BlockingCommandRunner final : public rfm::core::VolumeCommandRunner
 rfm::core::VolumeOperationRequest
 requestFor(rfm::core::VolumeOperation operation, QString device = QStringLiteral("/dev/sde1"),
            QString mountPoint = QStringLiteral("/media/data"),
-           rfm::core::StorageKind kind = rfm::core::StorageKind::External)
+           rfm::core::StorageKind kind = rfm::core::StorageKind::External,
+           QStringList knownMountPoints = {})
 {
-    return {42, operation, {std::move(device), std::move(mountPoint), kind}};
+    if (operation == rfm::core::VolumeOperation::Unmount && knownMountPoints.isEmpty()) {
+        knownMountPoints.push_back(mountPoint);
+    }
+    return {42,
+            operation,
+            {std::move(device), std::move(mountPoint), kind, std::move(knownMountPoints)}};
 }
 
 } // namespace
@@ -105,7 +111,10 @@ class VolumeServiceTest final : public QObject
     void mapsCommandErrors_data();
     void mapsCommandErrors();
     void prefersUdisksctl();
+    void targetsSelectedMountPointForMultipleAttachments();
     void fallsBackToSystemTools();
+    void rejectsUnsafeOrInconsistentMountPoints_data();
+    void rejectsUnsafeOrInconsistentMountPoints();
     void reportsUnavailableTools();
     void passesDeviceAsOneArgumentAndIgnoresPresentationMetadata();
     void preventsConcurrentOperationsOnOneDevice();
@@ -193,6 +202,53 @@ void VolumeServiceTest::prefersUdisksctl()
         runnerObserver->lastArguments,
         QStringList({QStringLiteral("mount"), QStringLiteral("-b"), QStringLiteral("/dev/sde1")}));
     QVERIFY(runnerObserver->lastTimeoutMilliseconds > 0);
+
+    const auto unmountResult = service.execute(requestFor(rfm::core::VolumeOperation::Unmount));
+    QVERIFY(unmountResult.succeeded());
+    QCOMPARE(runnerObserver->lastProgram, QStringLiteral("/usr/bin/udisksctl"));
+    QCOMPARE(runnerObserver->lastArguments,
+             QStringList(
+                 {QStringLiteral("unmount"), QStringLiteral("-b"), QStringLiteral("/dev/sde1")}));
+}
+
+void VolumeServiceTest::targetsSelectedMountPointForMultipleAttachments()
+{
+    auto runner = std::make_unique<FakeCommandRunner>();
+    runner->executables.insert(QStringLiteral("udisksctl"), QStringLiteral("/usr/bin/udisksctl"));
+    runner->executables.insert(QStringLiteral("umount"), QStringLiteral("/usr/bin/umount"));
+    FakeCommandRunner* runnerObserver = runner.get();
+    rfm::core::LocalLinuxVolumeService service(std::move(runner));
+
+    const auto result = service.execute(
+        requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sde1"),
+                   QStringLiteral("/mnt/My Backup"), rfm::core::StorageKind::External,
+                   {QStringLiteral("/mnt/My Backup"), QStringLiteral("/mnt/other")}));
+
+    QVERIFY(result.succeeded());
+    QCOMPARE(runnerObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
+    QCOMPARE(runnerObserver->lastArguments,
+             QStringList({QStringLiteral("--"), QStringLiteral("/mnt/My Backup")}));
+    QVERIFY(!runnerObserver->lastArguments.contains(QStringLiteral("--all-targets")));
+
+    const auto rootSiblingResult =
+        service.execute(requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sde1"),
+                                   QStringLiteral("/mnt/data"), rfm::core::StorageKind::External,
+                                   {QStringLiteral("/"), QStringLiteral("/mnt/data")}));
+    QVERIFY(rootSiblingResult.succeeded());
+    QCOMPARE(runnerObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
+    QCOMPARE(runnerObserver->lastArguments,
+             QStringList({QStringLiteral("--"), QStringLiteral("/mnt/data")}));
+
+    auto udisksOnlyRunner = std::make_unique<FakeCommandRunner>();
+    udisksOnlyRunner->executables.insert(QStringLiteral("udisksctl"),
+                                         QStringLiteral("/usr/bin/udisksctl"));
+    FakeCommandRunner* udisksOnlyObserver = udisksOnlyRunner.get();
+    rfm::core::LocalLinuxVolumeService udisksOnlyService(std::move(udisksOnlyRunner));
+    const auto unavailable = udisksOnlyService.execute(requestFor(
+        rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sde1"), QStringLiteral("/mnt/a"),
+        rfm::core::StorageKind::External, {QStringLiteral("/mnt/a"), QStringLiteral("/mnt/b")}));
+    QCOMPARE(unavailable.error, rfm::core::VolumeOperationError::ToolUnavailable);
+    QCOMPARE(udisksOnlyObserver->runCount, 0);
 }
 
 void VolumeServiceTest::fallsBackToSystemTools()
@@ -215,7 +271,47 @@ void VolumeServiceTest::fallsBackToSystemTools()
     QVERIFY(unmountService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).succeeded());
     QCOMPARE(unmountObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
     QCOMPARE(unmountObserver->lastArguments,
-             QStringList({QStringLiteral("--"), QStringLiteral("/dev/sde1")}));
+             QStringList({QStringLiteral("--"), QStringLiteral("/media/data")}));
+}
+
+void VolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints_data()
+{
+    QTest::addColumn<QString>("mountPoint");
+    QTest::addColumn<QStringList>("knownMountPoints");
+
+    QTest::newRow("empty") << QString{} << QStringList{};
+    QTest::newRow("relative") << QStringLiteral("mnt/data")
+                              << QStringList{QStringLiteral("mnt/data")};
+    QTest::newRow("not-normalized") << QStringLiteral("/mnt/data/../other")
+                                    << QStringList{QStringLiteral("/mnt/data/../other")};
+    QTest::newRow("line-break") << QStringLiteral("/mnt/data\nother")
+                                << QStringList{QStringLiteral("/mnt/data\nother")};
+    QTest::newRow("missing-from-snapshot")
+        << QStringLiteral("/mnt/data") << QStringList{QStringLiteral("/mnt/other")};
+    QTest::newRow("invalid-snapshot-entry")
+        << QStringLiteral("/mnt/data")
+        << QStringList{QStringLiteral("/mnt/data"), QStringLiteral("relative")};
+}
+
+void VolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints()
+{
+    QFETCH(QString, mountPoint);
+    QFETCH(QStringList, knownMountPoints);
+    auto runner = std::make_unique<FakeCommandRunner>();
+    runner->executables.insert(QStringLiteral("udisksctl"), QStringLiteral("/usr/bin/udisksctl"));
+    runner->executables.insert(QStringLiteral("umount"), QStringLiteral("/usr/bin/umount"));
+    FakeCommandRunner* runnerObserver = runner.get();
+    rfm::core::LocalLinuxVolumeService service(std::move(runner));
+    const rfm::core::VolumeOperationRequest request{42,
+                                                    rfm::core::VolumeOperation::Unmount,
+                                                    {QStringLiteral("/dev/sde1"), mountPoint,
+                                                     rfm::core::StorageKind::External,
+                                                     knownMountPoints}};
+
+    const auto result = service.execute(request);
+
+    QCOMPARE(result.error, rfm::core::VolumeOperationError::DeviceNotFound);
+    QCOMPARE(runnerObserver->runCount, 0);
 }
 
 void VolumeServiceTest::reportsUnavailableTools()
@@ -243,7 +339,7 @@ void VolumeServiceTest::passesDeviceAsOneArgumentAndIgnoresPresentationMetadata(
     rfm::core::LocalLinuxVolumeService service(std::move(runner));
 
     const auto result = service.execute(
-        {9, rfm::core::VolumeOperation::Mount, {volume.device, volume.rootPath, volume.kind}});
+        {9, rfm::core::VolumeOperation::Mount, {volume.device, volume.rootPath, volume.kind, {}}});
 
     QVERIFY(result.succeeded());
     QCOMPARE(runnerObserver->lastArguments.size(), 3);

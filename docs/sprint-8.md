@@ -18,7 +18,8 @@ le nouvel état observé par le système.
 `VolumeService` est le contrat indépendant de la plateforme et de l'interface. Il
 reçoit une `VolumeOperationRequest`, comprenant un identifiant de requête, l'opération
 et un `VolumeOperationTarget`. La cible distingue explicitement le périphérique
-système, le point de montage observé et la catégorie du volume. Le nom d'affichage,
+système, le point de montage sélectionné, les points de montage observés pour ce
+périphérique dans le même instantané et la catégorie du volume. Le nom d'affichage,
 le label et le modèle matériel ne servent jamais d'identifiant d'opération.
 
 `VolumeOperationResult` conserve l'identité de la requête, l'opération et le
@@ -43,7 +44,8 @@ thread existant. Les implémentations macOS et Windows restent hors périmètre.
 
 ## Stratégie Linux locale
 
-Lorsqu'il est présent, `udisksctl` est préféré :
+Lorsqu'il est présent, `udisksctl` est préféré pour le montage et pour le démontage
+d'un périphérique qui ne possède qu'un point de montage connu :
 
 ```text
 udisksctl mount -b <device>
@@ -56,15 +58,24 @@ respectivement `mount` ou `umount` et invoque :
 
 ```text
 mount -- <device>
-umount -- <device>
+umount -- <mountpoint>
 ```
+
+Lorsqu'un périphérique possède plusieurs attachments, `udisksctl unmount -b` serait
+ambigu car son interface accepte un objet ou un block-device, pas un mountpoint. Le
+service choisit donc `umount -- <mountpoint sélectionné>` même si `udisksctl` est
+installé. Il ne passe jamais `--all-targets`, `-a`, `--recursive`, `--lazy` ou
+`--force`. La même règle interdit toute commande basée sur le device lorsque celui-ci
+est également observé sur `/`.
 
 Ce fallback n'élève jamais les privilèges. Il réussit uniquement si la configuration
 du système, notamment `/etc/fstab`, et les droits de l'utilisateur autorisent déjà
 l'opération. RemoteFileManager ne modifie pas `fstab`, ne demande pas de mot de passe
 sudo et n'écrit rien sur un périphérique bloc.
 
-Les programmes et les arguments sont transmis séparément à `QProcess`. Aucun shell,
+Le mountpoint doit être absolu, déjà normalisé, différent de `/`, sans NUL ni caractère
+de contrôle, et présent parmi les attachments du device dans l'instantané. Les
+programmes et les arguments sont transmis séparément à `QProcess`. Aucun shell,
 `sh -c` ou texte de commande concaténé n'est utilisé. Les espaces et caractères
 spéciaux d'un chemin de périphérique restent donc dans un argument unique ; les
 métadonnées de présentation ne sont pas transmises. Une limite de temps empêche aussi
@@ -140,7 +151,7 @@ session courante. `SshSession::Impl::reset()` efface ce cache, les commandes en 
 et les devices occupés à la déconnexion ; un autre serveur est toujours sondé à
 nouveau.
 
-Le montage et le démontage privilégient respectivement :
+Le montage et le démontage à attachment unique privilégient respectivement :
 
 ```text
 udisksctl mount -b /dev/... --no-user-interaction
@@ -154,6 +165,11 @@ réponse indiquant qu'une autorisation peut être obtenue, notamment
 `NotAuthorizedCanObtain`, devient `AuthenticationRequired` et ouvre une boîte Qt
 propre à la fenêtre RFM. Les autres erreurs de permission ne demandent jamais le mot
 de passe inutilement.
+
+Pour plusieurs attachments d'un même device, le distant emploie à la place
+`LC_ALL=C umount -- '<mountpoint sélectionné>'`. Le chemin est validé puis protégé par
+le quoting POSIX à apostrophes déjà utilisé pour les commandes distantes ; espaces,
+apostrophes et métacaractères restent des données. Aucun fallback global n'est permis.
 
 Après validation de cette boîte, `SshSession` vérifie l'identifiant d'opération et le
 jeton de défi, puis ouvre un canal SSH dédié avec PTY. Ce PTY est strictement interne :
@@ -202,9 +218,18 @@ son envoi. Une perte SSH ferme la boîte ou le canal et rend le résultat obsol�
 jetons ne sont pas réutilisés lors d'un reset : une réponse provenant d'une ancienne
 boîte ne peut pas atteindre une nouvelle session.
 
-Si `udisksctl` est disponible mais refuse l'opération, aucune autre stratégie n'est
-lancée automatiquement. `mount -- /dev/...` ou `umount -- /dev/...` est choisi
-uniquement lorsque `udisksctl` est absent et que l'outil correspondant a été détecté.
+Si `udisksctl` est disponible mais refuse une opération non ambiguë, aucune autre
+stratégie n'est lancée automatiquement. `mount -- /dev/...` est choisi uniquement
+lorsque `udisksctl` est absent. `umount -- '<mountpoint>'` est choisi lorsque
+`udisksctl` est absent ou lorsque le snapshot montre plusieurs attachments pour le
+device, à condition que `umount` ait été détecté.
+
+La voie ciblée `umount` ne traverse pas UDisks et ne bénéficie donc pas de son dialogue
+Polkit. Si les droits ordinaires du compte SSH ne suffisent pas, l'opération retourne
+`PermissionDenied`; RFM ne remplace jamais cette limite par `sudo`, `su`, `pkexec` ou
+un stockage de credentials. La boîte d'authentification, le PTY, les retries explicites
+et `SecurePassword` restent inchangés pour les opérations représentables sans ambiguïté
+par UDisks.
 
 Le device doit être un chemin Linux normalisé sous `/dev/` composé exclusivement de
 caractères sûrs. Labels, modèles et textes UI ne sont jamais interpolés. Il n'existe
@@ -294,7 +319,10 @@ même source et au même identifiant de machine.
 Les tests injectent un faux exécuteur et couvrent le refus de la racine et des volumes
 système, le périphérique disparu, le mapping des erreurs, la priorité de `udisksctl`,
 les fallbacks `mount`/`umount`, l'absence d'outil, la construction sûre des arguments
-et le refus d'opérations concurrentes sur un même périphérique. La suite existante de
+et le refus d'opérations concurrentes sur un même périphérique. Ils vérifient aussi le
+ciblage d'un seul attachment, les devices également attachés sur `/`, les mountpoints
+avec espaces ou apostrophes, le rejet des chemins incohérents et l'absence de toute
+option globale de démontage. La suite existante de
 découverte locale continue de couvrir les overmounts, les bind mounts et le filtrage
 des pseudo-filesystems, dont l'exception de la racine.
 

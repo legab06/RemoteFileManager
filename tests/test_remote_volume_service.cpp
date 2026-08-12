@@ -10,9 +10,15 @@ namespace
 rfm::core::VolumeOperationRequest
 requestFor(rfm::core::VolumeOperation operation, QString device = QStringLiteral("/dev/sdb1"),
            QString mountPoint = QStringLiteral("/mnt/usb"),
-           rfm::core::StorageKind kind = rfm::core::StorageKind::External)
+           rfm::core::StorageKind kind = rfm::core::StorageKind::External,
+           QStringList knownMountPoints = {})
 {
-    return {17, operation, {std::move(device), std::move(mountPoint), kind}};
+    if (operation == rfm::core::VolumeOperation::Unmount && knownMountPoints.isEmpty()) {
+        knownMountPoints.push_back(mountPoint);
+    }
+    return {17,
+            operation,
+            {std::move(device), std::move(mountPoint), kind, std::move(knownMountPoints)}};
 }
 
 rfm::ssh::RemoteLinuxVolumeCapabilities allCapabilities() { return {true, true, true, true, true}; }
@@ -26,6 +32,9 @@ class RemoteVolumeServiceTest final : public QObject
   private slots:
     void parsesCapabilitiesAndUsesOnlyFixedProbe();
     void choosesUdisksctlAndFallbacks();
+    void targetsSelectedMountPointForMultipleAttachments();
+    void rejectsUnsafeOrInconsistentMountPoints_data();
+    void rejectsUnsafeOrInconsistentMountPoints();
     void rejectsUnavailableToolsAndProtectedVolumes();
     void rejectsUnsafeDevicePaths_data();
     void rejectsUnsafeDevicePaths();
@@ -122,7 +131,87 @@ void RemoteVolumeServiceTest::choosesUdisksctlAndFallbacks()
              QStringLiteral("LC_ALL=C mount -- /dev/sdb1"));
     QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(
                  requestFor(rfm::core::VolumeOperation::Unmount), fallback, &immediate),
-             QStringLiteral("LC_ALL=C umount -- /dev/sdb1"));
+             QStringLiteral("LC_ALL=C umount -- '/mnt/usb'"));
+}
+
+void RemoteVolumeServiceTest::targetsSelectedMountPointForMultipleAttachments()
+{
+    rfm::core::VolumeOperationResult immediate;
+    const auto request =
+        requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sdb1"),
+                   QStringLiteral("/mnt/My Backup's disk"), rfm::core::StorageKind::External,
+                   {QStringLiteral("/mnt/My Backup's disk"), QStringLiteral("/mnt/other")});
+
+    const QString command = *rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+        request, allCapabilities(), &immediate);
+    QCOMPARE(command, QStringLiteral("LC_ALL=C umount -- '/mnt/My Backup'\\''s disk'"));
+    QVERIFY(!command.contains(QStringLiteral("/dev/sdb1")));
+    QVERIFY(!command.contains(QStringLiteral("--all-targets")));
+    QVERIFY(!command.contains(QStringLiteral("sudo")));
+    QVERIFY(!command.contains(QStringLiteral("pkexec")));
+
+    const auto rootSibling =
+        requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sda2"),
+                   QStringLiteral("/mnt/data"), rfm::core::StorageKind::External,
+                   {QStringLiteral("/"), QStringLiteral("/mnt/data")});
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(rootSibling, allCapabilities(),
+                                                                   &immediate),
+             QStringLiteral("LC_ALL=C umount -- '/mnt/data'"));
+
+    const rfm::ssh::RemoteLinuxVolumeCapabilities udisksOnly{true, true, true, false, false};
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::operationCommand(request, udisksOnly, &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::ToolUnavailable);
+
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
+                 request, allCapabilities(), &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::PermissionDenied);
+
+    const auto authorizationResult = rfm::ssh::RemoteLinuxVolumeService::operationResult(
+        request, {true,
+                  false,
+                  false,
+                  1,
+                  {},
+                  QStringLiteral("NotAuthorizedCanObtain: Authentication is required"),
+                  false});
+    QCOMPARE(authorizationResult.error, rfm::core::VolumeOperationError::PermissionDenied);
+}
+
+void RemoteVolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints_data()
+{
+    QTest::addColumn<QString>("mountPoint");
+    QTest::addColumn<QStringList>("knownMountPoints");
+
+    QTest::newRow("empty") << QString{} << QStringList{};
+    QTest::newRow("root") << QStringLiteral("/") << QStringList{QStringLiteral("/")};
+    QTest::newRow("relative") << QStringLiteral("mnt/data")
+                              << QStringList{QStringLiteral("mnt/data")};
+    QTest::newRow("not-normalized") << QStringLiteral("/mnt/data/../other")
+                                    << QStringList{QStringLiteral("/mnt/data/../other")};
+    QTest::newRow("line-break") << QStringLiteral("/mnt/data\nother")
+                                << QStringList{QStringLiteral("/mnt/data\nother")};
+    QTest::newRow("missing-from-snapshot")
+        << QStringLiteral("/mnt/data") << QStringList{QStringLiteral("/mnt/other")};
+}
+
+void RemoteVolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints()
+{
+    QFETCH(QString, mountPoint);
+    QFETCH(QStringList, knownMountPoints);
+    rfm::core::VolumeOperationResult immediate;
+    const rfm::core::VolumeOperationRequest request{17,
+                                                    rfm::core::VolumeOperation::Unmount,
+                                                    {QStringLiteral("/dev/sdb1"), mountPoint,
+                                                     rfm::core::StorageKind::External,
+                                                     knownMountPoints}};
+
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::operationCommand(request, allCapabilities(),
+                                                                  &immediate)
+                 .has_value());
+    QVERIFY(immediate.error == rfm::core::VolumeOperationError::DeviceNotFound ||
+            immediate.error == rfm::core::VolumeOperationError::NotSupported);
 }
 
 void RemoteVolumeServiceTest::rejectsUnavailableToolsAndProtectedVolumes()

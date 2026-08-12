@@ -89,6 +89,24 @@ bool profilesHaveSameConnectionSettings(const rfm::core::ConnectionProfile& firs
            first.username.trimmed() == second.username.trimmed() && first.port == second.port;
 }
 
+QStringList knownMountPointsForDevice(const QList<rfm::core::StorageVolume>& volumes,
+                                      const QString& device)
+{
+    const QString normalizedDevice = rfm::core::RemotePath::normalize(device.trimmed());
+    QStringList mountPoints;
+    for (const rfm::core::StorageVolume& volume : volumes) {
+        if (!volume.mounted ||
+            rfm::core::RemotePath::normalize(volume.device.trimmed()) != normalizedDevice) {
+            continue;
+        }
+        const QString mountPoint = rfm::core::RemotePath::normalize(volume.rootPath);
+        if (mountPoint.startsWith(QChar{'/'}) && !mountPoints.contains(mountPoint)) {
+            mountPoints.push_back(mountPoint);
+        }
+    }
+    return mountPoints;
+}
+
 class UploadSelectionDialog final : public QFileDialog
 {
   public:
@@ -772,6 +790,7 @@ void MainWindow::handleLocalStorageVolumes(const QList<rfm::core::StorageVolume>
         }
     }
     m_volumeOperationsAwaitingRefresh.clear();
+    m_localStorageVolumes = volumes;
     m_navigationTree->setStorageVolumes(volumes);
     updateStorageRefreshAction();
 }
@@ -813,6 +832,7 @@ void MainWindow::handleRemoteStorageVolumes(quint64 requestId,
         }
         m_remoteVolumeOperationsAwaitingRefresh.clear();
         m_remoteStorageFingerprint = std::exchange(m_pendingRemoteStorageFingerprint, {});
+        m_remoteStorageVolumes = volumes;
         m_navigationTree->setRemoteStorageVolumes(activeRemoteMachineId(), volumes);
     }
     updateStorageRefreshAction();
@@ -1357,6 +1377,7 @@ void MainWindow::resetDisconnectedUi()
     m_remoteStorageProbeConnectionGeneration = 0;
     m_remoteStorageFingerprint.clear();
     m_pendingRemoteStorageFingerprint.clear();
+    m_remoteStorageVolumes.clear();
     for (const RemoteVolumeOperationContext& context : std::as_const(m_remoteVolumeOperations)) {
         if (context.authenticationDialog != nullptr) {
             context.authenticationDialog->reject();
@@ -2317,7 +2338,10 @@ void MainWindow::beginVolumeOperation(const rfm::core::StorageVolume& volume,
 
     const quint64 id = nextOperationId();
     const rfm::core::VolumeOperationRequest request{
-        id, operation, {device, volume.rootPath, volume.kind}};
+        id,
+        operation,
+        {device, volume.rootPath, volume.kind,
+         knownMountPointsForDevice(m_localStorageVolumes, device)}};
     m_volumeOperations.insert(id, request);
     m_navigationTree->setLocalVolumeOperation(device, operation);
     emit volumeOperationRequested(request);
@@ -2381,7 +2405,10 @@ void MainWindow::beginRemoteVolumeOperation(const QString& machineId,
 
     const quint64 id = nextOperationId();
     const rfm::core::VolumeOperationRequest request{
-        id, operation, {volume.device, volume.rootPath, volume.kind}};
+        id,
+        operation,
+        {volume.device, volume.rootPath, volume.kind,
+         knownMountPointsForDevice(m_remoteStorageVolumes, volume.device)}};
     m_remoteVolumeOperations.insert(id, {request, machineId, m_connectionGeneration, 0, nullptr});
     m_navigationTree->setVolumeOperation(machineId, volume.device, operation);
     emit remoteVolumeOperationRequested(request);

@@ -1,5 +1,7 @@
 #include "remotefilemanager/ssh/RemoteVolumeService.hpp"
 
+#include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
+
 #include <QSet>
 
 #include <cctype>
@@ -70,13 +72,23 @@ RemoteLinuxVolumeService::operationCommand(const rfm::core::VolumeOperationReque
         return reject(rfm::core::VolumeOperationError::DeviceNotFound,
                       QStringLiteral("The remote volume has no safe Linux device identifier."));
     }
+    const rfm::core::VolumeUnmountTargetMode unmountTargetMode =
+        rfm::core::volumeUnmountTargetMode(request);
+    if (request.operation == rfm::core::VolumeOperation::Unmount &&
+        unmountTargetMode == rfm::core::VolumeUnmountTargetMode::Invalid) {
+        return reject(rfm::core::VolumeOperationError::DeviceNotFound,
+                      QStringLiteral("The remote volume has no safe, consistent mount point."));
+    }
     if (!capabilities.known) {
         return reject(rfm::core::VolumeOperationError::ConnectionLost,
                       QStringLiteral("Remote session capabilities are unavailable."));
     }
 
     const QString& device = request.target.device;
-    if (capabilities.udisksctl) {
+    const bool targetedUnmount =
+        request.operation == rfm::core::VolumeOperation::Unmount &&
+        unmountTargetMode == rfm::core::VolumeUnmountTargetMode::MountPoint;
+    if (capabilities.udisksctl && !targetedUnmount) {
         const QString verb = request.operation == rfm::core::VolumeOperation::Mount
                                  ? QStringLiteral("mount")
                                  : QStringLiteral("unmount");
@@ -87,7 +99,12 @@ RemoteLinuxVolumeService::operationCommand(const rfm::core::VolumeOperationReque
         return QStringLiteral("LC_ALL=C mount -- %1").arg(device);
     }
     if (request.operation == rfm::core::VolumeOperation::Unmount && capabilities.umount) {
-        return QStringLiteral("LC_ALL=C umount -- %1").arg(device);
+        const QString mountPoint = RemoteCopyCommand::quoteArgument(request.target.mountPoint);
+        if (mountPoint.isEmpty()) {
+            return reject(rfm::core::VolumeOperationError::DeviceNotFound,
+                          QStringLiteral("The remote volume has no safe mount point."));
+        }
+        return QStringLiteral("LC_ALL=C umount -- %1").arg(mountPoint);
     }
     return reject(rfm::core::VolumeOperationError::ToolUnavailable,
                   QStringLiteral("No supported remote volume tool is available."));
@@ -112,6 +129,19 @@ std::optional<QString> RemoteLinuxVolumeService::interactiveOperationCommand(
     if (!rfm::core::isSafeLinuxDevicePath(request.target.device)) {
         return reject(rfm::core::VolumeOperationError::DeviceNotFound,
                       QStringLiteral("The remote volume has no safe Linux device identifier."));
+    }
+    const rfm::core::VolumeUnmountTargetMode unmountTargetMode =
+        rfm::core::volumeUnmountTargetMode(request);
+    if (request.operation == rfm::core::VolumeOperation::Unmount &&
+        unmountTargetMode == rfm::core::VolumeUnmountTargetMode::Invalid) {
+        return reject(rfm::core::VolumeOperationError::DeviceNotFound,
+                      QStringLiteral("The remote volume has no safe, consistent mount point."));
+    }
+    if (request.operation == rfm::core::VolumeOperation::Unmount &&
+        unmountTargetMode == rfm::core::VolumeUnmountTargetMode::MountPoint) {
+        return reject(
+            rfm::core::VolumeOperationError::PermissionDenied,
+            QStringLiteral("Targeted unmount authentication is unavailable without UDisks."));
     }
     if (!capabilities.known) {
         return reject(rfm::core::VolumeOperationError::ConnectionLost,
@@ -138,11 +168,15 @@ RemoteLinuxVolumeService::operationResult(const rfm::core::VolumeOperationReques
         commandResult.standardError + QChar{'\n'} + commandResult.standardOutput;
     const bool failedCommand = commandResult.started && !commandResult.timedOut &&
                                !commandResult.crashed && commandResult.exitCode != 0;
+    const bool udisksInteractiveOperation =
+        request.operation == rfm::core::VolumeOperation::Mount ||
+        rfm::core::volumeUnmountTargetMode(request) == rfm::core::VolumeUnmountTargetMode::Device;
     const bool canAuthenticate =
-        failedCommand && (protocolDiagnostic.contains(QStringLiteral("NotAuthorizedCanObtain"),
-                                                      Qt::CaseInsensitive) ||
-                          protocolDiagnostic.contains(QStringLiteral("Authentication is required"),
-                                                      Qt::CaseInsensitive));
+        failedCommand && udisksInteractiveOperation &&
+        (protocolDiagnostic.contains(QStringLiteral("NotAuthorizedCanObtain"),
+                                     Qt::CaseInsensitive) ||
+         protocolDiagnostic.contains(QStringLiteral("Authentication is required"),
+                                     Qt::CaseInsensitive));
     const bool authenticationFailed =
         failedCommand &&
         protocolDiagnostic.contains(QStringLiteral("authentication failed"), Qt::CaseInsensitive);

@@ -35,7 +35,11 @@ struct VolumeOperationTarget {
     QString device;
     QString mountPoint;
     StorageKind kind{StorageKind::Unknown};
+    // Mounted paths for device in the snapshot from which the operation was requested.
+    QStringList knownMountPoints;
 };
+
+enum class VolumeUnmountTargetMode { Invalid, Device, MountPoint };
 
 struct VolumeOperationRequest {
     quint64 id{0};
@@ -70,6 +74,9 @@ volumeOperationErrorFromCommand(const VolumeCommandResult& result);
                                                               VolumeOperationError error,
                                                               QString technicalMessage = {});
 [[nodiscard]] bool isSafeLinuxDevicePath(const QString& device);
+[[nodiscard]] bool isSafeLinuxMountPoint(const QString& mountPoint);
+[[nodiscard]] VolumeUnmountTargetMode
+volumeUnmountTargetMode(const VolumeOperationRequest& request);
 [[nodiscard]] bool isProtectedVolumeOperation(const VolumeOperationRequest& request);
 
 class VolumeCommandRunner

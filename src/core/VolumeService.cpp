@@ -175,6 +175,49 @@ bool isSafeLinuxDevicePath(const QString& device)
            RemotePath::normalize(device) == device && device != QStringLiteral("/dev");
 }
 
+namespace
+{
+
+bool isNormalizedAbsoluteLinuxPath(const QString& path)
+{
+    if (path.isEmpty() || !path.startsWith(QChar{'/'}) || RemotePath::normalize(path) != path) {
+        return false;
+    }
+    return std::ranges::none_of(path, [](QChar character) {
+        return character.category() == QChar::Other_Control ||
+               character.category() == QChar::Separator_Line ||
+               character.category() == QChar::Separator_Paragraph;
+    });
+}
+
+} // namespace
+
+bool isSafeLinuxMountPoint(const QString& mountPoint)
+{
+    return mountPoint != QStringLiteral("/") && isNormalizedAbsoluteLinuxPath(mountPoint);
+}
+
+VolumeUnmountTargetMode volumeUnmountTargetMode(const VolumeOperationRequest& request)
+{
+    if (request.operation != VolumeOperation::Unmount ||
+        !isSafeLinuxMountPoint(request.target.mountPoint)) {
+        return VolumeUnmountTargetMode::Invalid;
+    }
+
+    QSet<QString> uniqueMountPoints;
+    for (const QString& mountPoint : request.target.knownMountPoints) {
+        if (!isNormalizedAbsoluteLinuxPath(mountPoint)) {
+            return VolumeUnmountTargetMode::Invalid;
+        }
+        uniqueMountPoints.insert(mountPoint);
+    }
+    if (!uniqueMountPoints.contains(request.target.mountPoint)) {
+        return VolumeUnmountTargetMode::Invalid;
+    }
+    return uniqueMountPoints.size() == 1 ? VolumeUnmountTargetMode::Device
+                                         : VolumeUnmountTargetMode::MountPoint;
+}
+
 bool isProtectedVolumeOperation(const VolumeOperationRequest& request)
 {
     return request.operation == VolumeOperation::Unmount &&
@@ -196,12 +239,17 @@ VolumeOperationResult LocalLinuxVolumeService::execute(const VolumeOperationRequ
         request, VolumeOperationError::NotSupported,
         QStringLiteral("Local volume operations are currently implemented on Linux only."));
 #else
-    if (request.operation == VolumeOperation::Unmount &&
-        (QDir::cleanPath(request.target.mountPoint) == QStringLiteral("/") ||
-         request.target.kind == StorageKind::System)) {
+    if (isProtectedVolumeOperation(request)) {
         return makeVolumeOperationResult(
             request, VolumeOperationError::NotSupported,
             QStringLiteral("RemoteFileManager never unmounts the system volume."));
+    }
+    const VolumeUnmountTargetMode unmountTargetMode = volumeUnmountTargetMode(request);
+    if (request.operation == VolumeOperation::Unmount &&
+        unmountTargetMode == VolumeUnmountTargetMode::Invalid) {
+        return makeVolumeOperationResult(
+            request, VolumeOperationError::DeviceNotFound,
+            QStringLiteral("The volume has no safe, consistent mount point."));
     }
     const QString device = QDir::cleanPath(request.target.device.trimmed());
     if (!device.startsWith(QStringLiteral("/dev/")) || device == QStringLiteral("/dev")) {
@@ -233,9 +281,12 @@ VolumeOperationResult
 LocalLinuxVolumeService::executeUnlocked(const VolumeOperationRequest& request,
                                          const QString& device)
 {
+    const VolumeUnmountTargetMode unmountTargetMode = volumeUnmountTargetMode(request);
+    const bool targetedUnmount = request.operation == VolumeOperation::Unmount &&
+                                 unmountTargetMode == VolumeUnmountTargetMode::MountPoint;
     QString program = m_runner->findExecutable(QStringLiteral("udisksctl"));
     QStringList arguments;
-    if (!program.isEmpty()) {
+    if (!program.isEmpty() && !targetedUnmount) {
         arguments = {request.operation == VolumeOperation::Mount ? QStringLiteral("mount")
                                                                  : QStringLiteral("unmount"),
                      QStringLiteral("-b"), device};
@@ -249,7 +300,9 @@ LocalLinuxVolumeService::executeUnlocked(const VolumeOperationRequest& request,
                 request, VolumeOperationError::ToolUnavailable,
                 QStringLiteral("No supported local volume tool is available."));
         }
-        arguments = {QStringLiteral("--"), device};
+        arguments = {QStringLiteral("--"), request.operation == VolumeOperation::Unmount
+                                               ? request.target.mountPoint
+                                               : device};
     }
 
     const VolumeCommandResult command =

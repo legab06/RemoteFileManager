@@ -349,6 +349,8 @@ class MainWindow final : public QMainWindow
     QByteArray m_localStorageFingerprint;
     QByteArray m_remoteStorageFingerprint;
     QByteArray m_pendingRemoteStorageFingerprint;
+    QList<rfm::core::StorageVolume> m_localStorageVolumes;
+    QList<rfm::core::StorageVolume> m_remoteStorageVolumes;
     bool m_connected{false};
     bool m_busy{false};
     bool m_localStorageRefreshPending{false};
