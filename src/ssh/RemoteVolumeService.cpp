@@ -52,6 +52,48 @@ QString RemoteLinuxVolumeService::blockDeviceDiscoveryCommand()
 }
 
 std::optional<QString>
+RemoteLinuxVolumeService::unmountTopologyCommand(const rfm::core::VolumeOperationRequest& request,
+                                                 const RemoteLinuxVolumeCapabilities& capabilities,
+                                                 rfm::core::VolumeOperationResult* immediateResult)
+{
+    auto reject = [&request, immediateResult](rfm::core::VolumeOperationError error,
+                                              const QString& detail) {
+        if (immediateResult != nullptr) {
+            *immediateResult = rfm::core::makeVolumeOperationResult(request, error, detail);
+        }
+        return std::optional<QString>{};
+    };
+    if (rfm::core::isProtectedVolumeOperation(request)) {
+        return reject(rfm::core::VolumeOperationError::NotSupported,
+                      QStringLiteral("RemoteFileManager never unmounts the system volume."));
+    }
+    if (!rfm::core::isSafeLinuxDevicePath(request.target.device)) {
+        return reject(rfm::core::VolumeOperationError::DeviceNotFound,
+                      QStringLiteral("The remote volume has no safe Linux device identifier."));
+    }
+    if (rfm::core::volumeUnmountTargetMode(request) ==
+        rfm::core::VolumeUnmountTargetMode::Invalid) {
+        return reject(rfm::core::VolumeOperationError::DeviceNotFound,
+                      QStringLiteral("The remote volume snapshot is inconsistent."));
+    }
+    if (!capabilities.known) {
+        return reject(rfm::core::VolumeOperationError::ConnectionLost,
+                      QStringLiteral("Remote session capabilities are unavailable."));
+    }
+    if (!capabilities.lsblk) {
+        return reject(rfm::core::VolumeOperationError::ToolUnavailable,
+                      QStringLiteral("The current volume attachment topology cannot be verified."));
+    }
+    const QString device = RemoteCopyCommand::quoteArgument(request.target.device);
+    if (device.isEmpty()) {
+        return reject(rfm::core::VolumeOperationError::DeviceNotFound,
+                      QStringLiteral("The remote volume has no safe Linux device identifier."));
+    }
+    return QStringLiteral("LC_ALL=C lsblk --json --paths --output PATH,MOUNTPOINTS -- %1")
+        .arg(device);
+}
+
+std::optional<QString>
 RemoteLinuxVolumeService::operationCommand(const rfm::core::VolumeOperationRequest& request,
                                            const RemoteLinuxVolumeCapabilities& capabilities,
                                            rfm::core::VolumeOperationResult* immediateResult)

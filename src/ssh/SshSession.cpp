@@ -1043,6 +1043,7 @@ class SshInteractivePolkitProcess final
 enum class SshVolumeCommandPurpose {
     Capabilities,
     BlockDevices,
+    RevalidateVolumeOperation,
     VolumeOperation,
     InteractiveVolumeOperation
 };
@@ -1518,16 +1519,21 @@ void SshSession::authenticateVolume(quint64 operationId, quint64 authenticationT
     const rfm::core::VolumeOperationRequest request = awaiting->request;
     m_impl->awaitingVolumeAuthentications.erase(awaiting);
     rfm::core::VolumeOperationResult immediate;
-    const auto command = rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
-        request, m_impl->volumeCapabilityCache.value(), &immediate);
+    const bool revalidateUnmount = request.operation == rfm::core::VolumeOperation::Unmount;
+    const auto command = revalidateUnmount
+                             ? rfm::ssh::RemoteLinuxVolumeService::unmountTopologyCommand(
+                                   request, m_impl->volumeCapabilityCache.value(), &immediate)
+                             : rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
+                                   request, m_impl->volumeCapabilityCache.value(), &immediate);
     if (!command.has_value()) {
         m_impl->activeVolumeDevices.remove(request.target.device);
         emit volumeOperationFinished(immediate);
         return;
     }
-    m_impl->volumeCommandQueue.emplace_front(
-        SshVolumeCommandTask{SshVolumeCommandPurpose::InteractiveVolumeOperation, *command, 0,
-                             request, std::move(password)});
+    m_impl->volumeCommandQueue.emplace_front(SshVolumeCommandTask{
+        revalidateUnmount ? SshVolumeCommandPurpose::RevalidateVolumeOperation
+                          : SshVolumeCommandPurpose::InteractiveVolumeOperation,
+        *command, 0, request, std::move(password)});
     scheduleVolumeCommandStep();
 }
 
@@ -1584,15 +1590,24 @@ void SshSession::startPendingRemoteWork()
     while (!m_impl->pendingVolumeOperations.isEmpty()) {
         const rfm::core::VolumeOperationRequest request = m_impl->pendingVolumeOperations.dequeue();
         rfm::core::VolumeOperationResult immediate;
-        const std::optional<QString> command = rfm::ssh::RemoteLinuxVolumeService::operationCommand(
-            request, m_impl->volumeCapabilityCache.value(), &immediate);
+        const bool revalidateUnmount = request.operation == rfm::core::VolumeOperation::Unmount;
+        const std::optional<QString> command =
+            revalidateUnmount ? rfm::ssh::RemoteLinuxVolumeService::unmountTopologyCommand(
+                                    request, m_impl->volumeCapabilityCache.value(), &immediate)
+                              : rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                                    request, m_impl->volumeCapabilityCache.value(), &immediate);
         if (!command.has_value()) {
             m_impl->activeVolumeDevices.remove(request.target.device);
             emit volumeOperationFinished(immediate);
             continue;
         }
         m_impl->volumeCommandQueue.emplace_back(SshVolumeCommandTask{
-            SshVolumeCommandPurpose::VolumeOperation, *command, 0, request, {}});
+            revalidateUnmount ? SshVolumeCommandPurpose::RevalidateVolumeOperation
+                              : SshVolumeCommandPurpose::VolumeOperation,
+            *command,
+            0,
+            request,
+            {}});
     }
     scheduleVolumeCommandStep();
 }
@@ -1624,7 +1639,8 @@ void SshSession::scheduleVolumeCommandStep(bool activityAvailable)
             m_impl->volumeCommandProcess.reset();
             m_impl->interactiveVolumeCommandProcess.reset();
             if (connectionLost) {
-                if (task.purpose == SshVolumeCommandPurpose::VolumeOperation ||
+                if (task.purpose == SshVolumeCommandPurpose::RevalidateVolumeOperation ||
+                    task.purpose == SshVolumeCommandPurpose::VolumeOperation ||
                     task.purpose == SshVolumeCommandPurpose::InteractiveVolumeOperation) {
                     emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
                         task.operationRequest, rfm::core::VolumeOperationError::ConnectionLost,
@@ -1689,7 +1705,8 @@ void SshSession::processVolumeCommandStep()
     }
     if (connectionLost) {
         const SshVolumeCommandTask& task = *m_impl->activeVolumeCommand;
-        if (task.purpose == SshVolumeCommandPurpose::VolumeOperation ||
+        if (task.purpose == SshVolumeCommandPurpose::RevalidateVolumeOperation ||
+            task.purpose == SshVolumeCommandPurpose::VolumeOperation ||
             task.purpose == SshVolumeCommandPurpose::InteractiveVolumeOperation) {
             emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
                 task.operationRequest, rfm::core::VolumeOperationError::ConnectionLost,
@@ -1703,7 +1720,7 @@ void SshSession::processVolumeCommandStep()
         return;
     }
 
-    const SshVolumeCommandTask task = std::move(*m_impl->activeVolumeCommand);
+    SshVolumeCommandTask task = std::move(*m_impl->activeVolumeCommand);
     m_impl->volumeCommandProcess.reset();
     m_impl->interactiveVolumeCommandProcess.reset();
     m_impl->activeVolumeCommand.reset();
@@ -1724,6 +1741,32 @@ void SshSession::processVolumeCommandStep()
         }
         startRemoteStorageScanner(task.storageRequestId);
         break;
+    case SshVolumeCommandPurpose::RevalidateVolumeOperation: {
+        rfm::core::VolumeOperationResult immediate;
+        const auto revalidated = rfm::core::revalidatedVolumeUnmountRequest(
+            task.operationRequest, *commandResult, &immediate);
+        if (!revalidated.has_value()) {
+            m_impl->activeVolumeDevices.remove(task.operationRequest.target.device);
+            emit volumeOperationFinished(immediate);
+            break;
+        }
+        const bool interactive = !task.password.isEmpty();
+        const auto command =
+            interactive ? rfm::ssh::RemoteLinuxVolumeService::interactiveOperationCommand(
+                              *revalidated, m_impl->volumeCapabilityCache.value(), &immediate)
+                        : rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+                              *revalidated, m_impl->volumeCapabilityCache.value(), &immediate);
+        if (!command.has_value()) {
+            m_impl->activeVolumeDevices.remove(task.operationRequest.target.device);
+            emit volumeOperationFinished(immediate);
+            break;
+        }
+        m_impl->volumeCommandQueue.emplace_front(
+            SshVolumeCommandTask{interactive ? SshVolumeCommandPurpose::InteractiveVolumeOperation
+                                             : SshVolumeCommandPurpose::VolumeOperation,
+                                 *command, 0, *revalidated, std::move(task.password)});
+        break;
+    }
     case SshVolumeCommandPurpose::VolumeOperation: {
         auto result = rfm::ssh::RemoteLinuxVolumeService::operationResult(task.operationRequest,
                                                                           *commandResult);

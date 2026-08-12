@@ -68,6 +68,15 @@ installé. Il ne passe jamais `--all-targets`, `-a`, `--recursive`, `--lazy` ou
 `--force`. La même règle interdit toute commande basée sur le device lorsque celui-ci
 est également observé sur `/`.
 
+L'instantané de l'interface n'autorise jamais à lui seul une commande par device. Il
+conserve sans les assainir tous les siblings observés, y compris une entrée invalide ou
+dupliquée, afin qu'une incohérence rende l'opération moins permissive. Juste avant tout
+démontage, le worker exécute un `lsblk` JSON ciblé sur le device déjà validé et reparse
+strictement `PATH,MOUNTPOINTS`. Une erreur de lecture, une réponse ambiguë, un doublon
+ou la disparition du mountpoint sélectionné arrête l'opération sans commande
+destructive. Seul un état courant composé exactement du mountpoint sélectionné permet
+encore `udisksctl unmount -b`; plusieurs attachments courants imposent `umount`.
+
 Ce fallback n'élève jamais les privilèges. Il réussit uniquement si la configuration
 du système, notamment `/etc/fstab`, et les droits de l'utilisateur autorisent déjà
 l'opération. RemoteFileManager ne modifie pas `fstab`, ne demande pas de mot de passe
@@ -170,6 +179,10 @@ Pour plusieurs attachments d'un même device, le distant emploie à la place
 `LC_ALL=C umount -- '<mountpoint sélectionné>'`. Le chemin est validé puis protégé par
 le quoting POSIX à apostrophes déjà utilisé pour les commandes distantes ; espaces,
 apostrophes et métacaractères restent des données. Aucun fallback global n'est permis.
+La session SSH met d'abord en file un `lsblk` ciblé, puis construit la commande
+destructive uniquement à partir de cette réponse fraîche. Cette revalidation est
+répétée après l'éventuelle saisie Polkit, avant la commande PTY, car la topologie peut
+avoir changé pendant le dialogue.
 
 Après validation de cette boîte, `SshSession` vérifie l'identifiant d'opération et le
 jeton de défi, puis ouvre un canal SSH dédié avec PTY. Ce PTY est strictement interne :

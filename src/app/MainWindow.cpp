@@ -95,14 +95,12 @@ QStringList knownMountPointsForDevice(const QList<rfm::core::StorageVolume>& vol
     const QString normalizedDevice = rfm::core::RemotePath::normalize(device.trimmed());
     QStringList mountPoints;
     for (const rfm::core::StorageVolume& volume : volumes) {
-        if (!volume.mounted ||
-            rfm::core::RemotePath::normalize(volume.device.trimmed()) != normalizedDevice) {
+        if (rfm::core::RemotePath::normalize(volume.device.trimmed()) != normalizedDevice) {
             continue;
         }
-        const QString mountPoint = rfm::core::RemotePath::normalize(volume.rootPath);
-        if (mountPoint.startsWith(QChar{'/'}) && !mountPoints.contains(mountPoint)) {
-            mountPoints.push_back(mountPoint);
-        }
+        // Preserve every observation verbatim. Validation belongs to the service and an
+        // inconsistent or duplicate sibling must make unmount less permissive, never safer.
+        mountPoints.push_back(volume.mounted ? volume.rootPath : QString{});
     }
     return mountPoints;
 }

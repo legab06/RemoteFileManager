@@ -340,6 +340,7 @@ class MainWindowTest final : public QObject
     void ignoresStaleResultsAfterSwitchingNavigationSource();
     void refreshesRemoteStorageOnlyAfterProbeFingerprintChanges();
     void volumeRequestsPreserveDeviceMountPoints();
+    void volumeRequestsPreserveInconsistentSiblingEvidence();
     void volumeOperationSuccessWaitsForSystemRefresh();
     void volumeOperationErrorsRestoreUi_data();
     void volumeOperationErrorsRestoreUi();
@@ -423,6 +424,47 @@ void MainWindowTest::volumeRequestsPreserveDeviceMountPoints()
         QCOMPARE(request.target.knownMountPoints,
                  QStringList({QStringLiteral("/mnt/a"), QStringLiteral("/mnt/b")}));
     }
+}
+
+void MainWindowTest::volumeRequestsPreserveInconsistentSiblingEvidence()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::volumeOperationRequested, nullptr, nullptr);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::volumeOperationRequested);
+    rfm::core::StorageVolume selected;
+    selected.displayName = QStringLiteral("Selected attachment");
+    selected.device = QStringLiteral("/dev/sde1");
+    selected.rootPath = QStringLiteral("/mnt/data");
+    selected.kind = rfm::core::StorageKind::External;
+    rfm::core::StorageVolume invalidSibling = selected;
+    invalidSibling.displayName = QStringLiteral("Invalid sibling");
+    invalidSibling.rootPath.clear();
+    rfm::core::StorageVolume duplicateSibling = selected;
+    duplicateSibling.displayName = QStringLiteral("Duplicate sibling");
+    rfm::core::StorageVolume contradictorySibling = selected;
+    contradictorySibling.displayName = QStringLiteral("Contradictory sibling");
+    contradictorySibling.mounted = false;
+    contradictorySibling.rootPath.clear();
+    const QList<rfm::core::StorageVolume> volumes{selected, invalidSibling, duplicateSibling,
+                                                  contradictorySibling};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
+                                      Q_ARG(QList<rfm::core::StorageVolume>, volumes)));
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    QTreeWidgetItem* const item = volumeItemByDeviceAndPath(navigation->tree()->topLevelItem(0),
+                                                            selected.device, selected.rootPath);
+    QVERIFY(item != nullptr);
+    navigation->tree()->setCurrentItem(item);
+
+    window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"))->click();
+
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::VolumeOperationRequest>();
+    QCOMPARE(request.target.knownMountPoints,
+             QStringList(
+                 {QStringLiteral("/mnt/data"), QString{}, QStringLiteral("/mnt/data"), QString{}}));
+    QCOMPARE(rfm::core::volumeUnmountTargetMode(request),
+             rfm::core::VolumeUnmountTargetMode::Invalid);
 }
 
 void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()

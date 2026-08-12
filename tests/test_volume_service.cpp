@@ -16,26 +16,56 @@
 namespace
 {
 
+QString attachmentTopology(const QString& device, const QStringList& mountPoints)
+{
+    QStringList values;
+    for (const QString& mountPoint : mountPoints) {
+        values.push_back(QStringLiteral("\"%1\"").arg(mountPoint));
+    }
+    return QStringLiteral("{\"blockdevices\":[{\"path\":\"%1\",\"mountpoints\":[%2]}]}")
+        .arg(device, values.join(QChar{','}));
+}
+
 class FakeCommandRunner final : public rfm::core::VolumeCommandRunner
 {
   public:
-    QString findExecutable(const QString& name) const override { return executables.value(name); }
+    QString findExecutable(const QString& name) const override
+    {
+        return name == QStringLiteral("lsblk") && lsblkAvailable ? QStringLiteral("/usr/bin/lsblk")
+                                                                 : executables.value(name);
+    }
 
     rfm::core::VolumeCommandResult run(const QString& program, const QStringList& arguments,
                                        int timeoutMilliseconds) override
     {
         ++runCount;
+        programs.push_back(program);
+        argumentLists.push_back(arguments);
         lastProgram = program;
         lastArguments = arguments;
         lastTimeoutMilliseconds = timeoutMilliseconds;
+        if (program.endsWith(QStringLiteral("/lsblk"))) {
+            return topologyResult;
+        }
         return result;
     }
 
     QHash<QString, QString> executables;
     rfm::core::VolumeCommandResult result{true, false, false, 0, {}, {}, false};
+    rfm::core::VolumeCommandResult topologyResult{
+        true,
+        false,
+        false,
+        0,
+        attachmentTopology(QStringLiteral("/dev/sde1"), {QStringLiteral("/media/data")}),
+        {},
+        false};
     int runCount{0};
+    bool lsblkAvailable{true};
     QString lastProgram;
     QStringList lastArguments;
+    QStringList programs;
+    QList<QStringList> argumentLists;
     int lastTimeoutMilliseconds{0};
 };
 
@@ -44,8 +74,10 @@ class BlockingCommandRunner final : public rfm::core::VolumeCommandRunner
   public:
     QString findExecutable(const QString& name) const override
     {
-        return name == QStringLiteral("udisksctl") ? QStringLiteral("/usr/bin/udisksctl")
-                                                   : QString{};
+        if (name == QStringLiteral("udisksctl") || name == QStringLiteral("lsblk")) {
+            return QStringLiteral("/usr/bin/") + name;
+        }
+        return {};
     }
 
     rfm::core::VolumeCommandResult run(const QString&, const QStringList&, int) override
@@ -112,9 +144,11 @@ class VolumeServiceTest final : public QObject
     void mapsCommandErrors();
     void prefersUdisksctl();
     void targetsSelectedMountPointForMultipleAttachments();
+    void revalidatesAttachmentTopologyBeforeUnmount();
     void fallsBackToSystemTools();
     void rejectsUnsafeOrInconsistentMountPoints_data();
     void rejectsUnsafeOrInconsistentMountPoints();
+    void rejectsUnsafeUnmountDeviceBeforeTopologyProbe();
     void reportsUnavailableTools();
     void passesDeviceAsOneArgumentAndIgnoresPresentationMetadata();
     void preventsConcurrentOperationsOnOneDevice();
@@ -216,20 +250,30 @@ void VolumeServiceTest::targetsSelectedMountPointForMultipleAttachments()
     auto runner = std::make_unique<FakeCommandRunner>();
     runner->executables.insert(QStringLiteral("udisksctl"), QStringLiteral("/usr/bin/udisksctl"));
     runner->executables.insert(QStringLiteral("umount"), QStringLiteral("/usr/bin/umount"));
+    runner->topologyResult.standardOutput =
+        attachmentTopology(QStringLiteral("/dev/sde1"), {QStringLiteral("/mnt/My Backup's;$(id)"),
+                                                         QStringLiteral("/mnt/other")});
     FakeCommandRunner* runnerObserver = runner.get();
     rfm::core::LocalLinuxVolumeService service(std::move(runner));
 
     const auto result = service.execute(
         requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sde1"),
-                   QStringLiteral("/mnt/My Backup"), rfm::core::StorageKind::External,
-                   {QStringLiteral("/mnt/My Backup"), QStringLiteral("/mnt/other")}));
+                   QStringLiteral("/mnt/My Backup's;$(id)"), rfm::core::StorageKind::External,
+                   {QStringLiteral("/mnt/My Backup's;$(id)"), QStringLiteral("/mnt/other")}));
 
     QVERIFY(result.succeeded());
     QCOMPARE(runnerObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
     QCOMPARE(runnerObserver->lastArguments,
-             QStringList({QStringLiteral("--"), QStringLiteral("/mnt/My Backup")}));
+             QStringList({QStringLiteral("--"), QStringLiteral("/mnt/My Backup's;$(id)")}));
     QVERIFY(!runnerObserver->lastArguments.contains(QStringLiteral("--all-targets")));
+    QCOMPARE(runnerObserver->programs.constFirst(), QStringLiteral("/usr/bin/lsblk"));
+    QCOMPARE(runnerObserver->argumentLists.constFirst(),
+             QStringList({QStringLiteral("--json"), QStringLiteral("--paths"),
+                          QStringLiteral("--output"), QStringLiteral("PATH,MOUNTPOINTS"),
+                          QStringLiteral("--"), QStringLiteral("/dev/sde1")}));
 
+    runnerObserver->topologyResult.standardOutput = attachmentTopology(
+        QStringLiteral("/dev/sde1"), {QStringLiteral("/"), QStringLiteral("/mnt/data")});
     const auto rootSiblingResult =
         service.execute(requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sde1"),
                                    QStringLiteral("/mnt/data"), rfm::core::StorageKind::External,
@@ -242,13 +286,99 @@ void VolumeServiceTest::targetsSelectedMountPointForMultipleAttachments()
     auto udisksOnlyRunner = std::make_unique<FakeCommandRunner>();
     udisksOnlyRunner->executables.insert(QStringLiteral("udisksctl"),
                                          QStringLiteral("/usr/bin/udisksctl"));
+    udisksOnlyRunner->topologyResult.standardOutput = attachmentTopology(
+        QStringLiteral("/dev/sde1"), {QStringLiteral("/mnt/a"), QStringLiteral("/mnt/b")});
     FakeCommandRunner* udisksOnlyObserver = udisksOnlyRunner.get();
     rfm::core::LocalLinuxVolumeService udisksOnlyService(std::move(udisksOnlyRunner));
     const auto unavailable = udisksOnlyService.execute(requestFor(
         rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sde1"), QStringLiteral("/mnt/a"),
         rfm::core::StorageKind::External, {QStringLiteral("/mnt/a"), QStringLiteral("/mnt/b")}));
     QCOMPARE(unavailable.error, rfm::core::VolumeOperationError::ToolUnavailable);
-    QCOMPARE(udisksOnlyObserver->runCount, 0);
+    QCOMPARE(udisksOnlyObserver->runCount, 1);
+}
+
+void VolumeServiceTest::revalidatesAttachmentTopologyBeforeUnmount()
+{
+    auto makeService = [](const QString& topology, rfm::core::VolumeCommandResult commandResult = {
+                                                       true, false, false, 0, {}, {}, false}) {
+        auto runner = std::make_unique<FakeCommandRunner>();
+        runner->executables.insert(QStringLiteral("udisksctl"),
+                                   QStringLiteral("/usr/bin/udisksctl"));
+        runner->executables.insert(QStringLiteral("umount"), QStringLiteral("/usr/bin/umount"));
+        runner->topologyResult.standardOutput = topology;
+        runner->result = std::move(commandResult);
+        return runner;
+    };
+
+    auto changedRunner = makeService(attachmentTopology(
+        QStringLiteral("/dev/sde1"), {QStringLiteral("/media/data"), QStringLiteral("/mnt/new")}));
+    FakeCommandRunner* changedObserver = changedRunner.get();
+    rfm::core::LocalLinuxVolumeService changedService(std::move(changedRunner));
+    QVERIFY(changedService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).succeeded());
+    QCOMPARE(changedObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
+    QCOMPARE(changedObserver->lastArguments,
+             QStringList({QStringLiteral("--"), QStringLiteral("/media/data")}));
+
+    auto rootRunner = makeService(attachmentTopology(
+        QStringLiteral("/dev/sde1"), {QStringLiteral("/"), QStringLiteral("/media/data")}));
+    FakeCommandRunner* rootObserver = rootRunner.get();
+    rfm::core::LocalLinuxVolumeService rootService(std::move(rootRunner));
+    QVERIFY(rootService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).succeeded());
+    QCOMPARE(rootObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
+    QCOMPARE(rootObserver->lastArguments,
+             QStringList({QStringLiteral("--"), QStringLiteral("/media/data")}));
+
+    auto disappearedRunner = makeService(
+        attachmentTopology(QStringLiteral("/dev/sde1"), {QStringLiteral("/mnt/other")}));
+    FakeCommandRunner* disappearedObserver = disappearedRunner.get();
+    rfm::core::LocalLinuxVolumeService disappearedService(std::move(disappearedRunner));
+    QCOMPARE(disappearedService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).error,
+             rfm::core::VolumeOperationError::DeviceNotFound);
+    QCOMPARE(disappearedObserver->runCount, 1);
+
+    auto malformedRunner = makeService(QStringLiteral("not json"));
+    FakeCommandRunner* malformedObserver = malformedRunner.get();
+    rfm::core::LocalLinuxVolumeService malformedService(std::move(malformedRunner));
+    QCOMPARE(malformedService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).error,
+             rfm::core::VolumeOperationError::SystemError);
+    QCOMPARE(malformedObserver->runCount, 1);
+
+    auto failedProbeRunner = makeService({});
+    failedProbeRunner->topologyResult = {
+        true, false, false, 1, {}, QStringLiteral("lsblk: I/O error"), false};
+    FakeCommandRunner* failedProbeObserver = failedProbeRunner.get();
+    rfm::core::LocalLinuxVolumeService failedProbeService(std::move(failedProbeRunner));
+    QCOMPARE(failedProbeService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).error,
+             rfm::core::VolumeOperationError::SystemError);
+    QCOMPARE(failedProbeObserver->runCount, 1);
+
+    auto duplicateRunner = makeService(
+        attachmentTopology(QStringLiteral("/dev/sde1"),
+                           {QStringLiteral("/media/data"), QStringLiteral("/media/data")}));
+    FakeCommandRunner* duplicateObserver = duplicateRunner.get();
+    rfm::core::LocalLinuxVolumeService duplicateService(std::move(duplicateRunner));
+    QCOMPARE(duplicateService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).error,
+             rfm::core::VolumeOperationError::SystemError);
+    QCOMPARE(duplicateObserver->runCount, 1);
+
+    auto deniedRunner =
+        makeService(attachmentTopology(QStringLiteral("/dev/sde1"), {QStringLiteral("/media/data"),
+                                                                     QStringLiteral("/mnt/other")}),
+                    {true, false, false, 1, {}, QStringLiteral("permission denied"), false});
+    FakeCommandRunner* deniedObserver = deniedRunner.get();
+    rfm::core::LocalLinuxVolumeService deniedService(std::move(deniedRunner));
+    QCOMPARE(deniedService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).error,
+             rfm::core::VolumeOperationError::PermissionDenied);
+    QCOMPARE(deniedObserver->runCount, 2);
+    QCOMPARE(deniedObserver->lastProgram, QStringLiteral("/usr/bin/umount"));
+
+    auto unavailableRunner = makeService({});
+    unavailableRunner->lsblkAvailable = false;
+    FakeCommandRunner* unavailableObserver = unavailableRunner.get();
+    rfm::core::LocalLinuxVolumeService unavailableService(std::move(unavailableRunner));
+    QCOMPARE(unavailableService.execute(requestFor(rfm::core::VolumeOperation::Unmount)).error,
+             rfm::core::VolumeOperationError::ToolUnavailable);
+    QCOMPARE(unavailableObserver->runCount, 0);
 }
 
 void VolumeServiceTest::fallsBackToSystemTools()
@@ -291,6 +421,9 @@ void VolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints_data()
     QTest::newRow("invalid-snapshot-entry")
         << QStringLiteral("/mnt/data")
         << QStringList{QStringLiteral("/mnt/data"), QStringLiteral("relative")};
+    QTest::newRow("duplicate-snapshot-entry")
+        << QStringLiteral("/mnt/data")
+        << QStringList{QStringLiteral("/mnt/data"), QStringLiteral("/mnt/data")};
 }
 
 void VolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints()
@@ -309,6 +442,20 @@ void VolumeServiceTest::rejectsUnsafeOrInconsistentMountPoints()
                                                      knownMountPoints}};
 
     const auto result = service.execute(request);
+
+    QCOMPARE(result.error, rfm::core::VolumeOperationError::DeviceNotFound);
+    QCOMPARE(runnerObserver->runCount, 0);
+}
+
+void VolumeServiceTest::rejectsUnsafeUnmountDeviceBeforeTopologyProbe()
+{
+    auto runner = std::make_unique<FakeCommandRunner>();
+    runner->executables.insert(QStringLiteral("udisksctl"), QStringLiteral("/usr/bin/udisksctl"));
+    FakeCommandRunner* runnerObserver = runner.get();
+    rfm::core::LocalLinuxVolumeService service(std::move(runner));
+
+    const auto result = service.execute(
+        requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sda/../sdb")));
 
     QCOMPARE(result.error, rfm::core::VolumeOperationError::DeviceNotFound);
     QCOMPARE(runnerObserver->runCount, 0);

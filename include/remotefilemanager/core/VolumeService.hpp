@@ -10,6 +10,7 @@
 #include <QStringList>
 
 #include <memory>
+#include <optional>
 
 namespace rfm::core
 {
@@ -68,6 +69,12 @@ struct VolumeCommandResult {
     bool cancelled{false};
 };
 
+struct LinuxVolumeAttachmentSnapshot {
+    bool valid{false};
+    bool deviceFound{false};
+    QStringList mountPoints;
+};
+
 [[nodiscard]] VolumeOperationError
 volumeOperationErrorFromCommand(const VolumeCommandResult& result);
 [[nodiscard]] VolumeOperationResult makeVolumeOperationResult(const VolumeOperationRequest& request,
@@ -77,6 +84,12 @@ volumeOperationErrorFromCommand(const VolumeCommandResult& result);
 [[nodiscard]] bool isSafeLinuxMountPoint(const QString& mountPoint);
 [[nodiscard]] VolumeUnmountTargetMode
 volumeUnmountTargetMode(const VolumeOperationRequest& request);
+[[nodiscard]] LinuxVolumeAttachmentSnapshot
+parseLinuxVolumeAttachmentSnapshot(const QByteArray& output, const QString& device);
+[[nodiscard]] std::optional<VolumeOperationRequest>
+revalidatedVolumeUnmountRequest(const VolumeOperationRequest& request,
+                                const VolumeCommandResult& topologyCommand,
+                                VolumeOperationResult* immediateResult = nullptr);
 [[nodiscard]] bool isProtectedVolumeOperation(const VolumeOperationRequest& request);
 
 class VolumeCommandRunner

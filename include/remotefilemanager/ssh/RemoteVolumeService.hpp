@@ -37,6 +37,10 @@ class RemoteLinuxVolumeService final
     parseCapabilities(const QByteArray& standardOutput);
     [[nodiscard]] static QString blockDeviceDiscoveryCommand();
     [[nodiscard]] static std::optional<QString>
+    unmountTopologyCommand(const rfm::core::VolumeOperationRequest& request,
+                           const RemoteLinuxVolumeCapabilities& capabilities,
+                           rfm::core::VolumeOperationResult* immediateResult = nullptr);
+    [[nodiscard]] static std::optional<QString>
     operationCommand(const rfm::core::VolumeOperationRequest& request,
                      const RemoteLinuxVolumeCapabilities& capabilities,
                      rfm::core::VolumeOperationResult* immediateResult = nullptr);

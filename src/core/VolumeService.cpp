@@ -4,6 +4,9 @@
 
 #include <QDir>
 #include <QElapsedTimer>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMutexLocker>
 #include <QProcess>
 #include <QRegularExpression>
@@ -190,6 +193,61 @@ bool isNormalizedAbsoluteLinuxPath(const QString& path)
     });
 }
 
+void findAttachmentDevice(const QJsonArray& entries, const QString& device,
+                          LinuxVolumeAttachmentSnapshot& snapshot, int& matches)
+{
+    for (const QJsonValue& value : entries) {
+        if (!value.isObject()) {
+            snapshot.valid = false;
+            return;
+        }
+        const QJsonObject object = value.toObject();
+        if (object.value(QStringLiteral("path")).toString() == device) {
+            ++matches;
+            snapshot.deviceFound = true;
+            const QJsonValue mountPointsValue = object.value(QStringLiteral("mountpoints"));
+            if (!mountPointsValue.isArray()) {
+                snapshot.valid = false;
+                return;
+            }
+            const QJsonArray mountPoints = mountPointsValue.toArray();
+            bool nullMountPoint = false;
+            for (const QJsonValue& mountPointValue : mountPoints) {
+                if (mountPointValue.isNull()) {
+                    nullMountPoint = true;
+                    continue;
+                }
+                if (!mountPointValue.isString()) {
+                    snapshot.valid = false;
+                    return;
+                }
+                const QString mountPoint = mountPointValue.toString();
+                if (!isNormalizedAbsoluteLinuxPath(mountPoint) ||
+                    snapshot.mountPoints.contains(mountPoint)) {
+                    snapshot.valid = false;
+                    return;
+                }
+                snapshot.mountPoints.push_back(mountPoint);
+            }
+            if (nullMountPoint && !snapshot.mountPoints.isEmpty()) {
+                snapshot.valid = false;
+                return;
+            }
+        }
+        const QJsonValue children = object.value(QStringLiteral("children"));
+        if (!children.isUndefined()) {
+            if (!children.isArray()) {
+                snapshot.valid = false;
+                return;
+            }
+            findAttachmentDevice(children.toArray(), device, snapshot, matches);
+            if (!snapshot.valid) {
+                return;
+            }
+        }
+    }
+}
+
 } // namespace
 
 bool isSafeLinuxMountPoint(const QString& mountPoint)
@@ -206,7 +264,7 @@ VolumeUnmountTargetMode volumeUnmountTargetMode(const VolumeOperationRequest& re
 
     QSet<QString> uniqueMountPoints;
     for (const QString& mountPoint : request.target.knownMountPoints) {
-        if (!isNormalizedAbsoluteLinuxPath(mountPoint)) {
+        if (!isNormalizedAbsoluteLinuxPath(mountPoint) || uniqueMountPoints.contains(mountPoint)) {
             return VolumeUnmountTargetMode::Invalid;
         }
         uniqueMountPoints.insert(mountPoint);
@@ -216,6 +274,69 @@ VolumeUnmountTargetMode volumeUnmountTargetMode(const VolumeOperationRequest& re
     }
     return uniqueMountPoints.size() == 1 ? VolumeUnmountTargetMode::Device
                                          : VolumeUnmountTargetMode::MountPoint;
+}
+
+LinuxVolumeAttachmentSnapshot parseLinuxVolumeAttachmentSnapshot(const QByteArray& output,
+                                                                 const QString& device)
+{
+    LinuxVolumeAttachmentSnapshot snapshot;
+    if (!isSafeLinuxDevicePath(device)) {
+        return snapshot;
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(output, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return snapshot;
+    }
+    const QJsonValue devices = document.object().value(QStringLiteral("blockdevices"));
+    if (!devices.isArray()) {
+        return snapshot;
+    }
+    snapshot.valid = true;
+    int matches = 0;
+    findAttachmentDevice(devices.toArray(), device, snapshot, matches);
+    if (matches > 1) {
+        snapshot.valid = false;
+    }
+    return snapshot;
+}
+
+std::optional<VolumeOperationRequest>
+revalidatedVolumeUnmountRequest(const VolumeOperationRequest& request,
+                                const VolumeCommandResult& topologyCommand,
+                                VolumeOperationResult* immediateResult)
+{
+    auto reject = [&request, immediateResult](VolumeOperationError error, const QString& detail) {
+        if (immediateResult != nullptr) {
+            *immediateResult = makeVolumeOperationResult(request, error, detail);
+        }
+        return std::optional<VolumeOperationRequest>{};
+    };
+    const VolumeOperationError commandError = volumeOperationErrorFromCommand(topologyCommand);
+    if (commandError != VolumeOperationError::None) {
+        const QString diagnostic = topologyCommand.standardError.trimmed().isEmpty()
+                                       ? topologyCommand.standardOutput
+                                       : topologyCommand.standardError;
+        return reject(commandError, diagnostic);
+    }
+    const LinuxVolumeAttachmentSnapshot snapshot = parseLinuxVolumeAttachmentSnapshot(
+        topologyCommand.standardOutput.toUtf8(), request.target.device);
+    if (!snapshot.valid) {
+        return reject(VolumeOperationError::SystemError,
+                      QStringLiteral("The current volume attachment topology is inconsistent."));
+    }
+    if (!snapshot.deviceFound || !snapshot.mountPoints.contains(request.target.mountPoint)) {
+        return reject(VolumeOperationError::DeviceNotFound,
+                      QStringLiteral("The selected mount point is no longer attached."));
+    }
+
+    VolumeOperationRequest revalidated = request;
+    revalidated.target.knownMountPoints = snapshot.mountPoints;
+    if (volumeUnmountTargetMode(revalidated) == VolumeUnmountTargetMode::Invalid) {
+        return reject(VolumeOperationError::SystemError,
+                      QStringLiteral("The current volume attachment topology is unsafe."));
+    }
+    return revalidated;
 }
 
 bool isProtectedVolumeOperation(const VolumeOperationRequest& request)
@@ -252,7 +373,9 @@ VolumeOperationResult LocalLinuxVolumeService::execute(const VolumeOperationRequ
             QStringLiteral("The volume has no safe, consistent mount point."));
     }
     const QString device = QDir::cleanPath(request.target.device.trimmed());
-    if (!device.startsWith(QStringLiteral("/dev/")) || device == QStringLiteral("/dev")) {
+    if (!device.startsWith(QStringLiteral("/dev/")) || device == QStringLiteral("/dev") ||
+        (request.operation == VolumeOperation::Unmount &&
+         !isSafeLinuxDevicePath(request.target.device))) {
         return makeVolumeOperationResult(
             request, VolumeOperationError::DeviceNotFound,
             QStringLiteral("The volume has no valid system device identifier."));
@@ -281,17 +404,38 @@ VolumeOperationResult
 LocalLinuxVolumeService::executeUnlocked(const VolumeOperationRequest& request,
                                          const QString& device)
 {
-    const VolumeUnmountTargetMode unmountTargetMode = volumeUnmountTargetMode(request);
-    const bool targetedUnmount = request.operation == VolumeOperation::Unmount &&
+    VolumeOperationRequest effectiveRequest = request;
+    if (request.operation == VolumeOperation::Unmount) {
+        const QString lsblk = m_runner->findExecutable(QStringLiteral("lsblk"));
+        if (lsblk.isEmpty()) {
+            return makeVolumeOperationResult(
+                request, VolumeOperationError::ToolUnavailable,
+                QStringLiteral("The current volume attachment topology cannot be verified."));
+        }
+        const VolumeCommandResult topology = m_runner->run(
+            lsblk,
+            {QStringLiteral("--json"), QStringLiteral("--paths"), QStringLiteral("--output"),
+             QStringLiteral("PATH,MOUNTPOINTS"), QStringLiteral("--"), device},
+            commandTimeoutMilliseconds);
+        VolumeOperationResult immediate;
+        const auto revalidated = revalidatedVolumeUnmountRequest(request, topology, &immediate);
+        if (!revalidated.has_value()) {
+            return immediate;
+        }
+        effectiveRequest = *revalidated;
+    }
+    const VolumeUnmountTargetMode unmountTargetMode = volumeUnmountTargetMode(effectiveRequest);
+    const bool targetedUnmount = effectiveRequest.operation == VolumeOperation::Unmount &&
                                  unmountTargetMode == VolumeUnmountTargetMode::MountPoint;
     QString program = m_runner->findExecutable(QStringLiteral("udisksctl"));
     QStringList arguments;
     if (!program.isEmpty() && !targetedUnmount) {
-        arguments = {request.operation == VolumeOperation::Mount ? QStringLiteral("mount")
-                                                                 : QStringLiteral("unmount"),
+        arguments = {effectiveRequest.operation == VolumeOperation::Mount
+                         ? QStringLiteral("mount")
+                         : QStringLiteral("unmount"),
                      QStringLiteral("-b"), device};
     } else {
-        const QString fallback = request.operation == VolumeOperation::Mount
+        const QString fallback = effectiveRequest.operation == VolumeOperation::Mount
                                      ? QStringLiteral("mount")
                                      : QStringLiteral("umount");
         program = m_runner->findExecutable(fallback);
@@ -300,8 +444,8 @@ LocalLinuxVolumeService::executeUnlocked(const VolumeOperationRequest& request,
                 request, VolumeOperationError::ToolUnavailable,
                 QStringLiteral("No supported local volume tool is available."));
         }
-        arguments = {QStringLiteral("--"), request.operation == VolumeOperation::Unmount
-                                               ? request.target.mountPoint
+        arguments = {QStringLiteral("--"), effectiveRequest.operation == VolumeOperation::Unmount
+                                               ? effectiveRequest.target.mountPoint
                                                : device};
     }
 

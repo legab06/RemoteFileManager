@@ -31,6 +31,7 @@ class RemoteVolumeServiceTest final : public QObject
 
   private slots:
     void parsesCapabilitiesAndUsesOnlyFixedProbe();
+    void buildsAndAppliesLateUnmountTopologyProbe();
     void choosesUdisksctlAndFallbacks();
     void targetsSelectedMountPointForMultipleAttachments();
     void rejectsUnsafeOrInconsistentMountPoints_data();
@@ -66,6 +67,79 @@ void RemoteVolumeServiceTest::parsesCapabilitiesAndUsesOnlyFixedProbe()
     const QString probe = rfm::ssh::RemoteLinuxVolumeService::capabilityProbeCommand();
     QVERIFY(probe.contains(QStringLiteral("lsblk udisksctl mount umount")));
     QVERIFY(!probe.contains(QStringLiteral("sudo")));
+}
+
+void RemoteVolumeServiceTest::buildsAndAppliesLateUnmountTopologyProbe()
+{
+    const auto initial = requestFor(rfm::core::VolumeOperation::Unmount);
+    rfm::core::VolumeOperationResult immediate;
+    const QString probe = *rfm::ssh::RemoteLinuxVolumeService::unmountTopologyCommand(
+        initial, allCapabilities(), &immediate);
+    QCOMPARE(probe, QStringLiteral("LC_ALL=C lsblk --json --paths --output PATH,MOUNTPOINTS -- "
+                                   "'/dev/sdb1'"));
+    QVERIFY(!probe.contains(QStringLiteral("sudo")));
+
+    const auto inconsistentInitial =
+        requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sdb1"),
+                   QStringLiteral("/mnt/usb"), rfm::core::StorageKind::External,
+                   {QStringLiteral("/mnt/usb"), QString{}});
+    QVERIFY(!rfm::ssh::RemoteLinuxVolumeService::unmountTopologyCommand(
+                 inconsistentInitial, allCapabilities(), &immediate)
+                 .has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::DeviceNotFound);
+
+    const rfm::core::VolumeCommandResult unchanged{
+        true,
+        false,
+        false,
+        0,
+        QStringLiteral(
+            "{\"blockdevices\":[{\"path\":\"/dev/sdb1\",\"mountpoints\":[\"/mnt/usb\"]}]}"),
+        {},
+        false};
+    const auto revalidatedSingle =
+        rfm::core::revalidatedVolumeUnmountRequest(initial, unchanged, &immediate);
+    QVERIFY(revalidatedSingle.has_value());
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(*revalidatedSingle,
+                                                                   allCapabilities(), &immediate),
+             QStringLiteral("LC_ALL=C udisksctl unmount -b /dev/sdb1 --no-user-interaction"));
+
+    rfm::core::VolumeCommandResult changed = unchanged;
+    changed.standardOutput =
+        QStringLiteral("{\"blockdevices\":[{\"path\":\"/dev/sdb1\",\"mountpoints\":[\"/mnt/usb\","
+                       "\"/mnt/Other's disk;$(id)\"]}]}");
+    const auto revalidatedMultiple =
+        rfm::core::revalidatedVolumeUnmountRequest(initial, changed, &immediate);
+    QVERIFY(revalidatedMultiple.has_value());
+    const QString targeted = *rfm::ssh::RemoteLinuxVolumeService::operationCommand(
+        *revalidatedMultiple, allCapabilities(), &immediate);
+    QCOMPARE(targeted, QStringLiteral("LC_ALL=C umount -- '/mnt/usb'"));
+    QVERIFY(!targeted.contains(QStringLiteral("/dev/sdb1")));
+
+    rfm::core::VolumeCommandResult rootAppeared = unchanged;
+    rootAppeared.standardOutput =
+        QStringLiteral("{\"blockdevices\":[{\"path\":\"/dev/sdb1\",\"mountpoints\":[\"/\","
+                       "\"/mnt/usb\"]}]}");
+    const auto revalidatedRoot =
+        rfm::core::revalidatedVolumeUnmountRequest(initial, rootAppeared, &immediate);
+    QVERIFY(revalidatedRoot.has_value());
+    QCOMPARE(*rfm::ssh::RemoteLinuxVolumeService::operationCommand(*revalidatedRoot,
+                                                                   allCapabilities(), &immediate),
+             QStringLiteral("LC_ALL=C umount -- '/mnt/usb'"));
+
+    rfm::core::VolumeCommandResult disappeared = unchanged;
+    disappeared.standardOutput = QStringLiteral(
+        "{\"blockdevices\":[{\"path\":\"/dev/sdb1\",\"mountpoints\":[\"/mnt/other\"]}]}");
+    QVERIFY(
+        !rfm::core::revalidatedVolumeUnmountRequest(initial, disappeared, &immediate).has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::DeviceNotFound);
+
+    rfm::core::VolumeCommandResult failed = unchanged;
+    failed.exitCode = 1;
+    failed.standardOutput.clear();
+    failed.standardError = QStringLiteral("lsblk: /dev/sdb1: not found");
+    QVERIFY(!rfm::core::revalidatedVolumeUnmountRequest(initial, failed, &immediate).has_value());
+    QCOMPARE(immediate.error, rfm::core::VolumeOperationError::DeviceNotFound);
 }
 
 void RemoteVolumeServiceTest::buildsConstrainedInteractiveCommands()
@@ -139,12 +213,12 @@ void RemoteVolumeServiceTest::targetsSelectedMountPointForMultipleAttachments()
     rfm::core::VolumeOperationResult immediate;
     const auto request =
         requestFor(rfm::core::VolumeOperation::Unmount, QStringLiteral("/dev/sdb1"),
-                   QStringLiteral("/mnt/My Backup's disk"), rfm::core::StorageKind::External,
-                   {QStringLiteral("/mnt/My Backup's disk"), QStringLiteral("/mnt/other")});
+                   QStringLiteral("/mnt/My Backup's disk;$(id)"), rfm::core::StorageKind::External,
+                   {QStringLiteral("/mnt/My Backup's disk;$(id)"), QStringLiteral("/mnt/other")});
 
     const QString command = *rfm::ssh::RemoteLinuxVolumeService::operationCommand(
         request, allCapabilities(), &immediate);
-    QCOMPARE(command, QStringLiteral("LC_ALL=C umount -- '/mnt/My Backup'\\''s disk'"));
+    QCOMPARE(command, QStringLiteral("LC_ALL=C umount -- '/mnt/My Backup'\\''s disk;$(id)'"));
     QVERIFY(!command.contains(QStringLiteral("/dev/sdb1")));
     QVERIFY(!command.contains(QStringLiteral("--all-targets")));
     QVERIFY(!command.contains(QStringLiteral("sudo")));
