@@ -41,6 +41,11 @@ périphérique bloc dont le parcours est incomplet reste donc `Unknown`.
 La lecture distante avance par étapes réordonnancées dans la boucle du worker SSH.
 `mountinfo` reste ouvert pendant la collecte, mais chaque étape n'effectue qu'une
 lecture SFTP bornée avant de rendre la main à la boucle d'évènements.
+Quand `mountinfo` expose un numéro virtuel `0:*` pour un filesystem tel que Btrfs,
+le scanner ne conclut pas à l'absence de bloc. Une source absolue sous `/dev` est
+canonicalisée, son véritable `major:minor` est lu dans `/sys/class/block/<nom>/dev`,
+puis le parcours habituel reprend dans `/sys/dev/block`. Le transport peut ainsi être
+trouvé sur un parent sysfs, sans déduire le type matériel du nom du périphérique.
 La taille de `mountinfo`, le nombre de montages et labels, ainsi que le travail sysfs
 total sont bornés. Une nouvelle requête, une déconnexion ou le shutdown annule le
 snapshot en cours ; une perte de connexion supprime tout résultat partiel et rejoint
@@ -63,6 +68,35 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
   primitive de copie serveur exposée par SFTP/libssh. Ses arguments sont échappés séparément, les
   collisions sont refusées avant et pendant l'exécution, les liens symboliques restent des liens et
   l'annulation envoie `TERM` au processus distant avant de fermer le canal.
+- Un déplacement tente d'abord le rename SFTP. Comme SFTP v3 réduit `EXDEV` à une erreur
+  générique, le transport ne qualifie le fallback qu'après comparaison par `statvfs` des
+  répertoires qui contiennent les entrées source et destination. Il vérifie aussi que l'entrée
+  source n'est pas elle-même un point de montage d'après `/proc/self/mountinfo` ; une preuve
+  absente, ambiguë ou illisible refuse le fallback. Le parent de la source est canonicalisé
+  sans suivre le dernier composant, afin de traiter de la même façon fichiers, dossiers, liens
+  symboliques valides ou cassés.
+- Le fallback réserve atomiquement par SFTP un répertoire temporaire aléatoire en mode `0700`
+  sur le filesystem cible. La copie de déplacement utilise `cp -a` dans ce répertoire : elle
+  préserve liens, modes, dates, propriétaires lorsque les droits le permettent, ACL, attributs
+  étendus, capabilities et liens physiques dans l'arbre copié. La copie distante ordinaire
+  reste en `cp -P -n` et conserve donc sa sémantique existante. Le wrapper du seul `cp -a`
+  publie aussi son code de retour dans stdout avant EOF : le worker peut ainsi valider une copie
+  courte même si la notification SSH `exit-status` arrive tardivement, tout en refusant une
+  incohérence entre les deux statuts lorsqu'ils sont tous deux disponibles.
+- Après la copie, le worker promeut l'enfant temporaire par rename SFTP, nettoie le répertoire
+  temporaire, puis supprime la source. Tout nettoyage est coopératif et non bloquant, y compris
+  après erreur, annulation ou échec de promotion. La suppression récursive revérifie juste avant
+  `rm` l'intégralité de `mountinfo`. Un point de montage égal à la cible ou situé sous sa frontière
+  `cible/` refuse l'opération avant la première suppression ; un chemin partageant seulement son
+  préfixe n'est pas confondu avec un descendant. Un `mountinfo` absent ou malformé refuse également
+  l'opération : chaque ligne doit contenir deux IDs numériques, un `major:minor`, une racine et un
+  point de montage absolus avec des échappements reconnus, les options, le séparateur `-`, puis les
+  trois champs filesystem/source/super-options. Une seule ligne incomplète bloque tout le `rm`.
+  `rm --one-file-system` reste une défense supplémentaire après cette validation. Un nettoyage
+  impossible conserve l'erreur initiale, indique le chemin temporaire restant et empêche la
+  suppression de la source. Le fallback dépend des outils GNU/Linux usuels et ne peut recréer une
+  métadonnée que si le serveur, le filesystem et les droits du compte SSH l'autorisent ; les liens
+  physiques ne sont préservés qu'à l'intérieur d'un même élément sélectionné.
 - Le chemin SFTP initial est canonicalisé en chemin absolu. Ainsi, le dossier de connexion n'est pas
   confondu avec `/` et la navigation parent peut atteindre la vraie racine distante.
 - Les chemins de téléchargement locaux sont construits composant par composant. Chaque composant

@@ -30,6 +30,21 @@ bool connectionError(RemoteStorageError error)
 
 bool cancellationError(RemoteStorageError error) { return error == RemoteStorageError::Cancelled; }
 
+bool usableBlockDeviceNumber(const QString& value)
+{
+    static const QRegularExpression pattern(QStringLiteral("^[0-9]+:[0-9]+$"));
+    const QString normalized = value.trimmed();
+    return !normalized.startsWith(QStringLiteral("0:")) && pattern.match(normalized).hasMatch();
+}
+
+bool safeDeviceSource(const QString& path)
+{
+    const QString normalized = rfm::core::RemotePath::normalize(path);
+    return normalized.startsWith(QStringLiteral("/dev/")) &&
+           normalized != QStringLiteral("/dev/..") &&
+           !normalized.startsWith(QStringLiteral("/dev/../"));
+}
+
 } // namespace
 
 RemoteStorageScanner::RemoteStorageScanner(std::unique_ptr<RemoteStorageReader> reader,
@@ -181,15 +196,69 @@ RemoteStorageScanStep RemoteStorageScanner::step()
         }
         resetCurrentMount();
         m_currentMount = m_mounts.at(m_mountIndex);
-        static const QRegularExpression deviceNumberPattern(QStringLiteral("^[0-9]+:[0-9]+$"));
-        if (m_currentMount.deviceNumber.startsWith(QStringLiteral("0:")) ||
-            !deviceNumberPattern.match(m_currentMount.deviceNumber).hasMatch()) {
+        if (usableBlockDeviceNumber(m_currentMount.deviceNumber)) {
+            m_currentDeviceNumber = m_currentMount.deviceNumber;
+            m_stage = Stage::ReadBlockDeviceLink;
+        } else if (safeDeviceSource(m_currentMount.device)) {
+            // Btrfs and other stacked filesystems can expose a virtual 0:* mount
+            // number. Resolve their real block source before entering sysfs.
+            m_stage = Stage::ResolveMountDevice;
+        } else {
+            m_stage = Stage::FinishMount;
+        }
+        return {};
+    }
+    case Stage::ResolveMountDevice: {
+        const RemoteStorageStringResult identity = m_reader->deviceIdentity(m_currentMount.device);
+        if (connectionError(identity.error)) {
+            return fail(RemoteStorageScanStatus::ConnectionLost,
+                        QCoreApplication::translate(
+                            "RemoteStorageScanner",
+                            "The SSH connection was lost while resolving a storage device."));
+        }
+        if (cancellationError(identity.error)) {
+            return fail(RemoteStorageScanStatus::Cancelled, {});
+        }
+        m_currentDeviceIdentity = identity.error == RemoteStorageError::None
+                                      ? rfm::core::RemotePath::normalize(identity.value)
+                                      : rfm::core::RemotePath::normalize(m_currentMount.device);
+        if (!safeDeviceSource(m_currentDeviceIdentity)) {
             m_stage = Stage::FinishMount;
             return {};
         }
-
+        const QString deviceName = rfm::core::RemotePath::fileName(m_currentDeviceIdentity);
+        if (deviceName.isEmpty() || deviceName == QStringLiteral(".") ||
+            deviceName == QStringLiteral("..")) {
+            m_stage = Stage::FinishMount;
+            return {};
+        }
+        m_currentTopologyPath = QStringLiteral("/sys/class/block/%1/dev").arg(deviceName);
+        m_stage = Stage::ReadDeviceNumber;
+        return {};
+    }
+    case Stage::ReadDeviceNumber: {
+        const RemoteStorageByteResult number = m_reader->readFile(m_currentTopologyPath, 64);
+        if (connectionError(number.error)) {
+            return fail(RemoteStorageScanStatus::ConnectionLost,
+                        QCoreApplication::translate(
+                            "RemoteStorageScanner",
+                            "The SSH connection was lost while resolving a storage device."));
+        }
+        if (cancellationError(number.error)) {
+            return fail(RemoteStorageScanStatus::Cancelled, {});
+        }
+        m_currentDeviceNumber = QString::fromLatin1(number.data).trimmed();
+        if (number.error != RemoteStorageError::None || number.truncated ||
+            !usableBlockDeviceNumber(m_currentDeviceNumber)) {
+            m_stage = Stage::FinishMount;
+            return {};
+        }
+        m_stage = Stage::ReadBlockDeviceLink;
+        return {};
+    }
+    case Stage::ReadBlockDeviceLink: {
         m_currentBlockDevice = true;
-        const QString linkPath = QStringLiteral("/sys/dev/block/") + m_currentMount.deviceNumber;
+        const QString linkPath = QStringLiteral("/sys/dev/block/") + m_currentDeviceNumber;
         const RemoteStorageStringResult target = m_reader->readLink(linkPath);
         if (connectionError(target.error)) {
             return fail(RemoteStorageScanStatus::ConnectionLost,
@@ -260,18 +329,21 @@ RemoteStorageScanStep RemoteStorageScanner::step()
         const rfm::core::StorageDeviceEvidence device = rfm::core::storageDeviceEvidence(
             m_ancestry, m_currentBlockDevice, m_currentVirtualBlockDevice,
             m_currentTopologyComplete);
-        RemoteStorageStringResult identity = m_reader->deviceIdentity(m_currentMount.device);
-        if (connectionError(identity.error)) {
-            return fail(RemoteStorageScanStatus::ConnectionLost,
-                        QCoreApplication::translate(
-                            "RemoteStorageScanner",
-                            "The SSH connection was lost while identifying a storage device."));
-        }
-        if (cancellationError(identity.error)) {
-            return fail(RemoteStorageScanStatus::Cancelled, {});
-        }
-        if (identity.error != RemoteStorageError::None || identity.value.isEmpty()) {
-            identity.value = rfm::core::RemotePath::normalize(m_currentMount.device);
+        if (m_currentDeviceIdentity.isEmpty()) {
+            RemoteStorageStringResult identity = m_reader->deviceIdentity(m_currentMount.device);
+            if (connectionError(identity.error)) {
+                return fail(RemoteStorageScanStatus::ConnectionLost,
+                            QCoreApplication::translate(
+                                "RemoteStorageScanner",
+                                "The SSH connection was lost while identifying a storage device."));
+            }
+            if (cancellationError(identity.error)) {
+                return fail(RemoteStorageScanStatus::Cancelled, {});
+            }
+            m_currentDeviceIdentity =
+                identity.error == RemoteStorageError::None && !identity.value.isEmpty()
+                    ? identity.value
+                    : rfm::core::RemotePath::normalize(m_currentMount.device);
         }
 
         const RemoteStorageSizeResult size = m_reader->storageSize(m_currentMount.rootPath);
@@ -285,7 +357,7 @@ RemoteStorageScanStep RemoteStorageScanner::step()
             return fail(RemoteStorageScanStatus::Cancelled, {});
         }
         m_volumes.push_back(rfm::core::makeStorageVolume(
-            m_currentMount, device, m_labels.value(identity.value),
+            m_currentMount, device, m_labels.value(m_currentDeviceIdentity),
             size.error == RemoteStorageError::None ? size.bytes : quint64{0}));
         ++m_mountIndex;
         m_stage = Stage::BeginMount;
@@ -406,6 +478,8 @@ void RemoteStorageScanner::resetCurrentMount()
     m_ancestry.clear();
     m_visitedTopologyPaths.clear();
     m_currentTopologyPath.clear();
+    m_currentDeviceIdentity.clear();
+    m_currentDeviceNumber.clear();
     m_currentBlockDevice = false;
     m_currentVirtualBlockDevice = false;
     m_currentTopologyComplete = false;

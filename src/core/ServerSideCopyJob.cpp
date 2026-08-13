@@ -2,22 +2,27 @@
 
 #include "remotefilemanager/core/RemotePath.hpp"
 
+#include <QUuid>
+
 #include <utility>
 
 namespace rfm::core
 {
 
 ServerSideCopyJob::ServerSideCopyJob(ServerSideCopyBackend& backend, quint64 id,
-                                     QList<RemoteSelection> sources,
-                                     QString destinationDirectory)
+                                     QList<RemoteSelection> sources, QString destinationDirectory,
+                                     RemoteOperationKind operationKind)
     : m_backend(backend), m_sources(std::move(sources)),
       m_destinationDirectory(RemotePath::normalize(destinationDirectory)),
-      m_progress(beginRemoteOperation(id, OperationKind::RemoteCopy, m_sources,
-                                      m_destinationDirectory)),
-      m_result{id, RemoteOperationKind::Copy, {}}
+      m_progress(beginRemoteOperation(id,
+                                      operationKind == RemoteOperationKind::Move
+                                          ? OperationKind::RemoteMove
+                                          : OperationKind::RemoteCopy,
+                                      m_sources, m_destinationDirectory)),
+      m_result{id, operationKind, {}}, m_operationKind(operationKind)
 {
     m_progress.state = OperationState::Queued;
-    m_progress.cancellationSupported = true;
+    m_progress.cancellationSupported = operationKind == RemoteOperationKind::Copy;
 }
 
 QString ServerSideCopyJob::describeError(const RemoteBackendResult& result) const
@@ -36,12 +41,22 @@ QString ServerSideCopyJob::describeError(const RemoteBackendResult& result) cons
         return QStringLiteral("Server-side copy is not supported by the server.");
     case RemoteBackendError::InvalidPath:
         return QStringLiteral("Invalid or protected remote path.");
+    case RemoteBackendError::CrossDevice:
+        return QStringLiteral("The source and destination are on different filesystems.");
     case RemoteBackendError::Failure:
         return QStringLiteral("The remote copy failed.");
     case RemoteBackendError::None:
         return {};
     }
     return QStringLiteral("The remote copy failed.");
+}
+
+QString ServerSideCopyJob::fallbackDestination(const QString& destination) const
+{
+    const QString temporaryName = QStringLiteral(".%1.rfm-move-%2.partial")
+                                      .arg(RemotePath::fileName(destination),
+                                           QUuid::createUuid().toString(QUuid::WithoutBraces));
+    return RemotePath::join(RemotePath::parent(destination), temporaryName);
 }
 
 void ServerSideCopyJob::prepareItem()
@@ -51,20 +66,24 @@ void ServerSideCopyJob::prepareItem()
         return;
     }
     const RemoteSelection& selection = m_sources.at(m_sourceIndex);
+    m_fallbackDestination.clear();
+    m_pendingResult = {};
+    m_cleanupContinuation = CleanupContinuation::None;
+    m_fallbackOwned = false;
     const QString source = RemotePath::normalize(selection.path);
     const QString destination =
         RemotePath::join(m_destinationDirectory, RemotePath::fileName(source));
     RemoteItemResult item{source, destination, false, {}};
     const bool insideSource =
-        selection.directory &&
-        (m_destinationDirectory == source ||
-         m_destinationDirectory.startsWith(source + QChar{'/'}));
+        selection.directory && (m_destinationDirectory == source ||
+                                m_destinationDirectory.startsWith(source + QChar{'/'}));
     if (RemotePath::isProtected(source) || m_destinationDirectory.isEmpty() ||
         m_destinationDirectory == QStringLiteral("..") ||
         m_destinationDirectory.startsWith(QStringLiteral("../")) || destination.isEmpty() ||
         RemotePath::normalize(destination) == source || insideSource) {
-        item.error = insideSource ? QStringLiteral("A folder cannot be copied inside itself.")
-                                  : QStringLiteral("Invalid or protected remote path.");
+        item.error = insideSource
+                         ? QStringLiteral("A folder cannot be copied or moved inside itself.")
+                         : QStringLiteral("Invalid or protected remote path.");
         m_result.items.push_back(item);
         ++m_sourceIndex;
         return;
@@ -87,7 +106,7 @@ void ServerSideCopyJob::prepareItem()
     m_result.items.push_back(item);
     m_progress.state = OperationState::Running;
     m_progress.currentItem = source;
-    m_phase = Phase::StartItem;
+    m_phase = m_operationKind == RemoteOperationKind::Move ? Phase::RenameItem : Phase::StartItem;
 }
 
 void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
@@ -103,13 +122,107 @@ void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
     if (m_sourceIndex == m_sources.size()) {
         finish();
     } else {
+        if (m_operationKind == RemoteOperationKind::Move) {
+            m_progress.cancellationSupported = false;
+        }
         m_phase = Phase::Prepare;
+    }
+}
+
+void ServerSideCopyJob::finishRemoval(const RemoteBackendResult& result)
+{
+    if (result.succeeded()) {
+        finishItem(result);
+        return;
+    }
+    RemoteBackendResult contextual = result;
+    const QString detail = describeError(result);
+    contextual.detail =
+        QStringLiteral("The item was copied, but its source could not be removed. %1").arg(detail);
+    finishItem(contextual);
+}
+
+void ServerSideCopyJob::beginCleanup(CleanupContinuation continuation,
+                                     const RemoteBackendResult& result)
+{
+    m_pendingResult = result;
+    m_cleanupContinuation = continuation;
+    m_progress.cancellationSupported = false;
+    m_copyActive = false;
+    if (!m_fallbackOwned) {
+        finishCleanup({});
+        return;
+    }
+    m_phase = Phase::StartCleanup;
+}
+
+RemoteBackendResult
+ServerSideCopyJob::cleanupFailure(const RemoteBackendResult& cleanupResult) const
+{
+    const QString cleanupDetail = describeError(cleanupResult);
+    RemoteBackendResult combined = m_pendingResult;
+    combined.error = RemoteBackendError::Failure;
+    const QString original = describeError(m_pendingResult);
+    combined.detail =
+        QStringLiteral("%1 Temporary move data remains at %2 because cleanup failed: %3")
+            .arg(original.isEmpty() ? QStringLiteral("The remote move did not complete.")
+                                    : original,
+                 m_fallbackDestination, cleanupDetail);
+    return combined;
+}
+
+void ServerSideCopyJob::finishCleanup(const RemoteBackendResult& cleanupResult)
+{
+    if (cleanupResult.succeeded()) {
+        m_fallbackOwned = false;
+    }
+
+    const CleanupContinuation continuation = m_cleanupContinuation;
+    m_cleanupContinuation = CleanupContinuation::None;
+    if (continuation == CleanupContinuation::RemoveSource) {
+        if (cleanupResult.succeeded()) {
+            m_phase = Phase::StartRemove;
+        } else {
+            RemoteBackendResult failure{
+                RemoteBackendError::Failure,
+                QStringLiteral("The destination was created, but temporary move "
+                               "cleanup failed. The source was preserved. Temporary "
+                               "data remains at %1: %2")
+                    .arg(m_fallbackDestination, describeError(cleanupResult))};
+            finishItem(failure);
+        }
+        return;
+    }
+    if (continuation == CleanupContinuation::FinishFailure) {
+        finishItem(cleanupResult.succeeded() ? m_pendingResult : cleanupFailure(cleanupResult));
+        return;
+    }
+    if (continuation == CleanupContinuation::FinishCancellation) {
+        appendCancelledItems();
+        m_progress.currentItem.clear();
+        if (!cleanupResult.succeeded()) {
+            const RemoteBackendResult failure = cleanupFailure(cleanupResult);
+            m_result.items.last().error = failure.detail;
+            m_progress.state = OperationState::Failed;
+            m_progress.error = failure.detail;
+        } else if (m_pendingResult.succeeded()) {
+            m_progress.state = OperationState::Cancelled;
+            m_progress.error = QStringLiteral("Remote move cancelled.");
+        } else {
+            const QString failure = describeError(m_pendingResult);
+            m_result.items.last().error =
+                QStringLiteral("Remote move cancellation failed. %1").arg(failure);
+            m_progress.state = OperationState::Failed;
+            m_progress.error = failure;
+        }
+        m_phase = Phase::Finished;
     }
 }
 
 void ServerSideCopyJob::finish()
 {
     m_progress.currentItem.clear();
+    m_progress.cancellationSupported = false;
     m_progress.state = m_result.allSucceeded() ? OperationState::Completed : OperationState::Failed;
     m_progress.error.clear();
     QStringList errors;
@@ -132,13 +245,50 @@ void ServerSideCopyJob::step()
         prepareItem();
         return;
     }
+    if (m_phase == Phase::RenameItem) {
+        RemoteItemResult& item = m_result.items.last();
+        const RemoteBackendResult renamed = m_backend.rename(item.source, item.destination);
+        if (renamed.succeeded()) {
+            finishItem(renamed);
+        } else if (renamed.error == RemoteBackendError::CrossDevice) {
+            m_progress.cancellationSupported = true;
+            m_phase = Phase::PrepareFallback;
+        } else {
+            finishItem(renamed);
+        }
+        return;
+    }
+    if (m_phase == Phase::PrepareFallback) {
+        const RemoteItemResult& item = m_result.items.last();
+        m_fallbackDestination = fallbackDestination(item.destination);
+        const RemoteBackendResult reserved = m_backend.reserveMoveStaging(m_fallbackDestination);
+        if (!reserved.succeeded()) {
+            finishItem(
+                reserved.error == RemoteBackendError::AlreadyExists
+                    ? RemoteBackendResult{RemoteBackendError::AlreadyExists,
+                                          QStringLiteral(
+                                              "A temporary remote move item already exists.")}
+                    : reserved);
+        } else {
+            m_fallbackOwned = true;
+            m_phase = Phase::StartItem;
+        }
+        return;
+    }
     if (m_phase == Phase::StartItem) {
         RemoteItemResult& item = m_result.items.last();
         const RemoteSelection& selection = m_sources.at(m_sourceIndex);
         const RemoteBackendResult started =
-            m_backend.startCopy(item.source, item.destination, selection.directory);
+            m_operationKind == RemoteOperationKind::Move
+                ? m_backend.startMoveStagingCopy(
+                      item.source, RemotePath::join(m_fallbackDestination, QStringLiteral("item")))
+                : m_backend.startCopy(item.source, item.destination, selection.directory);
         if (!started.succeeded()) {
-            finishItem(started);
+            if (m_operationKind == RemoteOperationKind::Move) {
+                beginCleanup(CleanupContinuation::FinishFailure, started);
+            } else {
+                finishItem(started);
+            }
             return;
         }
         m_copyActive = true;
@@ -148,13 +298,78 @@ void ServerSideCopyJob::step()
     if (m_phase == Phase::PollItem) {
         const std::optional<RemoteBackendResult> polled = m_backend.pollCopy();
         if (polled.has_value()) {
-            finishItem(*polled);
+            if (polled->succeeded() && m_operationKind == RemoteOperationKind::Move) {
+                m_progress.state = OperationState::Finalizing;
+                m_progress.cancellationSupported = false;
+                m_copyActive = false;
+                m_phase = Phase::PromoteItem;
+            } else {
+                if (m_operationKind == RemoteOperationKind::Move) {
+                    beginCleanup(CleanupContinuation::FinishFailure, *polled);
+                } else {
+                    finishItem(*polled);
+                }
+            }
+        }
+        return;
+    }
+    if (m_phase == Phase::PromoteItem) {
+        const RemoteItemResult& item = m_result.items.last();
+        const RemoteBackendResult promoted = m_backend.rename(
+            RemotePath::join(m_fallbackDestination, QStringLiteral("item")), item.destination);
+        if (!promoted.succeeded()) {
+            RemoteBackendResult contextual = promoted;
+            contextual.detail =
+                QStringLiteral("The item was copied to a temporary destination, but could "
+                               "not be promoted. The source was preserved. %1")
+                    .arg(describeError(promoted));
+            beginCleanup(CleanupContinuation::FinishFailure, contextual);
+        } else {
+            beginCleanup(CleanupContinuation::RemoveSource, {});
+        }
+        return;
+    }
+    if (m_phase == Phase::StartCleanup) {
+        const RemoteBackendResult started =
+            m_backend.startRemove(m_fallbackDestination, true, true);
+        if (!started.succeeded()) {
+            finishCleanup(started);
+        } else {
+            m_copyActive = true;
+            m_phase = Phase::PollCleanup;
+        }
+        return;
+    }
+    if (m_phase == Phase::PollCleanup) {
+        const std::optional<RemoteBackendResult> polled = m_backend.pollRemove();
+        if (polled.has_value()) {
+            m_copyActive = false;
+            finishCleanup(*polled);
+        }
+        return;
+    }
+    if (m_phase == Phase::StartRemove) {
+        const RemoteItemResult& item = m_result.items.last();
+        const RemoteSelection& selection = m_sources.at(m_sourceIndex);
+        const RemoteBackendResult started =
+            m_backend.startRemove(item.source, selection.directory, selection.directory);
+        if (!started.succeeded()) {
+            finishRemoval(started);
+            return;
+        }
+        m_copyActive = true;
+        m_phase = Phase::PollRemove;
+        return;
+    }
+    if (m_phase == Phase::PollRemove) {
+        const std::optional<RemoteBackendResult> polled = m_backend.pollRemove();
+        if (polled.has_value()) {
+            finishRemoval(*polled);
         }
         return;
     }
     if (m_phase == Phase::RequestCancellation) {
-        const std::optional<RemoteBackendResult> requested =
-            m_backend.requestCopyCancellation();
+        const std::optional<RemoteBackendResult> requested = m_backend.requestCopyCancellation();
         if (requested.has_value()) {
             if (requested->succeeded()) {
                 m_phase = Phase::PollCancellation;
@@ -165,8 +380,7 @@ void ServerSideCopyJob::step()
         return;
     }
     if (m_phase == Phase::PollCancellation) {
-        const std::optional<RemoteBackendResult> cancellation =
-            m_backend.pollCopyCancellation();
+        const std::optional<RemoteBackendResult> cancellation = m_backend.pollCopyCancellation();
         if (cancellation.has_value()) {
             finishCancellation(*cancellation);
         }
@@ -178,8 +392,7 @@ void ServerSideCopyJob::appendCancelledItems()
     if (m_result.items.size() == m_sourceIndex && m_sourceIndex < m_sources.size()) {
         const QString source = RemotePath::normalize(m_sources.at(m_sourceIndex).path);
         m_result.items.push_back(
-            {source,
-             RemotePath::join(m_destinationDirectory, RemotePath::fileName(source)), false,
+            {source, RemotePath::join(m_destinationDirectory, RemotePath::fileName(source)), false,
              QStringLiteral("Remote copy cancelled.")});
     } else if (!m_result.items.isEmpty() && !m_result.items.last().success &&
                m_result.items.last().error.isEmpty()) {
@@ -188,24 +401,32 @@ void ServerSideCopyJob::appendCancelledItems()
     for (qsizetype index = m_sourceIndex + 1; index < m_sources.size(); ++index) {
         const QString source = RemotePath::normalize(m_sources.at(index).path);
         m_result.items.push_back(
-            {source,
-             RemotePath::join(m_destinationDirectory, RemotePath::fileName(source)), false,
+            {source, RemotePath::join(m_destinationDirectory, RemotePath::fileName(source)), false,
              QStringLiteral("Remote copy cancelled.")});
     }
 }
 
 bool ServerSideCopyJob::requestCancel()
 {
-    if (isFinished() || m_progress.state == OperationState::Cancelling) {
+    if (isFinished() || !m_progress.cancellationSupported ||
+        m_progress.state == OperationState::Cancelling) {
         return false;
     }
     if (m_sourceIndex == m_sources.size() && !m_copyActive) {
         finish();
         return false;
     }
+    if (m_phase == Phase::StartCleanup || m_phase == Phase::PollCleanup ||
+        m_phase == Phase::StartRemove || m_phase == Phase::PollRemove) {
+        return false;
+    }
     m_progress.state = OperationState::Cancelling;
     if (m_copyActive) {
         m_phase = Phase::RequestCancellation;
+        return true;
+    }
+    if (m_operationKind == RemoteOperationKind::Move && m_fallbackOwned) {
+        beginCleanup(CleanupContinuation::FinishCancellation, {});
         return true;
     }
     appendCancelledItems();
@@ -219,6 +440,10 @@ bool ServerSideCopyJob::requestCancel()
 void ServerSideCopyJob::finishCancellation(const RemoteBackendResult& result)
 {
     m_copyActive = false;
+    if (m_operationKind == RemoteOperationKind::Move && m_fallbackOwned) {
+        beginCleanup(CleanupContinuation::FinishCancellation, result);
+        return;
+    }
     appendCancelledItems();
     m_progress.currentItem.clear();
     if (result.succeeded()) {

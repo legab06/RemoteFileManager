@@ -2,6 +2,37 @@
 
 Date : 12 août 2026
 
+## Correctifs v0.8.1
+
+La release v0.8.1 complète le pipeline de stockage sans modifier ses frontières :
+
+- les montages Btrfs dont `mountinfo` fournit un `major:minor` virtuel `0:*` remontent
+  désormais de leur source bloc `/dev/...` vers `/sys/class/block`, puis parcourent
+  l'ascendance `/sys/dev/block` existante ; un transport USB porté par le disque parent
+  reste donc classé `External` avant et après montage ;
+- `overlay` et `binfmt_misc` rejoignent le filtre explicite des pseudo-filesystems,
+  après résolution des overmounts et avec l'exception maintenue pour la racine `/` ;
+- un déplacement distant conserve le rename SFTP rapide. Si son échec générique est
+  confirmé comme une frontière de filesystem par `statvfs` sur les deux répertoires
+  parents et si la source n'est pas un point de montage, le worker coopératif réserve
+  atomiquement un répertoire temporaire, copie côté serveur avec préservation des
+  métadonnées, promeut l'élément par rename SFTP et ne supprime la source qu'après le
+  nettoyage du temporaire. Erreurs, annulations et échecs de promotion déclenchent eux
+  aussi ce nettoyage ; s'il échoue, le diagnostic conserve l'erreur initiale et le chemin
+  temporaire. Une preuve ambiguë ou un changement de point de montage refuse toute
+  suppression récursive. Cette dernière vérification couvre la racine et tous les mountpoints
+  descendants, bind mounts compris, avant tout `rm`; `--one-file-system` complète sans remplacer
+  ce refus préalable. Chaque enregistrement `mountinfo` est validé jusqu'au séparateur `-` et aux
+  trois champs qui le suivent ; une ligne tronquée, un device ou un chemin invalide bloque tout le
+  nettoyage. Le code de retour du `cp -a` de staging est transmis explicitement avant EOF afin
+  qu'une notification SSH `exit-status` tardive ne transforme pas une copie courte réussie —
+  notamment celle d'un lien symbolique — en faux échec.
+
+Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend. Ils couvrent
+notamment fichiers, dossiers et liens symboliques, montages sources ou descendants, bind mounts,
+faux préfixes de chemins, collision tardive du temporaire, erreurs de copie/promotion/nettoyage et
+annulation ; ils ne nécessitent ni disque Btrfs/USB ni serveur SSH réel.
+
 ## Socle des opérations
 
 Le Sprint introduit le socle métier du montage et du démontage des volumes locaux et
@@ -371,6 +402,10 @@ Les limitations volontaires de cette étape sont :
 
 - le choix ou la création d'un point de montage personnalisé n'est pas pris en charge ;
 - les opérations de volumes distants ciblent uniquement des serveurs Linux ;
+- le fallback de déplacement inter-filesystems dépend de `cp -a` et de `mountinfo` sur le
+  serveur Linux ; la préservation des propriétaires, ACL, attributs étendus et capabilities
+  reste limitée par le filesystem et les droits du compte SSH, et les liens physiques entre
+  plusieurs éléments sélectionnés indépendamment ne peuvent pas être reconstruits ;
 - un `lsblk` trop ancien ne comprenant pas `MOUNTPOINTS` retombe sur les seuls montages
   observés plutôt que d'essayer une commande moins déterministe ;
 - le probe automatique léger reste fondé sur `mountinfo` : l'apparition d'un device

@@ -15,6 +15,7 @@ enum class RemoteBackendError {
     PermissionDenied,
     Unsupported,
     InvalidPath,
+    CrossDevice,
     Failure,
 };
 

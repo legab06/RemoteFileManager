@@ -377,19 +377,22 @@ void LocalFileSystemTest::parsesLinuxMountInformation()
 
 void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystems()
 {
-    const QByteArray fixture = "24 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
-                               "25 24 0:44 / /media/ntfs rw - fuseblk ntfs-3g rw\n"
-                               "26 24 0:45 / /home/alice/cloud rw - fuse.rclone rclone rw\n"
-                               "27 24 0:46 / /mnt/nfs rw - nfs server:/export rw\n"
-                               "28 24 0:47 / /mnt/cifs rw - cifs //server/share rw\n"
-                               "29 24 0:48 / /proc rw - proc proc rw\n"
-                               "30 24 0:49 / /sys rw - sysfs sysfs rw\n"
-                               "31 24 0:50 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
-                               "32 24 0:51 / /run/user/1000/doc rw - fuse.portal portal rw\n"
-                               "33 24 0:52 / /run rw - tmpfs tmpfs rw\n"
-                               "34 24 0:53 / /dev/shm rw - tmpfs shm rw\n"
-                               "35 24 8:2 / /srv rw - xfs /dev/sdb1 rw\n"
-                               "36 24 8:3 /@ /work rw - btrfs /dev/sdc1 rw\n";
+    const QByteArray fixture =
+        "24 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+        "25 24 0:44 / /media/ntfs rw - fuseblk ntfs-3g rw\n"
+        "26 24 0:45 / /home/alice/cloud rw - fuse.rclone rclone rw\n"
+        "27 24 0:46 / /mnt/nfs rw - nfs server:/export rw\n"
+        "28 24 0:47 / /mnt/cifs rw - cifs //server/share rw\n"
+        "29 24 0:48 / /proc rw - proc proc rw\n"
+        "30 24 0:49 / /sys rw - sysfs sysfs rw\n"
+        "31 24 0:50 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n"
+        "32 24 0:51 / /run/user/1000/doc rw - fuse.portal portal rw\n"
+        "33 24 0:52 / /run rw - tmpfs tmpfs rw\n"
+        "34 24 0:53 / /dev/shm rw - tmpfs shm rw\n"
+        "37 24 0:54 / /containers rw - overlay overlay rw\n"
+        "38 24 0:55 / /proc/sys/fs/binfmt_misc rw - binfmt_misc binfmt_misc rw\n"
+        "35 24 8:2 / /srv rw - xfs /dev/sdb1 rw\n"
+        "36 24 8:3 /@ /work rw - btrfs /dev/sdc1 rw\n";
 
     const QList<rfm::core::LinuxMountInfo> mounts = rfm::core::parseLinuxMountInfo(fixture);
     QCOMPARE(mounts.size(), 7);
@@ -410,6 +413,8 @@ void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystem
         return mount.fileSystemType == QByteArrayLiteral("proc") ||
                mount.fileSystemType == QByteArrayLiteral("sysfs") ||
                mount.fileSystemType == QByteArrayLiteral("cgroup2") ||
+               mount.fileSystemType == QByteArrayLiteral("overlay") ||
+               mount.fileSystemType == QByteArrayLiteral("binfmt_misc") ||
                mount.fileSystemType == QByteArrayLiteral("tmpfs") ||
                mount.fileSystemType == QByteArrayLiteral("fuse.portal");
     }));
@@ -434,6 +439,12 @@ void LocalFileSystemTest::preservesVisiblePseudoFileSystemsAtRoot()
         rfm::core::parseLinuxMountInfo("40 1 8:1 / / rw - ext4 /dev/sda1 rw\n");
     QCOMPARE(ext4Mounts.size(), 1);
     QCOMPARE(ext4Mounts.constFirst().fileSystemType, QByteArrayLiteral("ext4"));
+
+    const QList<rfm::core::LinuxMountInfo> overlayRoot =
+        rfm::core::parseLinuxMountInfo("41 1 0:48 / / rw - overlay overlay rw\n");
+    QCOMPARE(overlayRoot.size(), 1);
+    QCOMPARE(overlayRoot.constFirst().rootPath, QStringLiteral("/"));
+    QCOMPARE(overlayRoot.constFirst().fileSystemType, QByteArrayLiteral("overlay"));
 }
 
 void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()

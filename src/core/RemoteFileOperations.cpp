@@ -221,6 +221,8 @@ QString RemoteFileOperations::describeError(const RemoteBackendResult& result)
         return translated("This operation is not supported by the server.");
     case RemoteBackendError::InvalidPath:
         return translated("Invalid or protected remote path.");
+    case RemoteBackendError::CrossDevice:
+        return translated("The source and destination are on different filesystems.");
     case RemoteBackendError::Failure:
         return translated("The remote operation failed.");
     case RemoteBackendError::None:
