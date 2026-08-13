@@ -1,6 +1,7 @@
 #include "remotefilemanager/ssh/SshSession.hpp"
 
 #include "SftpTransferBackend.hpp"
+#include "remotefilemanager/core/RemoteMoveSafety.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/core/ServerSideCopyJob.hpp"
 #include "remotefilemanager/core/Storage.hpp"
@@ -92,6 +93,50 @@ std::optional<quint64> remoteFileSystemId(sftp_session sftp, const QString& path
     const quint64 id = attributes->f_fsid;
     sftp_statvfs_free(attributes);
     return id == 0 ? std::nullopt : std::optional<quint64>{id};
+}
+
+std::optional<QByteArray> remoteMountInfo(sftp_session sftp)
+{
+    constexpr qsizetype maximumBytes = 1024 * 1024;
+    const QByteArray path = QByteArrayLiteral("/proc/self/mountinfo");
+    sftp_file file = sftp_open(sftp, path.constData(), O_RDONLY, 0);
+    if (file == nullptr) {
+        return std::nullopt;
+    }
+    QByteArray contents;
+    char buffer[4096];
+    while (contents.size() <= maximumBytes) {
+        const ssize_t count = sftp_read(file, buffer, sizeof(buffer));
+        if (count < 0) {
+            sftp_close(file);
+            return std::nullopt;
+        }
+        if (count == 0) {
+            sftp_close(file);
+            return contents;
+        }
+        contents.append(buffer, static_cast<qsizetype>(count));
+    }
+    sftp_close(file);
+    return std::nullopt;
+}
+
+std::optional<QString> canonicalRemoteEntryPath(sftp_session sftp, const QString& path)
+{
+    const QString container = rfm::core::remoteMoveFileSystemContainer(path);
+    const QString name = rfm::core::RemotePath::fileName(path);
+    if (container.isEmpty() || name.isEmpty()) {
+        return std::nullopt;
+    }
+    const QByteArray encodedContainer = container.toUtf8();
+    char* const canonical = sftp_canonicalize_path(sftp, encodedContainer.constData());
+    if (canonical == nullptr) {
+        return std::nullopt;
+    }
+    const QString canonicalContainer = QString::fromUtf8(canonical);
+    ssh_string_free_char(canonical);
+    const QString entry = rfm::core::RemotePath::join(canonicalContainer, name);
+    return entry.isEmpty() ? std::nullopt : std::optional<QString>{entry};
 }
 
 rfm::ssh::RemoteStorageError storageError(ssh_session session, sftp_session sftp)
@@ -432,13 +477,21 @@ class SftpBackend final : public rfm::core::RemoteFileBackend
         }
         const int error = sftp_get_error(m_sftp);
         if (error == SSH_FX_FAILURE) {
-            // SFTP v3 reports EXDEV as the generic SSH_FX_FAILURE. Confirm the
-            // filesystem boundary before enabling copy-then-delete fallback.
-            const std::optional<quint64> sourceFileSystem = remoteFileSystemId(m_sftp, source);
-            const std::optional<quint64> destinationFileSystem =
-                remoteFileSystemId(m_sftp, rfm::core::RemotePath::parent(destination));
-            if (sourceFileSystem.has_value() && destinationFileSystem.has_value() &&
-                sourceFileSystem != destinationFileSystem) {
+            // SFTP v3 reports both EXDEV and EBUSY as SSH_FX_FAILURE. Compare
+            // the directories containing both entries and reject mount points
+            // or incomplete evidence before enabling copy-then-delete.
+            const QString sourceContainer = rfm::core::remoteMoveFileSystemContainer(source);
+            const QString destinationContainer =
+                rfm::core::remoteMoveFileSystemContainer(destination);
+            const std::optional<QByteArray> mountInfo = remoteMountInfo(m_sftp);
+            const std::optional<QString> canonicalSource = canonicalRemoteEntryPath(m_sftp, source);
+            const rfm::core::RemoteMoveFallbackEvidence evidence{
+                remoteFileSystemId(m_sftp, sourceContainer),
+                remoteFileSystemId(m_sftp, destinationContainer),
+                mountInfo.has_value() && canonicalSource.has_value()
+                    ? rfm::core::linuxMountPointState(*mountInfo, *canonicalSource)
+                    : rfm::core::RemoteMountPointState::Unknown};
+            if (rfm::core::allowsRemoteMoveFallback(evidence)) {
                 return {rfm::core::RemoteBackendError::CrossDevice, {}};
             }
         }
@@ -477,7 +530,7 @@ class SftpBackend final : public rfm::core::RemoteFileBackend
 class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
 {
   public:
-    enum class CommandKind { Copy, Remove };
+    enum class CommandKind { Copy, MoveStagingCopy, Remove };
 
     SshServerSideCopyBackend(ssh_session session, sftp_session sftp)
         : m_session(session), m_sftp(sftp)
@@ -514,9 +567,49 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         return startCommand(command, CommandKind::Copy);
     }
 
-    rfm::core::RemoteBackendResult startRemove(const QString& path, bool recursive) override
+    rfm::core::RemoteBackendResult reserveMoveStaging(const QString& path) override
     {
-        const QString command = rfm::ssh::RemoteCopyCommand::buildRemove(path, recursive);
+        const QByteArray encoded = path.toUtf8();
+        if (sftp_mkdir(m_sftp, encoded.constData(), 0700) == SSH_OK) {
+            return {};
+        }
+        const int error = sftp_get_error(m_sftp);
+        if (error == SSH_FX_FILE_ALREADY_EXISTS) {
+            return {rfm::core::RemoteBackendError::AlreadyExists, {}};
+        }
+        sftp_attributes existing = sftp_lstat(m_sftp, encoded.constData());
+        if (existing != nullptr) {
+            sftp_attributes_free(existing);
+            return {rfm::core::RemoteBackendError::AlreadyExists, {}};
+        }
+        return {backendError(error), {}};
+    }
+
+    rfm::core::RemoteBackendResult startMoveStagingCopy(const QString& source,
+                                                        const QString& destination) override
+    {
+        const QString command = rfm::ssh::RemoteCopyCommand::buildMoveStaging(source, destination);
+        if (command.isEmpty()) {
+            return {rfm::core::RemoteBackendError::InvalidPath, {}};
+        }
+        return startCommand(command, CommandKind::MoveStagingCopy);
+    }
+
+    rfm::core::RemoteBackendResult startRemove(const QString& path, bool recursive,
+                                               bool protectMountPoint) override
+    {
+        const std::optional<QString> mountPointIdentity =
+            protectMountPoint ? canonicalRemoteEntryPath(m_sftp, path)
+                              : std::optional<QString>{QString{}};
+        if (protectMountPoint && !mountPointIdentity.has_value()) {
+            return {rfm::core::RemoteBackendError::Failure,
+                    QCoreApplication::translate(
+                        "SshServerSideCopyBackend",
+                        "Unable to verify that the remote removal target is not a mount point.")};
+        }
+        const QString removalPath = protectMountPoint ? *mountPointIdentity : path;
+        const QString command = rfm::ssh::RemoteCopyCommand::buildRemove(
+            removalPath, recursive, protectMountPoint, mountPointIdentity.value_or(QString{}));
         if (command.isEmpty()) {
             return {rfm::core::RemoteBackendError::InvalidPath, {}};
         }
@@ -534,6 +627,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
                                                 "Unable to open an SSH channel.")};
         }
         m_errorOutput.clear();
+        m_standardOutput.clear();
         m_exitStatePolls = 0;
         m_exitStateReceived = false;
         m_exitCode = UINT32_MAX;
@@ -591,7 +685,10 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
                                             "Unable to read the remote copy result.")};
         }
         const int outputBytes = ssh_channel_read_nonblocking(m_channel, buffer, sizeof(buffer), 0);
-        if (outputBytes == SSH_ERROR) {
+        if (outputBytes > 0 && m_standardOutput.size() < 2048) {
+            const int remaining = 2048 - static_cast<int>(m_standardOutput.size());
+            m_standardOutput.append(buffer, std::min(outputBytes, remaining));
+        } else if (outputBytes == SSH_ERROR) {
             closeChannel();
             return rfm::core::RemoteBackendResult{
                 rfm::core::RemoteBackendError::Failure,
@@ -602,20 +699,44 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
             return std::nullopt;
         }
 
-        if (!m_exitStateReceived && ++m_exitStatePolls < 100) {
+        const std::optional<quint32> moveStagingStatus =
+            m_commandKind == CommandKind::MoveStagingCopy
+                ? rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(m_standardOutput)
+                : std::optional<quint32>{};
+        const bool completionReceived = m_commandKind == CommandKind::MoveStagingCopy
+                                            ? moveStagingStatus.has_value()
+                                            : m_exitStateReceived;
+        if (!completionReceived && ++m_exitStatePolls < 100) {
             return std::nullopt;
         }
         const QString detail = QString::fromUtf8(m_errorOutput).trimmed();
         const bool exitStateReceived = m_exitStateReceived;
-        const uint32_t exitCode = m_exitCode;
+        const CommandKind commandKind = m_commandKind;
+        const uint32_t exitCode = moveStagingStatus.value_or(m_exitCode);
+        const bool inconsistentStatus =
+            moveStagingStatus.has_value() && exitStateReceived && *moveStagingStatus != m_exitCode;
         closeChannel();
-        if (exitStateReceived && exitCode == 0) {
+        if (inconsistentStatus) {
+            return rfm::core::RemoteBackendResult{
+                rfm::core::RemoteBackendError::Failure,
+                QCoreApplication::translate(
+                    "SshServerSideCopyBackend",
+                    "The remote move copy reported inconsistent completion status.")};
+        }
+        if (commandKind == CommandKind::MoveStagingCopy && !moveStagingStatus.has_value()) {
+            return rfm::core::RemoteBackendResult{
+                rfm::core::RemoteBackendError::Failure,
+                QCoreApplication::translate(
+                    "SshServerSideCopyBackend",
+                    "Unable to verify completion of the remote move copy.")};
+        }
+        if ((commandKind == CommandKind::MoveStagingCopy || exitStateReceived) && exitCode == 0) {
             return rfm::core::RemoteBackendResult{};
         }
         if (exitCode == 126 || exitCode == 127) {
             return rfm::core::RemoteBackendResult{
                 rfm::core::RemoteBackendError::Unsupported,
-                m_commandKind == CommandKind::Copy
+                commandKind == CommandKind::Copy || commandKind == CommandKind::MoveStagingCopy
                     ? QCoreApplication::translate(
                           "SshServerSideCopyBackend",
                           "The 'cp' command is not available on the server.")
@@ -625,12 +746,13 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         }
         return rfm::core::RemoteBackendResult{
             rfm::core::RemoteBackendError::Failure,
-            detail.isEmpty() ? (m_commandKind == CommandKind::Copy
-                                    ? QCoreApplication::translate("SshServerSideCopyBackend",
-                                                                  "Remote copy failed.")
-                                    : QCoreApplication::translate("SshServerSideCopyBackend",
-                                                                  "Remote source removal failed."))
-                             : detail};
+            detail.isEmpty()
+                ? (commandKind == CommandKind::Copy || commandKind == CommandKind::MoveStagingCopy
+                       ? QCoreApplication::translate("SshServerSideCopyBackend",
+                                                     "Remote copy failed.")
+                       : QCoreApplication::translate("SshServerSideCopyBackend",
+                                                     "Remote source removal failed."))
+                : detail};
     }
 
     std::optional<rfm::core::RemoteBackendResult> requestCopyCancellation() override
@@ -734,6 +856,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     sftp_session m_sftp;
     ssh_channel m_channel{nullptr};
     QByteArray m_errorOutput;
+    QByteArray m_standardOutput;
     int m_exitStatePolls{0};
     bool m_exitStateReceived{false};
     uint32_t m_exitCode{UINT32_MAX};
