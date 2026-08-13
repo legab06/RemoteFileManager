@@ -86,11 +86,14 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
 - Après la copie, le worker promeut l'enfant temporaire par rename SFTP, nettoie le répertoire
   temporaire, puis supprime la source. Tout nettoyage est coopératif et non bloquant, y compris
   après erreur, annulation ou échec de promotion. La suppression récursive revérifie juste avant
-  `rm` que sa cible n'est pas devenue un point de montage. Un nettoyage impossible conserve
-  l'erreur initiale, indique le chemin temporaire restant et empêche la suppression de la source.
-  Le fallback dépend des outils GNU/Linux usuels et ne peut recréer une métadonnée que si le
-  serveur, le filesystem et les droits du compte SSH l'autorisent ; les liens physiques ne sont
-  préservés qu'à l'intérieur d'un même élément sélectionné.
+  `rm` l'intégralité de `mountinfo`. Un point de montage égal à la cible ou situé sous sa frontière
+  `cible/` refuse l'opération avant la première suppression ; un chemin partageant seulement son
+  préfixe n'est pas confondu avec un descendant. Un `mountinfo` absent ou malformé refuse également
+  l'opération, et `rm --one-file-system` reste une défense supplémentaire après cette validation.
+  Un nettoyage impossible conserve l'erreur initiale, indique le chemin temporaire restant et
+  empêche la suppression de la source. Le fallback dépend des outils GNU/Linux usuels et ne peut
+  recréer une métadonnée que si le serveur, le filesystem et les droits du compte SSH l'autorisent ;
+  les liens physiques ne sont préservés qu'à l'intérieur d'un même élément sélectionné.
 - Le chemin SFTP initial est canonicalisé en chemin absolu. Ainsi, le dossier de connexion n'est pas
   confondu avec `/` et la navigation parent peut atteindre la vraie racine distante.
 - Les chemins de téléchargement locaux sont construits composant par composant. Chaque composant

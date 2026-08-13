@@ -19,9 +19,10 @@ class RemoteCopyCommand final
                                                   const QString& destination);
     [[nodiscard]] static std::optional<quint32>
     parseMoveStagingStatus(const QByteArray& standardOutput);
-    [[nodiscard]] static QString buildRemove(const QString& path, bool recursive,
-                                             bool protectMountPoint = false,
-                                             const QString& mountPointIdentity = {});
+    [[nodiscard]] static QString
+    buildRemove(const QString& path, bool recursive, bool protectMountPoint = false,
+                const QString& mountPointIdentity = {},
+                const QString& mountInfoPath = QStringLiteral("/proc/self/mountinfo"));
 };
 
 } // namespace rfm::ssh

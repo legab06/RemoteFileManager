@@ -69,7 +69,8 @@ std::optional<quint32> RemoteCopyCommand::parseMoveStagingStatus(const QByteArra
 }
 
 QString RemoteCopyCommand::buildRemove(const QString& path, bool recursive, bool protectMountPoint,
-                                       const QString& mountPointIdentity)
+                                       const QString& mountPointIdentity,
+                                       const QString& mountInfoPath)
 {
     const QString quotedPath = quoteArgument(path);
     if (path.isEmpty() || quotedPath.isEmpty()) {
@@ -77,7 +78,9 @@ QString RemoteCopyCommand::buildRemove(const QString& path, bool recursive, bool
     }
     QString guard;
     if (recursive && protectMountPoint) {
-        if (mountPointIdentity.isEmpty()) {
+        const QString quotedMountInfoPath = quoteArgument(mountInfoPath);
+        if (mountPointIdentity.isEmpty() || mountInfoPath.isEmpty() ||
+            quotedMountInfoPath.isEmpty()) {
             return {};
         }
         QString encodedMountPoint = mountPointIdentity;
@@ -86,22 +89,39 @@ QString RemoteCopyCommand::buildRemove(const QString& path, bool recursive, bool
         encodedMountPoint.replace(QChar{'\t'}, QStringLiteral("\\011"));
         encodedMountPoint.replace(QChar{'\n'}, QStringLiteral("\\012"));
         const QString quotedMountPoint = quoteArgument(encodedMountPoint);
-        guard = QStringLiteral("[ -r /proc/self/mountinfo ] || exit 74; "
+        guard = QStringLiteral("[ -r %2 ] || { "
+                               "printf 'Unable to verify the remote removal tree.\\n' >&2; "
+                               "exit 74; }; "
                                "rfm_mountinfo_seen=; "
+                               "rfm_mount_in_tree=; "
                                "while IFS=' ' read -r rfm_mount_id rfm_parent_id _ _ "
                                "rfm_mount_point _; do "
-                               "case \"$rfm_mount_id\" in ''|*[!0-9]*) continue;; esac; "
-                               "case \"$rfm_parent_id\" in ''|*[!0-9]*) continue;; esac; "
-                               "case \"$rfm_mount_point\" in /*) ;; *) continue;; esac; "
+                               "case \"$rfm_mount_id\" in ''|*[!0-9]*) "
+                               "printf 'Invalid remote mount information.\\n' >&2; exit 74;; "
+                               "esac; "
+                               "case \"$rfm_parent_id\" in ''|*[!0-9]*) "
+                               "printf 'Invalid remote mount information.\\n' >&2; exit 74;; "
+                               "esac; "
+                               "case \"$rfm_mount_point\" in /*) ;; *) "
+                               "printf 'Invalid remote mount information.\\n' >&2; exit 74;; "
+                               "esac; "
                                "rfm_mountinfo_seen=1; "
-                               "[ \"$rfm_mount_point\" = %1 ] && { "
-                               "printf 'Refusing to remove a mount point.\\n' >&2; exit 75; }; "
-                               "done < /proc/self/mountinfo; "
-                               "[ \"$rfm_mountinfo_seen\" = 1 ] || exit 74; ")
-                    .arg(quotedMountPoint);
+                               "case \"$rfm_mount_point\" in %1|%1/*) "
+                               "rfm_mount_in_tree=$rfm_mount_point;; esac; "
+                               "done < %2; "
+                               "[ \"$rfm_mountinfo_seen\" = 1 ] || { "
+                               "printf 'Unable to verify the remote removal tree.\\n' >&2; "
+                               "exit 74; }; "
+                               "[ -z \"$rfm_mount_in_tree\" ] || { "
+                               "printf 'Refusing recursive removal: a mount point exists in the "
+                               "removal tree (%s).\\n' \"$rfm_mount_in_tree\" >&2; exit 75; }; ")
+                    .arg(quotedMountPoint, quotedMountInfoPath);
     }
-    return guard + QStringLiteral("rm %1-f -- %2")
-                       .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedPath);
+    return guard + QStringLiteral("rm %1%2-f -- %3")
+                       .arg(recursive ? QStringLiteral("-R ") : QString{},
+                            recursive && protectMountPoint ? QStringLiteral("--one-file-system ")
+                                                           : QString{},
+                            quotedPath);
 }
 
 } // namespace rfm::ssh

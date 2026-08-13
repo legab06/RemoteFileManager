@@ -20,14 +20,16 @@ La release v0.8.1 complète le pipeline de stockage sans modifier ses frontière
   nettoyage du temporaire. Erreurs, annulations et échecs de promotion déclenchent eux
   aussi ce nettoyage ; s'il échoue, le diagnostic conserve l'erreur initiale et le chemin
   temporaire. Une preuve ambiguë ou un changement de point de montage refuse toute
-  suppression récursive. Le code de retour du `cp -a` de staging est transmis explicitement
-  avant EOF afin qu'une notification SSH `exit-status` tardive ne transforme pas une copie
-  courte réussie — notamment celle d'un lien symbolique — en faux échec.
+  suppression récursive. Cette dernière vérification couvre la racine et tous les mountpoints
+  descendants, bind mounts compris, avant tout `rm`; `--one-file-system` complète sans remplacer
+  ce refus préalable. Le code de retour du `cp -a` de staging est transmis explicitement avant
+  EOF afin qu'une notification SSH `exit-status` tardive ne transforme pas une copie courte
+  réussie — notamment celle d'un lien symbolique — en faux échec.
 
 Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend. Ils couvrent
-notamment fichiers, dossiers et liens symboliques, montages sources, collision tardive du
-temporaire, erreurs de copie/promotion/nettoyage et annulation ; ils ne nécessitent ni disque
-Btrfs/USB ni serveur SSH réel.
+notamment fichiers, dossiers et liens symboliques, montages sources ou descendants, bind mounts,
+faux préfixes de chemins, collision tardive du temporaire, erreurs de copie/promotion/nettoyage et
+annulation ; ils ne nécessitent ni disque Btrfs/USB ni serveur SSH réel.
 
 ## Socle des opérations
 

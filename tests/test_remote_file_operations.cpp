@@ -17,6 +17,21 @@
 #include <optional>
 #include <utility>
 
+namespace
+{
+
+QByteArray encodeMountInfoPath(const QString& path)
+{
+    QByteArray encoded = path.toUtf8();
+    encoded.replace("\\", "\\134");
+    encoded.replace(" ", "\\040");
+    encoded.replace("\t", "\\011");
+    encoded.replace("\n", "\\012");
+    return encoded;
+}
+
+} // namespace
+
 class FakeRemoteBackend final : public rfm::core::RemoteFileBackend {
 public:
     rfm::core::RemoteProbeResult probe(const QString& path) override
@@ -389,6 +404,8 @@ class RemoteFileOperationsTest final : public QObject
   private slots:
     void validatesAndNormalizesRemotePaths();
     void quotesCopyCommandWithoutInjection();
+    void recursiveRemoveRefusesMountPointTrees_data();
+    void recursiveRemoveRefusesMountPointTrees();
     void qualifiesCrossDeviceFallbackWithoutFollowingSourceEntries();
     void createsDirectoryAndReportsCollisionOrPermission();
     void renamesWithoutOverwriting();
@@ -411,6 +428,7 @@ class RemoteFileOperationsTest final : public QObject
     void cancellationCleansMoveStagingAndPreservesSource();
     void keepsSourceWhenFallbackPromotionFails();
     void reportsSourceCleanupFailureAfterCopy();
+    void preservesPromotedSourceWhenMountTreeGuardFails();
     void doesNotFallbackForAnUnqualifiedRenameFailure();
     void removesFileAndRecursiveTreeWithGuards();
     void emitsWorkerOperationErrors();
@@ -478,10 +496,103 @@ void RemoteFileOperationsTest::quotesCopyCommandWithoutInjection()
         QStringLiteral("/mnt/My Disk's"), true, true, QStringLiteral("/mnt/My Disk's"));
     QVERIFY(guardedRemove.contains(QStringLiteral("/proc/self/mountinfo")));
     QVERIFY(guardedRemove.contains(QStringLiteral("rfm_mountinfo_seen")));
+    QVERIFY(guardedRemove.contains(QStringLiteral("rfm_mount_in_tree")));
     QVERIFY(guardedRemove.contains(QStringLiteral("*[!0-9]*")));
     QVERIFY(guardedRemove.contains(QStringLiteral("/mnt/My\\040Disk")));
     QVERIFY(guardedRemove.contains(QStringLiteral("'\\''s")));
-    QVERIFY(guardedRemove.endsWith(QStringLiteral("rm -R -f -- '/mnt/My Disk'\\''s'")));
+    QVERIFY(guardedRemove.contains(QStringLiteral("|'/mnt/My\\040Disk'\\''s'/*")));
+    QVERIFY(guardedRemove.endsWith(
+        QStringLiteral("rm -R --one-file-system -f -- '/mnt/My Disk'\\''s'")));
+}
+
+void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees_data()
+{
+    QTest::addColumn<QString>("relation");
+    QTest::addColumn<bool>("specialPath");
+    QTest::addColumn<int>("expectedExitCode");
+
+    QTest::newRow("source-is-mountpoint") << QStringLiteral("root") << false << 75;
+    QTest::newRow("nested-mountpoint") << QStringLiteral("nested") << false << 75;
+    QTest::newRow("nested-bind-mount") << QStringLiteral("bind") << false << 75;
+    QTest::newRow("false-prefix") << QStringLiteral("false-prefix") << false << 0;
+    QTest::newRow("special-nested-mountpoint") << QStringLiteral("nested") << true << 75;
+    QTest::newRow("malformed-mountinfo-fails-closed") << QStringLiteral("malformed") << false << 74;
+}
+
+void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees()
+{
+    QFETCH(QString, relation);
+    QFETCH(bool, specialPath);
+    QFETCH(int, expectedExitCode);
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QString parent = temporaryDirectory.path() + QStringLiteral("/srv");
+    const QString source =
+        parent + (specialPath ? QStringLiteral("/data dir's [tree]") : QStringLiteral("/data"));
+    QVERIFY(QDir().mkpath(source));
+    QFile normalFile(source + QStringLiteral("/file.txt"));
+    QVERIFY(normalFile.open(QIODevice::WriteOnly));
+    QCOMPARE(normalFile.write("SOURCE\n"), qint64{7});
+    normalFile.close();
+
+    QString mountPoint;
+    if (relation == QStringLiteral("root")) {
+        mountPoint = source;
+    } else if (relation == QStringLiteral("false-prefix")) {
+        mountPoint = parent + QStringLiteral("/database");
+    } else {
+        mountPoint =
+            source + (specialPath ? QStringLiteral("/nested mount's [bind]")
+                      : relation == QStringLiteral("bind") ? QStringLiteral("/nested-bind")
+                                                           : QStringLiteral("/nested-mount"));
+    }
+    QVERIFY(QDir().mkpath(mountPoint));
+    QFile importantFile(mountPoint + QStringLiteral("/IMPORTANT.txt"));
+    QVERIFY(importantFile.open(QIODevice::WriteOnly));
+    QCOMPARE(importantFile.write("DO NOT DELETE\n"), qint64{14});
+    importantFile.close();
+
+    const QString mountInfoPath = temporaryDirectory.path() + QStringLiteral("/mount info's");
+    QFile mountInfo(mountInfoPath);
+    QVERIFY(mountInfo.open(QIODevice::WriteOnly));
+    const QByteArray rootMountRecord = QByteArrayLiteral("24 1 8:1 / / rw - ext4 /dev/sda1 rw\n");
+    QCOMPARE(mountInfo.write(rootMountRecord), qint64{rootMountRecord.size()});
+    if (relation == QStringLiteral("malformed")) {
+        QVERIFY(mountInfo.write("invalid mountinfo record\n") > 0);
+    } else {
+        const QByteArray mountRecord = QByteArrayLiteral("25 24 8:2 / ") +
+                                       encodeMountInfoPath(mountPoint) +
+                                       (relation == QStringLiteral("bind")
+                                            ? QByteArrayLiteral(" rw - ext4 /dev/sda1 rw,bind\n")
+                                            : QByteArrayLiteral(" rw - ext4 /dev/sdb1 rw\n"));
+        QCOMPARE(mountInfo.write(mountRecord), qint64{mountRecord.size()});
+    }
+    mountInfo.close();
+
+    const QString command =
+        rfm::ssh::RemoteCopyCommand::buildRemove(source, true, true, source, mountInfoPath);
+    QVERIFY(!command.isEmpty());
+    QProcess process;
+    process.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), command});
+    QVERIFY(process.waitForStarted());
+    QVERIFY(process.waitForFinished());
+    QCOMPARE(process.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(process.exitCode(), expectedExitCode);
+
+    if (expectedExitCode == 0) {
+        QVERIFY(!QFileInfo(source).exists());
+        QVERIFY(QFileInfo(mountPoint + QStringLiteral("/IMPORTANT.txt")).exists());
+    } else {
+        QVERIFY(QFileInfo(source + QStringLiteral("/file.txt")).exists());
+        QVERIFY(QFileInfo(mountPoint + QStringLiteral("/IMPORTANT.txt")).exists());
+        const QByteArray error = process.readAllStandardError();
+        if (expectedExitCode == 75) {
+            QVERIFY(error.contains("mount point exists in the removal tree"));
+        } else {
+            QVERIFY(error.contains("Invalid remote mount information"));
+        }
+    }
 }
 
 void RemoteFileOperationsTest::qualifiesCrossDeviceFallbackWithoutFollowingSourceEntries()
@@ -966,6 +1077,31 @@ void RemoteFileOperationsTest::reportsSourceCleanupFailureAfterCopy()
     QVERIFY(job.result().items.constFirst().error.contains(QStringLiteral("was copied")));
     QVERIFY(job.result().items.constFirst().error.contains(QStringLiteral("could not be removed")));
     QCOMPARE(backend.removed.size(), 2);
+    QVERIFY(!backend.sourceRemoved);
+    QVERIFY(!backend.stagingExists);
+}
+
+void RemoteFileOperationsTest::preservesPromotedSourceWhenMountTreeGuardFails()
+{
+    FakeCopyBackend backend;
+    backend.renameResult = {rfm::core::RemoteBackendError::CrossDevice, {}};
+    backend.completeAfterPolls = 1;
+    backend.removeCompletionResult = {
+        rfm::core::RemoteBackendError::Failure,
+        QStringLiteral("Refusing recursive removal: a mount point exists in the removal tree")};
+    rfm::core::ServerSideCopyJob job(backend, 89, {{QStringLiteral("/source/directory"), true}},
+                                     QStringLiteral("/destination"),
+                                     rfm::core::RemoteOperationKind::Move);
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QCOMPARE(backend.renamed.size(), 2);
+    QVERIFY(backend.removed.constLast().endsWith(QStringLiteral(":recursive:protected")));
+    QVERIFY(job.result().items.constFirst().error.contains(
+        QStringLiteral("mount point exists in the removal tree")));
     QVERIFY(!backend.sourceRemoved);
     QVERIFY(!backend.stagingExists);
 }
