@@ -498,8 +498,10 @@ void RemoteFileOperationsTest::quotesCopyCommandWithoutInjection()
     QVERIFY(guardedRemove.contains(QStringLiteral("rfm_mountinfo_seen")));
     QVERIFY(guardedRemove.contains(QStringLiteral("rfm_mount_in_tree")));
     QVERIFY(guardedRemove.contains(QStringLiteral("rfm_device")));
-    QVERIFY(guardedRemove.contains(QStringLiteral("rfm_separator_seen")));
-    QVERIFY(guardedRemove.contains(QStringLiteral("[ \"$#\" -eq 3 ]")));
+    QVERIFY(guardedRemove.contains(QStringLiteral("rfm_take_mount_field")));
+    QVERIFY(guardedRemove.contains(QStringLiteral("rfm_valid_optional_field")));
+    QVERIFY(guardedRemove.contains(QStringLiteral("[ -z \"$rfm_mount_record\" ]")));
+    QVERIFY(!guardedRemove.contains(QStringLiteral("set -- $rfm_mount_record")));
     QVERIFY(guardedRemove.contains(QStringLiteral("*[!0-9]*")));
     QVERIFY(guardedRemove.contains(QStringLiteral("/mnt/My\\040Disk")));
     QVERIFY(guardedRemove.contains(QStringLiteral("'\\''s")));
@@ -514,36 +516,53 @@ void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees_data()
     QTest::addColumn<bool>("specialPath");
     QTest::addColumn<int>("expectedExitCode");
     QTest::addColumn<QByteArray>("invalidRecord");
+    QTest::addColumn<bool>("terminateRecord");
 
-    QTest::newRow("source-is-mountpoint") << QStringLiteral("root") << false << 75 << QByteArray{};
-    QTest::newRow("nested-mountpoint") << QStringLiteral("nested") << false << 75 << QByteArray{};
-    QTest::newRow("nested-bind-mount") << QStringLiteral("bind") << false << 75 << QByteArray{};
-    QTest::newRow("false-prefix") << QStringLiteral("false-prefix") << false << 0 << QByteArray{};
+    QTest::newRow("source-is-mountpoint")
+        << QStringLiteral("root") << false << 75 << QByteArray{} << true;
+    QTest::newRow("nested-mountpoint")
+        << QStringLiteral("nested") << false << 75 << QByteArray{} << true;
+    QTest::newRow("nested-bind-mount-same-filesystem")
+        << QStringLiteral("bind") << false << 75 << QByteArray{} << true;
+    QTest::newRow("false-prefix") << QStringLiteral("false-prefix") << false << 0 << QByteArray{}
+                                  << true;
     QTest::newRow("special-nested-mountpoint")
-        << QStringLiteral("nested") << true << 75 << QByteArray{};
-    QTest::newRow("review-incomplete-record")
-        << QStringLiteral("invalid") << false << 74 << QByteArrayLiteral("24 1 bogus bogus / rw");
-    QTest::newRow("invalid-mount-id") << QStringLiteral("invalid") << false << 74
-                                      << QByteArrayLiteral("x 1 8:1 / / rw - ext4 /dev/sda1 rw");
-    QTest::newRow("invalid-parent-id") << QStringLiteral("invalid") << false << 74
-                                       << QByteArrayLiteral("24 x 8:1 / / rw - ext4 /dev/sda1 rw");
-    QTest::newRow("missing-separator") << QStringLiteral("invalid") << false << 74
-                                       << QByteArrayLiteral("24 1 8:1 / / rw ext4 /dev/sda1 rw");
+        << QStringLiteral("nested") << true << 75 << QByteArray{} << true;
+    QTest::newRow("escaped-space-descendant")
+        << QStringLiteral("escaped-space") << false << 75 << QByteArray{} << true;
+    QTest::newRow("unterminated-final-record")
+        << QStringLiteral("invalid") << false << 74
+        << QByteArrayLiteral("25 24 8:1 / /outside rw - ext4 /dev/sda1 rw") << false;
+    QTest::newRow("raw-space-in-mountpoint")
+        << QStringLiteral("raw-space") << false << 74 << QByteArrayLiteral("GENERATE") << true;
+    QTest::newRow("raw-tab-in-mountpoint")
+        << QStringLiteral("raw-tab") << false << 74 << QByteArrayLiteral("GENERATE") << true;
+    QTest::newRow("review-incomplete-record") << QStringLiteral("invalid") << false << 74
+                                              << QByteArrayLiteral("24 1 bogus bogus / rw") << true;
+    QTest::newRow("invalid-mount-id")
+        << QStringLiteral("invalid") << false << 74
+        << QByteArrayLiteral("x 1 8:1 / / rw - ext4 /dev/sda1 rw") << true;
+    QTest::newRow("invalid-parent-id")
+        << QStringLiteral("invalid") << false << 74
+        << QByteArrayLiteral("24 x 8:1 / / rw - ext4 /dev/sda1 rw") << true;
+    QTest::newRow("missing-separator")
+        << QStringLiteral("invalid") << false << 74
+        << QByteArrayLiteral("24 1 8:1 / / rw ext4 /dev/sda1 rw") << true;
     QTest::newRow("invalid-major-minor")
         << QStringLiteral("invalid") << false << 74
-        << QByteArrayLiteral("24 1 8:x / / rw - ext4 /dev/sda1 rw");
+        << QByteArrayLiteral("24 1 8:x / / rw - ext4 /dev/sda1 rw") << true;
     QTest::newRow("missing-post-separator-field")
         << QStringLiteral("invalid") << false << 74
-        << QByteArrayLiteral("24 1 8:1 / / rw - ext4 /dev/sda1");
+        << QByteArrayLiteral("24 1 8:1 / / rw - ext4 /dev/sda1") << true;
     QTest::newRow("relative-mountpoint")
         << QStringLiteral("invalid") << false << 74
-        << QByteArrayLiteral("24 1 8:1 / relative rw - ext4 /dev/sda1 rw");
+        << QByteArrayLiteral("24 1 8:1 / relative rw - ext4 /dev/sda1 rw") << true;
     QTest::newRow("relative-root")
         << QStringLiteral("invalid") << false << 74
-        << QByteArrayLiteral("24 1 8:1 relative / rw - ext4 /dev/sda1 rw");
+        << QByteArrayLiteral("24 1 8:1 relative / rw - ext4 /dev/sda1 rw") << true;
     QTest::newRow("invalid-path-escape")
         << QStringLiteral("invalid") << false << 74
-        << QByteArrayLiteral("24 1 8:1 / /bad\\999 rw - ext4 /dev/sda1 rw");
+        << QByteArrayLiteral("24 1 8:1 / /bad\\999 rw - ext4 /dev/sda1 rw") << true;
 }
 
 void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees()
@@ -552,12 +571,17 @@ void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees()
     QFETCH(bool, specialPath);
     QFETCH(int, expectedExitCode);
     QFETCH(QByteArray, invalidRecord);
+    QFETCH(bool, terminateRecord);
 
     QTemporaryDir temporaryDirectory;
     QVERIFY(temporaryDirectory.isValid());
     const QString parent = temporaryDirectory.path() + QStringLiteral("/srv");
+    const bool spacePath = relation == QStringLiteral("escaped-space") ||
+                           relation == QStringLiteral("raw-space");
     const QString source =
-        parent + (specialPath ? QStringLiteral("/data dir's [tree]") : QStringLiteral("/data"));
+        parent + (spacePath ? QStringLiteral("/data dir")
+                            : specialPath ? QStringLiteral("/data dir's [tree]")
+                                          : QStringLiteral("/data"));
     QVERIFY(QDir().mkpath(source));
     QFile normalFile(source + QStringLiteral("/file.txt"));
     QVERIFY(normalFile.open(QIODevice::WriteOnly));
@@ -586,12 +610,25 @@ void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees()
     QVERIFY(mountInfo.open(QIODevice::WriteOnly));
     const QByteArray rootMountRecord = QByteArrayLiteral("24 1 8:1 / / rw - ext4 /dev/sda1 rw\n");
     QCOMPARE(mountInfo.write(rootMountRecord), qint64{rootMountRecord.size()});
+    if (invalidRecord == QByteArrayLiteral("GENERATE")) {
+        const QByteArray rawSuffix = relation == QStringLiteral("raw-tab")
+                                         ? QByteArrayLiteral("\t/nested")
+                                         : QByteArrayLiteral("/nested");
+        const QByteArray rawMountPoint = source.toUtf8() + rawSuffix;
+        invalidRecord = QByteArrayLiteral("25 24 8:1 / ") + rawMountPoint +
+                        QByteArrayLiteral(" rw shared:7 - ext4 /dev/sda1 rw,bind");
+    }
     if (!invalidRecord.isEmpty()) {
-        invalidRecord.push_back('\n');
+        if (terminateRecord) {
+            invalidRecord.push_back('\n');
+        }
         QCOMPARE(mountInfo.write(invalidRecord), qint64{invalidRecord.size()});
     } else {
         const QByteArray mountRecord =
-            QByteArrayLiteral("25 24 8:2 / ") + encodeMountInfoPath(mountPoint) +
+            QByteArrayLiteral("25 24 ") +
+            (relation == QStringLiteral("bind") ? QByteArrayLiteral("8:1")
+                                                : QByteArrayLiteral("8:2")) +
+            QByteArrayLiteral(" / ") + encodeMountInfoPath(mountPoint) +
             (relation == QStringLiteral("bind")
                  ? QByteArrayLiteral(" rw shared:7 master:1 - ext4 /dev/sda1 "
                                      "rw,bind\n")
