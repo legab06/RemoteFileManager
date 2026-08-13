@@ -22,9 +22,11 @@ La release v0.8.1 complète le pipeline de stockage sans modifier ses frontière
   temporaire. Une preuve ambiguë ou un changement de point de montage refuse toute
   suppression récursive. Cette dernière vérification couvre la racine et tous les mountpoints
   descendants, bind mounts compris, avant tout `rm`; `--one-file-system` complète sans remplacer
-  ce refus préalable. Le code de retour du `cp -a` de staging est transmis explicitement avant
-  EOF afin qu'une notification SSH `exit-status` tardive ne transforme pas une copie courte
-  réussie — notamment celle d'un lien symbolique — en faux échec.
+  ce refus préalable. Chaque enregistrement `mountinfo` est validé jusqu'au séparateur `-` et aux
+  trois champs qui le suivent ; une ligne tronquée, un device ou un chemin invalide bloque tout le
+  nettoyage. Le code de retour du `cp -a` de staging est transmis explicitement avant EOF afin
+  qu'une notification SSH `exit-status` tardive ne transforme pas une copie courte réussie —
+  notamment celle d'un lien symbolique — en faux échec.
 
 Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend. Ils couvrent
 notamment fichiers, dossiers et liens symboliques, montages sources ou descendants, bind mounts,
