@@ -82,6 +82,18 @@ bool isFatalSftpError(int sftpError)
     return sftpError == SSH_FX_NO_CONNECTION || sftpError == SSH_FX_CONNECTION_LOST;
 }
 
+std::optional<quint64> remoteFileSystemId(sftp_session sftp, const QString& path)
+{
+    const QByteArray encoded = path.toUtf8();
+    sftp_statvfs_t attributes = sftp_statvfs(sftp, encoded.constData());
+    if (attributes == nullptr) {
+        return std::nullopt;
+    }
+    const quint64 id = attributes->f_fsid;
+    sftp_statvfs_free(attributes);
+    return id == 0 ? std::nullopt : std::optional<quint64>{id};
+}
+
 rfm::ssh::RemoteStorageError storageError(ssh_session session, sftp_session sftp)
 {
     const int error = sftp == nullptr ? SSH_FX_NO_CONNECTION : sftp_get_error(sftp);
@@ -418,7 +430,19 @@ class SftpBackend final : public rfm::core::RemoteFileBackend
             SSH_OK) {
             return {};
         }
-        return {backendError(sftp_get_error(m_sftp)), {}};
+        const int error = sftp_get_error(m_sftp);
+        if (error == SSH_FX_FAILURE) {
+            // SFTP v3 reports EXDEV as the generic SSH_FX_FAILURE. Confirm the
+            // filesystem boundary before enabling copy-then-delete fallback.
+            const std::optional<quint64> sourceFileSystem = remoteFileSystemId(m_sftp, source);
+            const std::optional<quint64> destinationFileSystem =
+                remoteFileSystemId(m_sftp, rfm::core::RemotePath::parent(destination));
+            if (sourceFileSystem.has_value() && destinationFileSystem.has_value() &&
+                sourceFileSystem != destinationFileSystem) {
+                return {rfm::core::RemoteBackendError::CrossDevice, {}};
+            }
+        }
+        return {backendError(error), {}};
     }
 
     rfm::core::RemoteBackendResult removeFile(const QString& path) override
@@ -453,6 +477,8 @@ class SftpBackend final : public rfm::core::RemoteFileBackend
 class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
 {
   public:
+    enum class CommandKind { Copy, Remove };
+
     SshServerSideCopyBackend(ssh_session session, sftp_session sftp)
         : m_session(session), m_sftp(sftp)
     {}
@@ -471,14 +497,36 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         return {{}, {true, directory}};
     }
 
+    rfm::core::RemoteBackendResult rename(const QString& source,
+                                          const QString& destination) override
+    {
+        SftpBackend backend(m_sftp);
+        return backend.rename(source, destination);
+    }
+
     rfm::core::RemoteBackendResult startCopy(const QString& source, const QString& destination,
                                              bool recursive) override
     {
-        closeChannel();
         const QString command = rfm::ssh::RemoteCopyCommand::build(source, destination, recursive);
         if (command.isEmpty()) {
             return {rfm::core::RemoteBackendError::InvalidPath, {}};
         }
+        return startCommand(command, CommandKind::Copy);
+    }
+
+    rfm::core::RemoteBackendResult startRemove(const QString& path, bool recursive) override
+    {
+        const QString command = rfm::ssh::RemoteCopyCommand::buildRemove(path, recursive);
+        if (command.isEmpty()) {
+            return {rfm::core::RemoteBackendError::InvalidPath, {}};
+        }
+        return startCommand(command, CommandKind::Remove);
+    }
+
+    rfm::core::RemoteBackendResult startCommand(const QString& command, CommandKind kind)
+    {
+        closeChannel();
+        m_commandKind = kind;
         m_channel = ssh_channel_new(m_session);
         if (m_channel == nullptr) {
             return {rfm::core::RemoteBackendError::Failure,
@@ -518,7 +566,11 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         return {};
     }
 
-    std::optional<rfm::core::RemoteBackendResult> pollCopy() override
+    std::optional<rfm::core::RemoteBackendResult> pollCopy() override { return pollCommand(); }
+
+    std::optional<rfm::core::RemoteBackendResult> pollRemove() override { return pollCommand(); }
+
+    std::optional<rfm::core::RemoteBackendResult> pollCommand()
     {
         if (m_channel == nullptr) {
             return rfm::core::RemoteBackendResult{
@@ -563,14 +615,22 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         if (exitCode == 126 || exitCode == 127) {
             return rfm::core::RemoteBackendResult{
                 rfm::core::RemoteBackendError::Unsupported,
-                QCoreApplication::translate("SshServerSideCopyBackend",
-                                            "The 'cp' command is not available on the server.")};
+                m_commandKind == CommandKind::Copy
+                    ? QCoreApplication::translate(
+                          "SshServerSideCopyBackend",
+                          "The 'cp' command is not available on the server.")
+                    : QCoreApplication::translate(
+                          "SshServerSideCopyBackend",
+                          "The 'rm' command is not available on the server.")};
         }
         return rfm::core::RemoteBackendResult{
             rfm::core::RemoteBackendError::Failure,
-            detail.isEmpty()
-                ? QCoreApplication::translate("SshServerSideCopyBackend", "Remote copy failed.")
-                : detail};
+            detail.isEmpty() ? (m_commandKind == CommandKind::Copy
+                                    ? QCoreApplication::translate("SshServerSideCopyBackend",
+                                                                  "Remote copy failed.")
+                                    : QCoreApplication::translate("SshServerSideCopyBackend",
+                                                                  "Remote source removal failed."))
+                             : detail};
     }
 
     std::optional<rfm::core::RemoteBackendResult> requestCopyCancellation() override
@@ -679,6 +739,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     uint32_t m_exitCode{UINT32_MAX};
     ssh_channel_callbacks_struct m_channelCallbacks{};
     CancellationPhase m_cancellationPhase{CancellationPhase::NotRequested};
+    CommandKind m_commandKind{CommandKind::Copy};
     QElapsedTimer m_cancellationTimer;
 };
 
@@ -1892,9 +1953,23 @@ void SshSession::moveEntries(quint64 id, QList<rfm::core::RemoteSelection> sourc
         emit failed(tr("Aucune connexion SFTP active."));
         return;
     }
-    SftpBackend backend(m_impl->sftp);
-    rfm::core::RemoteFileOperations operations(backend);
-    emit operationFinished(operations.move(id, sources, destinationDirectory));
+    if (m_impl->activeCopyJob != nullptr) {
+        rfm::core::RemoteOperationResult rejected{id, rfm::core::RemoteOperationKind::Move, {}};
+        for (const rfm::core::RemoteSelection& source : std::as_const(sources)) {
+            rejected.items.push_back({source.path,
+                                      {},
+                                      false,
+                                      tr("Another server-side file operation is already active.")});
+        }
+        emit operationFinished(rejected);
+        return;
+    }
+    m_impl->copyBackend = std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp);
+    m_impl->activeCopyJob = std::make_unique<rfm::core::ServerSideCopyJob>(
+        *m_impl->copyBackend, id, std::move(sources), std::move(destinationDirectory),
+        rfm::core::RemoteOperationKind::Move);
+    emit operationUpdated(m_impl->activeCopyJob->progress());
+    scheduleCopyStep();
 }
 
 void SshSession::copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
@@ -1907,8 +1982,10 @@ void SshSession::copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sourc
     if (m_impl->activeCopyJob != nullptr) {
         rfm::core::RemoteOperationResult rejected{id, rfm::core::RemoteOperationKind::Copy, {}};
         for (const rfm::core::RemoteSelection& source : std::as_const(sources)) {
-            rejected.items.push_back(
-                {source.path, {}, false, tr("Another server-side copy is already active.")});
+            rejected.items.push_back({source.path,
+                                      {},
+                                      false,
+                                      tr("Another server-side file operation is already active.")});
         }
         emit operationFinished(rejected);
         return;

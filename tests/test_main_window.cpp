@@ -305,6 +305,7 @@ class MainWindowTest final : public QObject
     void displaysTransferProgressAndMultipleEntries();
     void displaysTransferStatesInEnglish();
     void displaysRemoteCopyAndMoveOperations();
+    void acceptsRemoteMoveProgressFromWorker();
     void removesOnlyTerminalOperationsFromPanel();
     void exposesPauseResumeAndCancelIntentions();
     void displaysTerminalTransferStatesAndErrors();
@@ -1587,6 +1588,24 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     QVERIFY(table->item(moveRow, 7)->text().contains(QStringLiteral("permission denied")));
     QVERIFY(table->cellWidget(moveRow, 4) == nullptr);
     QVERIFY(table->cellWidget(moveRow, 6) == nullptr);
+}
+
+void MainWindowTest::acceptsRemoteMoveProgressFromWorker()
+{
+    rfm::app::MainWindow window;
+    const auto move = rfm::core::beginRemoteOperation(
+        703, rfm::core::OperationKind::RemoteMove,
+        {{QStringLiteral("/source/file.txt"), false}}, QStringLiteral("/archive"));
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteOperationProgress", Qt::DirectConnection,
+        Q_ARG(rfm::core::OperationProgress, move)));
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+    const int row = rowForId(table, 703);
+    QVERIFY(row >= 0);
+    QCOMPARE(table->item(row, 0)->text(), QStringLiteral("Remote Move"));
+    QCOMPARE(table->item(row, 3)->text(), QStringLiteral("Running"));
 }
 
 void MainWindowTest::removesOnlyTerminalOperationsFromPanel()

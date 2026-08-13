@@ -113,6 +113,9 @@ class RemoteStorageScanner final
         BeginLabels,
         Labels,
         BeginMount,
+        ResolveMountDevice,
+        ReadDeviceNumber,
+        ReadBlockDeviceLink,
         Topology,
         FinishMount,
         Completed,
@@ -145,6 +148,8 @@ class RemoteStorageScanner final
     QList<rfm::core::StorageTopologyNode> m_ancestry;
     QSet<QString> m_visitedTopologyPaths;
     QString m_currentTopologyPath;
+    QString m_currentDeviceIdentity;
+    QString m_currentDeviceNumber;
     qsizetype m_topologyNodeCount{0};
     bool m_mountInfoOpen{false};
     bool m_labelsOpen{false};

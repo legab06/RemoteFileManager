@@ -50,8 +50,10 @@ class FakeRemoteStorageReader final : public rfm::ssh::RemoteStorageReader
     rfm::ssh::RemoteStorageByteResult readFile(const QString& path, qsizetype maximumBytes) override
     {
         ++fileReads;
-        Q_UNUSED(path)
         Q_UNUSED(maximumBytes)
+        if (fileContents.contains(path)) {
+            return {fileContents.value(path), rfm::ssh::RemoteStorageError::None, false};
+        }
         return {{}, rfm::ssh::RemoteStorageError::NotFound, false};
     }
 
@@ -121,6 +123,7 @@ class FakeRemoteStorageReader final : public rfm::ssh::RemoteStorageReader
     bool connectionAlive() const override { return alive; }
 
     QByteArray mountInfo;
+    QHash<QString, QByteArray> fileContents;
     rfm::ssh::RemoteStorageError mountInfoError{rfm::ssh::RemoteStorageError::None};
     qsizetype mountInfoFragmentSize{4096};
     qsizetype mountInfoOffset{0};
@@ -181,6 +184,7 @@ class RemoteStorageScannerTest final : public QObject
     void capsLabelsAndTopologyWorkConservatively();
     void exposesMountInfoFingerprintAfterSuccessfulScan();
     void keepsFuseVolumesNavigableWhenNoBlockDeviceExists();
+    void resolvesVirtualBtrfsDeviceNumberThroughItsBlockSource();
     void filtersPseudoMountsBeforeApplyingTheMountLimit();
     void sharesLsblkParsingAndAddsUnmountedDevices();
     void keepsMountedDiscoveryWhenLsblkIsUnavailable();
@@ -379,6 +383,26 @@ void RemoteStorageScannerTest::keepsFuseVolumesNavigableWhenNoBlockDeviceExists(
     QCOMPARE(volumes.at(1).fileSystemType, QByteArrayLiteral("fuseblk"));
     QCOMPARE(volumes.at(1).kind, rfm::core::StorageKind::Unknown);
     QCOMPARE(volumes.at(2).kind, rfm::core::StorageKind::Network);
+}
+
+void RemoteStorageScannerTest::resolvesVirtualBtrfsDeviceNumberThroughItsBlockSource()
+{
+    auto reader = std::make_unique<FakeRemoteStorageReader>();
+    auto* const observed = reader.get();
+    reader->mountInfo = "24 1 0:84 / /media/backup rw - btrfs /dev/sdc1 rw\n";
+    reader->fileContents.insert(QStringLiteral("/sys/class/block/sdc1/dev"),
+                                QByteArrayLiteral("8:33\n"));
+    rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 130);
+
+    QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::Completed);
+    const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
+    QCOMPARE(volumes.size(), 1);
+    QCOMPARE(volumes.constFirst().device, QStringLiteral("/dev/sdc1"));
+    QCOMPARE(volumes.constFirst().fileSystemType, QByteArrayLiteral("btrfs"));
+    QCOMPARE(volumes.constFirst().kind, rfm::core::StorageKind::External);
+    QCOMPARE(observed->identityReads, 1);
+    QVERIFY(observed->fileReads >= 1);
+    QVERIFY(observed->linkReads >= 1);
 }
 
 void RemoteStorageScannerTest::filtersPseudoMountsBeforeApplyingTheMountLimit()

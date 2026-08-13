@@ -25,4 +25,14 @@ QString RemoteCopyCommand::build(
         .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedSource, quotedDestination);
 }
 
+QString RemoteCopyCommand::buildRemove(const QString& path, bool recursive)
+{
+    const QString quotedPath = quoteArgument(path);
+    if (path.isEmpty() || quotedPath.isEmpty()) {
+        return {};
+    }
+    return QStringLiteral("rm %1-f -- %2")
+        .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedPath);
+}
+
 }  // namespace rfm::ssh

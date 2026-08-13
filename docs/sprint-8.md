@@ -2,6 +2,24 @@
 
 Date : 12 août 2026
 
+## Correctifs v0.8.1
+
+La release v0.8.1 complète le pipeline de stockage sans modifier ses frontières :
+
+- les montages Btrfs dont `mountinfo` fournit un `major:minor` virtuel `0:*` remontent
+  désormais de leur source bloc `/dev/...` vers `/sys/class/block`, puis parcourent
+  l'ascendance `/sys/dev/block` existante ; un transport USB porté par le disque parent
+  reste donc classé `External` avant et après montage ;
+- `overlay` et `binfmt_misc` rejoignent le filtre explicite des pseudo-filesystems,
+  après résolution des overmounts et avec l'exception maintenue pour la racine `/` ;
+- un déplacement distant conserve le rename SFTP rapide. Si son échec générique est
+  confirmé comme une frontière de filesystem par `statvfs`, le worker coopératif copie
+  côté serveur vers un nom temporaire, le promeut par rename SFTP et ne supprime la source
+  qu'après le succès complet de ces deux étapes.
+
+Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend ; ils ne
+nécessitent ni disque Btrfs/USB ni serveur SSH réel.
+
 ## Socle des opérations
 
 Le Sprint introduit le socle métier du montage et du démontage des volumes locaux et

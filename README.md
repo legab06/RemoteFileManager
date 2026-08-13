@@ -3,8 +3,9 @@
 RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche de Dolphin sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
 
 > État actuel : **Sprint 8 — gestion des volumes locaux et distants,
-> version 0.8.1**. Cette version corrige la documentation et les métadonnées de
-> release, sans changement fonctionnel prévu par rapport à v0.8.0.
+> version 0.8.1**. Cette release corrective fiabilise la classification des disques
+> USB Btrfs, les déplacements distants entre filesystems et le filtrage des montages
+> techniques.
 
 ## Principes
 

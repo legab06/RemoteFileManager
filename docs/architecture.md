@@ -41,6 +41,11 @@ périphérique bloc dont le parcours est incomplet reste donc `Unknown`.
 La lecture distante avance par étapes réordonnancées dans la boucle du worker SSH.
 `mountinfo` reste ouvert pendant la collecte, mais chaque étape n'effectue qu'une
 lecture SFTP bornée avant de rendre la main à la boucle d'évènements.
+Quand `mountinfo` expose un numéro virtuel `0:*` pour un filesystem tel que Btrfs,
+le scanner ne conclut pas à l'absence de bloc. Une source absolue sous `/dev` est
+canonicalisée, son véritable `major:minor` est lu dans `/sys/class/block/<nom>/dev`,
+puis le parcours habituel reprend dans `/sys/dev/block`. Le transport peut ainsi être
+trouvé sur un parent sysfs, sans déduire le type matériel du nom du périphérique.
 La taille de `mountinfo`, le nombre de montages et labels, ainsi que le travail sysfs
 total sont bornés. Une nouvelle requête, une déconnexion ou le shutdown annule le
 snapshot en cours ; une perte de connexion supprime tout résultat partiel et rejoint
@@ -63,6 +68,12 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
   primitive de copie serveur exposée par SFTP/libssh. Ses arguments sont échappés séparément, les
   collisions sont refusées avant et pendant l'exécution, les liens symboliques restent des liens et
   l'annulation envoie `TERM` au processus distant avant de fermer le canal.
+- Un déplacement tente d'abord le rename SFTP. Comme SFTP v3 réduit `EXDEV` à une erreur
+  générique, le transport ne qualifie le fallback qu'après comparaison des identifiants
+  `statvfs` de la source et de la destination. Entre filesystems, le même worker non bloquant
+  copie intégralement l'élément vers un nom temporaire du filesystem cible, le promeut par
+  rename SFTP, puis lance la suppression de la source dans une commande séparée. Un échec de
+  copie ou de promotion conserve toujours la source ; un échec de nettoyage est signalé.
 - Le chemin SFTP initial est canonicalisé en chemin absolu. Ainsi, le dossier de connexion n'est pas
   confondu avec `/` et la navigation parent peut atteindre la vraie racine distante.
 - Les chemins de téléchargement locaux sont construits composant par composant. Chaque composant

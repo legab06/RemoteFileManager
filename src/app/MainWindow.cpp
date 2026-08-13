@@ -1971,7 +1971,8 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
 
 void MainWindow::handleRemoteOperationProgress(rfm::core::OperationProgress progress)
 {
-    if (progress.id == 0 || progress.kind != rfm::core::OperationKind::RemoteCopy) {
+    if (progress.id == 0 || (progress.kind != rfm::core::OperationKind::RemoteCopy &&
+                             progress.kind != rfm::core::OperationKind::RemoteMove)) {
         return;
     }
     m_remoteOperations.insert(progress.id, progress);
