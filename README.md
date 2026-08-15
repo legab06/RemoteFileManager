@@ -1,3 +1,9 @@
+<p align="center">
+  <img src="assets/branding/png/logo-512.png"
+       alt="RemoteFileManager"
+       width="220">
+</p>
+
 # RemoteFileManager
 
 RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche de Dolphin sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
