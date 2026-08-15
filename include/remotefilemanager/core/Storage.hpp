@@ -108,6 +108,10 @@ struct LinuxMountInfo {
 };
 
 [[nodiscard]] bool isNetworkFileSystem(const QByteArray& fileSystemType);
+// Whether a filesystem source represents user-accessible storage rather than
+// kernel/session state or a package runtime image.
+[[nodiscard]] bool isStorageVolumeCandidate(const QByteArray& fileSystemType,
+                                            const QString& device);
 [[nodiscard]] bool hasExternalStorageTransport(const QStringList& subsystemChain);
 [[nodiscard]] StorageDeviceEvidence
 storageDeviceEvidence(const QList<StorageTopologyNode>& ancestry, bool blockDevice,

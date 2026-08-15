@@ -514,7 +514,7 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     }
     QVERIFY(volumes != nullptr);
     QCOMPARE(volumes->childCount(), 1);
-    QCOMPARE(volumes->child(0)->text(0), QStringLiteral("First"));
+    QCOMPARE(volumes->child(0)->text(0), first.path());
     QVERIFY(plainToolTip(volumes->child(0)).contains(QStringLiteral("Filesystem: ext4")));
     QVERIFY(plainToolTip(volumes->child(0)).contains(QStringLiteral("Model: First model")));
 
@@ -535,7 +535,7 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
                                       Q_ARG(QList<rfm::core::StorageVolume>, replacement)));
     QCOMPARE(volumes->childCount(), 1);
-    QCOMPARE(volumes->child(0)->text(0), QStringLiteral("Second"));
+    QCOMPARE(volumes->child(0)->text(0), second.path());
     const QString replacementToolTip = plainToolTip(volumes->child(0));
     QVERIFY(replacementToolTip.contains(QStringLiteral("Device: /dev/second1")));
     QVERIFY(replacementToolTip.contains(QStringLiteral("Filesystem: xfs")));
@@ -623,7 +623,7 @@ void MainWindowTest::temporaryConnectionAppearsInPlacesAndRejectsStaleStorage()
     QTreeWidgetItem* const externalA = childNamed(serverA, QStringLiteral("External devices"));
     QVERIFY(externalA != nullptr);
     QCOMPARE(externalA->childCount(), 1);
-    QCOMPARE(externalA->child(0)->text(0), QStringLiteral("SERVER_A_USB"));
+    QCOMPARE(externalA->child(0)->text(0), QStringLiteral("/media/a"));
     rfm::app::FileBrowserPane* const activePane = workspace->activePane();
     QVERIFY(QMetaObject::invokeMethod(navigation->tree(), "itemActivated", Qt::DirectConnection,
                                       Q_ARG(QTreeWidgetItem*, externalA->child(0)), Q_ARG(int, 0)));
@@ -656,7 +656,7 @@ void MainWindowTest::temporaryConnectionAppearsInPlacesAndRejectsStaleStorage()
     QTreeWidgetItem* const externalB = childNamed(serverB, QStringLiteral("External devices"));
     QVERIFY(externalB != nullptr);
     QCOMPARE(externalB->childCount(), 1);
-    QCOMPARE(externalB->child(0)->text(0), QStringLiteral("SERVER_B_USB"));
+    QCOMPARE(externalB->child(0)->text(0), QStringLiteral("/media/b"));
 }
 
 void MainWindowTest::ignoresStaleResultsAfterSwitchingNavigationSource()

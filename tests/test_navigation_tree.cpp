@@ -126,11 +126,14 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
     QVERIFY(volumes != nullptr);
     QVERIFY(externalDevices != nullptr);
     QCOMPARE(volumes->childCount(), 2);
-    QCOMPARE(volumes->child(0)->text(0), QStringLiteral("Fixture volume"));
-    QCOMPARE(volumes->child(1)->text(0), QStringLiteral("Unknown fixture"));
+    QSet<QString> regularNames;
+    for (int index = 0; index < volumes->childCount(); ++index) {
+        regularNames.insert(volumes->child(index)->text(0));
+    }
+    QCOMPARE(regularNames, QSet<QString>({temporary.path(), unknownTemporary.path()}));
     QVERIFY(volumes->parent() == tree->topLevelItem(0));
     QCOMPARE(externalDevices->childCount(), 1);
-    QCOMPARE(externalDevices->child(0)->text(0), QStringLiteral("USB fixture"));
+    QCOMPARE(externalDevices->child(0)->text(0), externalTemporary.path());
     QVERIFY(externalDevices->parent() == tree->topLevelItem(0));
 
     navigation.setProfiles({{QStringLiteral("NAS"), QStringLiteral("nas.test"),
@@ -250,7 +253,7 @@ void NavigationTreeTest::deduplicatesAndNavigatesExternalDevice()
     QVERIFY(externalDevices != nullptr);
     QCOMPARE(volumes->childCount(), 0);
     QCOMPARE(externalDevices->childCount(), 1);
-    QCOMPARE(externalDevices->child(0)->text(0), QStringLiteral("USB SSD"));
+    QCOMPARE(externalDevices->child(0)->text(0), temporary.path());
 
     QSignalSpy activated(&navigation, &rfm::app::NavigationTree::localLocationActivated);
     QVERIFY(QMetaObject::invokeMethod(navigation.tree(), "itemActivated", Qt::DirectConnection,
@@ -288,7 +291,7 @@ void NavigationTreeTest::refreshesRemoteStorageWithoutMixingMachines()
     QTreeWidgetItem* const volumes = childNamed(refreshedRemote, QStringLiteral("Volumes"));
     QVERIFY(volumes != nullptr);
     QCOMPARE(volumes->childCount(), 1);
-    QCOMPARE(volumes->child(0)->text(0), QStringLiteral("Replacement"));
+    QCOMPARE(volumes->child(0)->text(0), QStringLiteral("/data"));
     QVERIFY(childNamed(refreshedRemote, QStringLiteral("External devices")) == nullptr);
 
     QSignalSpy activated(&navigation, &rfm::app::NavigationTree::remoteLocationActivated);
@@ -451,17 +454,18 @@ void NavigationTreeTest::showsHumanMetadataAndRefreshesWithoutChangingNavigation
     QVERIFY(externalDevices != nullptr);
     QCOMPARE(externalDevices->childCount(), 1);
     QTreeWidgetItem* entry = externalDevices->child(0);
-    QCOMPARE(entry->text(0), QStringLiteral("PHOTOS"));
+    QCOMPARE(entry->text(0), mountPoint.path());
     QTextDocument fullDocument;
     fullDocument.setHtml(entry->toolTip(0));
     const QString fullToolTip = fullDocument.toPlainText();
-    QVERIFY(fullToolTip.startsWith(QStringLiteral("PHOTOS\n")));
+    QVERIFY(fullToolTip.startsWith(mountPoint.path() + QChar{'\n'}));
+    QVERIFY(fullToolTip.contains(QStringLiteral("Label: PHOTOS")));
     QVERIFY(fullToolTip.contains(QStringLiteral("Device: /dev/sdb1")));
     QVERIFY(fullToolTip.contains(QStringLiteral("Mount point: %1").arg(mountPoint.path())));
     QVERIFY(fullToolTip.contains(QStringLiteral("Filesystem: exfat")));
     QVERIFY(fullToolTip.contains(QStringLiteral("Model: SanDisk Cruzer Glide")));
     QVERIFY(fullToolTip.contains(QStringLiteral("Size:")));
-    QVERIFY(fullToolTip.split(QChar{'\n'}).size() <= 7);
+    QVERIFY(fullToolTip.split(QChar{'\n'}).size() <= 8);
 
     QSignalSpy activated(&navigation, &rfm::app::NavigationTree::localLocationActivated);
     QVERIFY(QMetaObject::invokeMethod(navigation.tree(), "itemActivated", Qt::DirectConnection,
@@ -480,11 +484,11 @@ void NavigationTreeTest::showsHumanMetadataAndRefreshesWithoutChangingNavigation
     QVERIFY(externalDevices != nullptr);
     QCOMPARE(externalDevices->childCount(), 1);
     entry = externalDevices->child(0);
-    QCOMPARE(entry->text(0), QStringLiteral("Replacement model"));
+    QCOMPARE(entry->text(0), mountPoint.path());
     QTextDocument partialDocument;
     partialDocument.setHtml(entry->toolTip(0));
     const QString partialToolTip = partialDocument.toPlainText();
-    QVERIFY(partialToolTip.startsWith(QStringLiteral("Replacement model\n")));
+    QVERIFY(partialToolTip.startsWith(mountPoint.path() + QChar{'\n'}));
     QVERIFY(!partialToolTip.contains(QStringLiteral("Filesystem:")));
     QVERIFY(!partialToolTip.contains(QStringLiteral("Size:")));
     QVERIFY(!partialToolTip.contains(QStringLiteral("Unknown")));
@@ -553,8 +557,8 @@ void NavigationTreeTest::escapesTooltipMetadataAndDisambiguatesLabels()
     QTreeWidgetItem* const external =
         childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
     QCOMPARE(external->childCount(), 2);
-    QCOMPARE(external->child(0)->text(0), QStringLiteral("BACKUP (sdb1)"));
-    QCOMPARE(external->child(1)->text(0), QStringLiteral("BACKUP (sdc1)"));
+    QCOMPARE(external->child(0)->text(0), first.path());
+    QCOMPARE(external->child(1)->text(0), second.path());
     QVERIFY(external->child(0)->toolTip(0).contains(QStringLiteral("&lt;qt&gt;")));
     QVERIFY(external->child(0)->toolTip(0).contains(QStringLiteral("&amp;")));
     QTextDocument document;

@@ -65,13 +65,14 @@ class LocalFileSystemTest final : public QObject
     void keepsRemoteUsbClassificationAfterMetadataEnrichment();
     void parsesLinuxMountInformation();
     void preservesNavigableFuseMountsAndFiltersPseudoFileSystems();
-    void preservesVisiblePseudoFileSystemsAtRoot();
+    void filtersPseudoFileSystemsAtRoot();
     void filtersBindMountsAndKeepsVisibleOvermount();
     void filtersVisiblePseudoOvermountsWithoutRestoringHiddenStorage();
     void selectsOvermountsFromParentRelationships();
-    void preservesDistinctBtrfsAndAmbiguousAttachments();
+    void deduplicatesMultipleAttachmentsOfOneStorage();
     void reportsPortableMountedVolumes();
     void buildsVolumesAndFingerprintFromOneSnapshot();
+    void filtersTechnicalMountsAndDeduplicatesMountedDevices();
     void discoversUnmountedUsbPartitionWithoutTechnicalDuplicates();
     void keepsMountedVolumeWhenBlockDiscoveryReportsItToo();
     void matchesLocalPathsOnComponentBoundaries();
@@ -314,14 +315,14 @@ void LocalFileSystemTest::selectsHumanStorageNameByPriority()
     QCOMPARE(rfm::core::storageDisplayName(QStringLiteral("PHOTOS"), QStringLiteral("Cruzer Glide"),
                                            QStringLiteral("/dev/sdb1"),
                                            QStringLiteral("/media/usb")),
-             QStringLiteral("PHOTOS"));
+             QStringLiteral("/media/usb"));
     QCOMPARE(rfm::core::storageDisplayName({}, QStringLiteral("Cruzer Glide"),
                                            QStringLiteral("/dev/sdb1"),
                                            QStringLiteral("/media/usb")),
-             QStringLiteral("Cruzer Glide"));
+             QStringLiteral("/media/usb"));
     QCOMPARE(rfm::core::storageDisplayName({}, {}, QStringLiteral("/dev/sdb1"),
                                            QStringLiteral("/media/usb")),
-             QStringLiteral("sdb1"));
+             QStringLiteral("/media/usb"));
     QCOMPARE(rfm::core::storageDisplayName({}, {}, {}, QStringLiteral("/media/usb")),
              QStringLiteral("/media/usb"));
 }
@@ -346,7 +347,7 @@ void LocalFileSystemTest::keepsRemoteUsbClassificationAfterMetadataEnrichment()
     const rfm::core::StorageVolume volume =
         rfm::core::makeStorageVolume(mount, device, QStringLiteral("PHOTOS"), 1234);
     QCOMPARE(volume.kind, rfm::core::StorageKind::External);
-    QCOMPARE(volume.displayName, QStringLiteral("PHOTOS"));
+    QCOMPARE(volume.displayName, QStringLiteral("/media/usb"));
     QCOMPARE(volume.fileSystemLabel, QStringLiteral("PHOTOS"));
     QCOMPARE(volume.deviceModel, QStringLiteral("Cruzer Glide"));
     QCOMPARE(volume.rootPath, QStringLiteral("/media/usb"));
@@ -391,6 +392,8 @@ void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystem
         "34 24 0:53 / /dev/shm rw - tmpfs shm rw\n"
         "37 24 0:54 / /containers rw - overlay overlay rw\n"
         "38 24 0:55 / /proc/sys/fs/binfmt_misc rw - binfmt_misc binfmt_misc rw\n"
+        "39 24 0:56 / /technical rw - fuse none rw\n"
+        "40 24 7:0 / /snap/example rw - squashfs /dev/loop0 ro\n"
         "35 24 8:2 / /srv rw - xfs /dev/sdb1 rw\n"
         "36 24 8:3 /@ /work rw - btrfs /dev/sdc1 rw\n";
 
@@ -416,24 +419,23 @@ void LocalFileSystemTest::preservesNavigableFuseMountsAndFiltersPseudoFileSystem
                mount.fileSystemType == QByteArrayLiteral("overlay") ||
                mount.fileSystemType == QByteArrayLiteral("binfmt_misc") ||
                mount.fileSystemType == QByteArrayLiteral("tmpfs") ||
-               mount.fileSystemType == QByteArrayLiteral("fuse.portal");
+               mount.fileSystemType == QByteArrayLiteral("fuse.portal") ||
+               mount.device == QStringLiteral("none") ||
+               mount.device == QStringLiteral("/dev/loop0");
     }));
 }
 
-void LocalFileSystemTest::preservesVisiblePseudoFileSystemsAtRoot()
+void LocalFileSystemTest::filtersPseudoFileSystemsAtRoot()
 {
     const QByteArray tmpfsRoot = "24 1 0:44 / / rw - tmpfs tmpfs rw\n"
                                  "25 24 0:45 / /run rw - tmpfs tmpfs rw\n"
                                  "26 24 0:46 / /dev/shm rw - tmpfs shm rw\n";
     const QList<rfm::core::LinuxMountInfo> tmpfsMounts = rfm::core::parseLinuxMountInfo(tmpfsRoot);
-    QCOMPARE(tmpfsMounts.size(), 1);
-    QCOMPARE(tmpfsMounts.constFirst().rootPath, QStringLiteral("/"));
-    QCOMPARE(tmpfsMounts.constFirst().fileSystemType, QByteArrayLiteral("tmpfs"));
+    QVERIFY(tmpfsMounts.isEmpty());
 
     const QList<rfm::core::LinuxMountInfo> ramfsMounts =
         rfm::core::parseLinuxMountInfo("30 1 0:47 / / rw - ramfs ramfs rw\n");
-    QCOMPARE(ramfsMounts.size(), 1);
-    QCOMPARE(ramfsMounts.constFirst().fileSystemType, QByteArrayLiteral("ramfs"));
+    QVERIFY(ramfsMounts.isEmpty());
 
     const QList<rfm::core::LinuxMountInfo> ext4Mounts =
         rfm::core::parseLinuxMountInfo("40 1 8:1 / / rw - ext4 /dev/sda1 rw\n");
@@ -442,9 +444,7 @@ void LocalFileSystemTest::preservesVisiblePseudoFileSystemsAtRoot()
 
     const QList<rfm::core::LinuxMountInfo> overlayRoot =
         rfm::core::parseLinuxMountInfo("41 1 0:48 / / rw - overlay overlay rw\n");
-    QCOMPARE(overlayRoot.size(), 1);
-    QCOMPARE(overlayRoot.constFirst().rootPath, QStringLiteral("/"));
-    QCOMPARE(overlayRoot.constFirst().fileSystemType, QByteArrayLiteral("overlay"));
+    QVERIFY(overlayRoot.isEmpty());
 }
 
 void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()
@@ -472,6 +472,40 @@ void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()
     QCOMPARE(firstResult.fingerprint, unchangedResult.fingerprint);
     QCOMPARE(secondResult.volumes.size(), 2);
     QVERIFY(firstResult.fingerprint != secondResult.fingerprint);
+}
+
+void LocalFileSystemTest::filtersTechnicalMountsAndDeduplicatesMountedDevices()
+{
+    QTemporaryDir duplicateAttachment;
+    QTemporaryDir distinctStorage;
+    QVERIFY(duplicateAttachment.isValid());
+    QVERIFY(distinctStorage.isValid());
+
+    const QList<rfm::core::LocalStorageMount> mounts{
+        {QDir::rootPath(), QStringLiteral("/dev/fixture-root"), QByteArrayLiteral("btrfs"),
+         QStringLiteral("ROOT"), 1024, false, true, true},
+        {duplicateAttachment.path(), QStringLiteral("/dev/fixture-root"),
+         QByteArrayLiteral("btrfs"), QStringLiteral("SNAPSHOT"), 1024, false, true, true},
+        {distinctStorage.path(), QStringLiteral("/dev/fixture-data"), QByteArrayLiteral("ext4"),
+         QStringLiteral("DATA"), 2048, false, true, true},
+        {QDir::tempPath(), QStringLiteral("tmpfs"), QByteArrayLiteral("tmpfs"), {}, 1024, false,
+         true, true},
+        {duplicateAttachment.path(), QStringLiteral("none"), QByteArrayLiteral("fuse"), {},
+         1024, false, true, true}};
+
+    const rfm::core::LocalStorageSnapshot snapshot =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(mounts);
+
+    QCOMPARE(snapshot.volumes.size(), 2);
+    QVERIFY(std::ranges::any_of(snapshot.volumes, [](const rfm::core::StorageVolume& volume) {
+        return volume.rootPath == QStringLiteral("/") &&
+               volume.device == QStringLiteral("/dev/fixture-root");
+    }));
+    QVERIFY(std::ranges::any_of(snapshot.volumes, [&distinctStorage](
+                                                 const rfm::core::StorageVolume& volume) {
+        return volume.rootPath == distinctStorage.path() &&
+               volume.device == QStringLiteral("/dev/fixture-data");
+    }));
 }
 
 void LocalFileSystemTest::discoversUnmountedUsbPartitionWithoutTechnicalDuplicates()
@@ -611,7 +645,7 @@ void LocalFileSystemTest::selectsOvermountsFromParentRelationships()
     QCOMPARE(mounts.at(2).mountId, quint64{42});
 }
 
-void LocalFileSystemTest::preservesDistinctBtrfsAndAmbiguousAttachments()
+void LocalFileSystemTest::deduplicatesMultipleAttachmentsOfOneStorage()
 {
     const QByteArray fixture = "60 1 259:2 /@ / rw - btrfs /dev/nvme0n1p2 rw\n"
                                "61 60 259:2 /@home /home rw - btrfs /dev/nvme0n1p2 rw\n"
@@ -621,15 +655,11 @@ void LocalFileSystemTest::preservesDistinctBtrfsAndAmbiguousAttachments()
                                "81 1 8:10 / /mnt/second rw - ext4 /dev/sde1 rw\n";
     const QList<rfm::core::LinuxMountInfo> mounts = rfm::core::parseLinuxMountInfo(fixture);
 
-    QCOMPARE(mounts.size(), 6);
+    QCOMPARE(mounts.size(), 3);
     QCOMPARE(mounts.at(0).rootPath, QStringLiteral("/"));
     QCOMPARE(mounts.at(0).mountRoot, QStringLiteral("/@"));
-    QCOMPARE(mounts.at(1).rootPath, QStringLiteral("/home"));
-    QCOMPARE(mounts.at(1).mountRoot, QStringLiteral("/@home"));
-    QCOMPARE(mounts.at(2).rootPath, QStringLiteral("/mnt/alpha"));
-    QCOMPARE(mounts.at(3).rootPath, QStringLiteral("/mnt/beta"));
-    QCOMPARE(mounts.at(4).rootPath, QStringLiteral("/mnt/first"));
-    QCOMPARE(mounts.at(5).rootPath, QStringLiteral("/mnt/second"));
+    QCOMPARE(mounts.at(1).rootPath, QStringLiteral("/mnt/beta"));
+    QCOMPARE(mounts.at(2).rootPath, QStringLiteral("/mnt/first"));
 }
 
 void LocalFileSystemTest::reportsPortableMountedVolumes()
