@@ -3,9 +3,12 @@
 #include <QApplication>
 #include <QCoreApplication>
 
+#include <QIcon>
+
 int main(int argc, char* argv[])
 {
     QApplication application(argc, argv);
+    application.setWindowIcon(QIcon(QStringLiteral(":/icons/logo-256.png")));
     QCoreApplication::setOrganizationName(QStringLiteral("RemoteFileManager"));
     QCoreApplication::setApplicationName(QStringLiteral("RemoteFileManager"));
     QCoreApplication::setApplicationVersion(QStringLiteral("0.8.1"));

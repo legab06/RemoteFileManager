@@ -79,6 +79,16 @@ target_link_libraries(rfm_ui PUBLIC Qt6::Widgets RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_ui)
 
 qt_add_executable(RemoteFileManager main.cpp)
+
+qt_add_resources(
+    RemoteFileManager
+    "app_icons"
+    PREFIX "/icons"
+    BASE "${PROJECT_SOURCE_DIR}/assets/branding/png"
+    FILES
+        "${PROJECT_SOURCE_DIR}/assets/branding/png/logo-256.png"
+)
+
 target_link_libraries(RemoteFileManager PRIVATE RemoteFileManager::Ui)
 rfm_set_project_warnings(RemoteFileManager)
 
