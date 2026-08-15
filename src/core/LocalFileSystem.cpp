@@ -6,6 +6,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QProcess>
 #include <QSet>
 #include <QStandardPaths>
@@ -61,12 +62,46 @@ QString storageMountIdentity(const LocalStorageMount& storage)
              storage.readOnly ? QStringLiteral("ro") : QStringLiteral("rw"));
 }
 
+bool preferStorageRepresentative(const StorageVolume& candidate, const StorageVolume& current)
+{
+    if ((candidate.rootPath == QStringLiteral("/")) != (current.rootPath == QStringLiteral("/"))) {
+        return candidate.rootPath == QStringLiteral("/");
+    }
+    if (candidate.rootPath.size() != current.rootPath.size()) {
+        return candidate.rootPath.size() < current.rootPath.size();
+    }
+    return candidate.rootPath.compare(current.rootPath, Qt::CaseInsensitive) < 0;
+}
+
+QList<StorageVolume> deduplicateMountedBlockVolumes(QList<StorageVolume> volumes)
+{
+    QList<StorageVolume> uniqueVolumes;
+    QHash<QString, qsizetype> indexesByDevice;
+    uniqueVolumes.reserve(volumes.size());
+    for (StorageVolume& volume : volumes) {
+        const QString device = volume.device.trimmed();
+        if (!volume.mounted || !device.startsWith(QStringLiteral("/dev/"))) {
+            uniqueVolumes.push_back(std::move(volume));
+            continue;
+        }
+        const auto existing = indexesByDevice.constFind(device);
+        if (existing == indexesByDevice.cend()) {
+            indexesByDevice.insert(device, uniqueVolumes.size());
+            uniqueVolumes.push_back(std::move(volume));
+        } else if (preferStorageRepresentative(volume, uniqueVolumes.at(existing.value()))) {
+            uniqueVolumes[existing.value()] = std::move(volume);
+        }
+    }
+    return uniqueVolumes;
+}
+
 QByteArray mountedStorageFingerprint(const QList<LocalStorageMount>& snapshot)
 {
     QStringList identities;
     identities.reserve(snapshot.size());
     for (const LocalStorageMount& storage : snapshot) {
-        if (!storage.valid || !storage.ready || storage.rootPath.isEmpty()) {
+        if (!storage.valid || !storage.ready || storage.rootPath.isEmpty() ||
+            !isStorageVolumeCandidate(storage.fileSystemType, storage.device)) {
             continue;
         }
         const QString rootPath = QDir::cleanPath(storage.rootPath);
@@ -377,7 +412,8 @@ LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot,
     QSet<QString> roots;
     const QString systemRootIdentity = rootIdentity(QDir::rootPath());
     for (const LocalStorageMount& storage : snapshot) {
-        if (!storage.valid || !storage.ready || storage.rootPath.isEmpty()) {
+        if (!storage.valid || !storage.ready || storage.rootPath.isEmpty() ||
+            !isStorageVolumeCandidate(storage.fileSystemType, storage.device)) {
             continue;
         }
         const QString rootPath = QDir::cleanPath(storage.rootPath);
@@ -410,6 +446,7 @@ LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot,
         volumes.push_back(std::move(volume));
     }
 
+    volumes = deduplicateMountedBlockVolumes(std::move(volumes));
     volumes = mergeLinuxBlockDevices(std::move(volumes), blockDevices);
     const QByteArray fingerprint = storageVolumeFingerprint(volumes);
     return {std::move(volumes), fingerprint};

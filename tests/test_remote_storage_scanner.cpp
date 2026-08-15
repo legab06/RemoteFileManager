@@ -212,7 +212,7 @@ void RemoteStorageScannerTest::yieldsAndCompletesAClassifiedScan()
     const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
     QCOMPARE(volumes.size(), 1);
     QCOMPARE(volumes.constFirst().rootPath, QStringLiteral("/media/usb"));
-    QCOMPARE(volumes.constFirst().displayName, QStringLiteral("BACKUP"));
+    QCOMPARE(volumes.constFirst().displayName, QStringLiteral("/media/usb"));
     QCOMPARE(volumes.constFirst().kind, rfm::core::StorageKind::External);
     QCOMPARE(volumes.constFirst().bytesTotal, quint64{4096});
 }

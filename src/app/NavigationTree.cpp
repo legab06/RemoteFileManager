@@ -73,6 +73,7 @@ QString storageToolTip(const rfm::core::StorageVolume& volume)
         }
     };
     append({}, volume.displayName);
+    append(QCoreApplication::translate("NavigationTree", "Label"), volume.fileSystemLabel);
     append(QCoreApplication::translate("NavigationTree", "Device"), volume.device);
     append(QCoreApplication::translate("NavigationTree", "Status"),
            volume.mounted ? QCoreApplication::translate("NavigationTree", "Mounted")
@@ -123,7 +124,11 @@ QStringList storageDisplayNames(const QList<rfm::core::StorageVolume>& volumes, 
     QStringList baseNames;
     QHash<QString, int> occurrences;
     for (const rfm::core::StorageVolume& volume : volumes) {
-        QString base = safePresentationText(volume.displayName);
+        // A mounted entry represents a location the user can open. Its mount
+        // point is therefore the most useful primary name; disk metadata stays
+        // available in the tooltip.
+        QString base = volume.mounted ? safePresentationText(volume.rootPath)
+                                      : safePresentationText(volume.displayName);
         if (base.isEmpty()) {
             base = safePresentationText(volume.rootPath);
         }

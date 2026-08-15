@@ -109,35 +109,6 @@ LinuxMountInfo visibleOvermount(const QList<LinuxMountInfo>& mounts)
     return visible == nullptr ? mounts.constFirst() : *visible;
 }
 
-bool strictMountRootAncestor(const QString& ancestor, const QString& descendant)
-{
-    if (ancestor == descendant) {
-        return false;
-    }
-    if (ancestor == QStringLiteral("/")) {
-        return descendant.startsWith(QChar{'/'});
-    }
-    return descendant.startsWith(ancestor + QChar{'/'});
-}
-
-bool demonstratedAttachmentAlias(const LinuxMountInfo& candidate, const LinuxMountInfo& current)
-{
-    if (candidate.mountRoot == current.mountRoot) {
-        // mountinfo does not distinguish a root bind from two intentional
-        // attachments of the same logical root. Preserve that ambiguity.
-        return false;
-    }
-    if (candidate.fileSystemType.trimmed().compare(QByteArrayLiteral("btrfs"),
-                                                   Qt::CaseInsensitive) == 0 ||
-        isNetworkFileSystem(candidate.fileSystemType)) {
-        return false;
-    }
-    // For an ordinary block filesystem, a second attachment rooted strictly
-    // below another attachment of the same filesystem is a bind/sub-root alias.
-    return strictMountRootAncestor(candidate.mountRoot, current.mountRoot) ||
-           strictMountRootAncestor(current.mountRoot, candidate.mountRoot);
-}
-
 bool isPseudoFileSystem(const QByteArray& fileSystemType)
 {
     // These filesystems expose kernel, session or RAM-backed state rather than
@@ -157,6 +128,22 @@ bool isPseudoFileSystem(const QByteArray& fileSystemType)
         QByteArrayLiteral("securityfs"),  QByteArrayLiteral("sysfs"),
         QByteArrayLiteral("tmpfs"),       QByteArrayLiteral("tracefs")};
     return pseudoTypes.contains(fileSystemType.trimmed().toLower());
+}
+
+bool isStorageVolumeCandidateImpl(const QByteArray& fileSystemType, const QString& deviceValue)
+{
+    const QString device = deviceValue.trimmed();
+    if (isPseudoFileSystem(fileSystemType) || device.isEmpty() ||
+        device.compare(QStringLiteral("none"), Qt::CaseInsensitive) == 0 ||
+        device.compare(QStringLiteral("rootfs"), Qt::CaseInsensitive) == 0) {
+        return false;
+    }
+
+    // Loop-mounted squashfs images are normally package/runtime internals
+    // (for example Snap), not user storage destinations.
+    return !(fileSystemType.trimmed().compare(QByteArrayLiteral("squashfs"),
+                                              Qt::CaseInsensitive) == 0 &&
+             device.startsWith(QStringLiteral("/dev/loop")));
 }
 
 QList<QByteArray> splitMountInfoFields(const QByteArray& value)
@@ -291,6 +278,11 @@ bool isNetworkFileSystem(const QByteArray& fileSystemType)
     return networkTypes.contains(normalized);
 }
 
+bool isStorageVolumeCandidate(const QByteArray& fileSystemType, const QString& device)
+{
+    return isStorageVolumeCandidateImpl(fileSystemType, device);
+}
+
 bool hasExternalStorageTransport(const QStringList& subsystemChain)
 {
     static const QSet<QString> externalTransports{
@@ -328,6 +320,10 @@ StorageDeviceEvidence storageDeviceEvidence(const QList<StorageTopologyNode>& an
 QString storageDisplayName(const QString& fileSystemLabel, const QString& deviceModel,
                            const QString& device, const QString& mountPoint)
 {
+    const QString normalizedMountPoint = RemotePath::normalize(mountPoint.trimmed());
+    if (normalizedMountPoint.startsWith(QChar{'/'})) {
+        return normalizedMountPoint;
+    }
     const QString label = meaningfulMetadata(fileSystemLabel);
     if (!label.isEmpty()) {
         return label;
@@ -443,15 +439,14 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
     visibleMounts.reserve(mountPointGroups.size());
     for (const QList<LinuxMountInfo>& group : std::as_const(mountPointGroups)) {
         LinuxMountInfo visible = visibleOvermount(group);
-        if (visible.rootPath == QStringLiteral("/") ||
-            !isPseudoFileSystem(visible.fileSystemType)) {
+        if (isStorageVolumeCandidate(visible.fileSystemType, visible.device)) {
             visibleMounts.push_back(std::move(visible));
         }
     }
 
-    // Process broad roots first so demonstrated sub-root binds can reuse their
-    // representative. Different Btrfs roots and other ambiguous attachments are
-    // intentionally preserved as independently navigable destinations.
+    // Process broad roots first so one representative is retained for each
+    // physical filesystem. A volume list is a list of accessible storage, not
+    // a raw mount table: bind mounts and Btrfs subvolumes must not duplicate it.
     std::ranges::stable_sort(visibleMounts,
                              [](const LinuxMountInfo& first, const LinuxMountInfo& second) {
                                  return first.mountRoot.size() < second.mountRoot.size();
@@ -467,12 +462,11 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
 
         bool merged = false;
         for (const qsizetype index : std::as_const(physicalIndexes[identity])) {
-            if (!demonstratedAttachmentAlias(mount, mounts.at(index))) {
-                continue;
-            }
             if (preferMountRepresentative(mount, mounts.at(index))) {
                 mounts[index] = std::move(mount);
             }
+            // The identity is a filesystem device number (or a network
+            // export), so every later attachment is the same storage.
             merged = true;
             break;
         }
