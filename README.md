@@ -6,23 +6,21 @@
 
 # RemoteFileManager
 
-RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche de Dolphin sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
+RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche d'un gestionnaire de fichiers classique, sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
 
-> État actuel : **Sprint 8 — gestion des volumes locaux et distants,
-> version 0.8.1**. Cette release corrective fiabilise la classification des disques
-> USB Btrfs, les déplacements distants entre filesystems et le filtrage des montages
-> techniques.
+Ce logiciel a été entièrement vibe-codé pour répondre à un besoin que j'avais. Je ne suis pas un développeur ou un codeur, juste un amateur avec un besoin précis. 
+
 
 ## Principes
 
 - client C++20 léger avec interface Qt Widgets ;
-- prototype Linux en premier, architecture compatible Windows et macOS ;
+- prototype Linux en premier, architecture compatible, à terme, Windows et macOS ;
 - serveur SSH/SFTP standard, sans agent propriétaire ;
-- opérations distantes exécutées côté serveur quand c’est pertinent ;
-- sécurité explicite : vérification de la clé d’hôte et aucun secret en clair ;
+- opérations distantes directement exécutées côté serveur ;
+- sécurité explicite : vérification de la clé d’hôte et aucun mot de passe en clair ;
 - interface inspirée d’un navigateur de fichiers natif ;
 - navigation locale multiplateforme fondée sur Qt, sans commande système ni SSHFS ;
-- panneaux à source explicite, permettant notamment un affichage scindé local/SSH.
+- panneaux à source explicite, permettant notamment un affichage scindé local/SSH, local/local ou ssh/ssh.
 
 ## Fonctionnalités disponibles
 
