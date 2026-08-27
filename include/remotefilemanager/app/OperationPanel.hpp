@@ -3,6 +3,7 @@
 #include "remotefilemanager/core/OperationProgress.hpp"
 
 #include <QHash>
+#include <QList>
 #include <QWidget>
 
 class QTableWidget;
@@ -35,8 +36,11 @@ class OperationPanel final : public QWidget
 
   private:
     [[nodiscard]] static QString stateText(rfm::core::OperationState state);
-    [[nodiscard]] int ensureRow(const rfm::core::OperationProgress& progress);
+    [[nodiscard]] QList<quint64> orderedOperationIds() const;
+    [[nodiscard]] QList<quint64> currentOperationIds() const;
     [[nodiscard]] quint64 selectedOperationId() const;
+    void rebuildRows(const QList<quint64>& operationIds);
+    void rebuildRowMappings();
     void updateRow(int row, const rfm::core::OperationProgress& progress);
     void updateHistoryActions();
 
@@ -45,6 +49,9 @@ class OperationPanel final : public QWidget
     QPushButton* m_clearButton{nullptr};
     QHash<quint64, int> m_rows;
     QHash<quint64, rfm::core::OperationProgress> m_progress;
+    QHash<quint64, quint64> m_admissionOrder;
+    QHash<quint64, quint64> m_terminalOrder;
+    quint64 m_nextOrder{1};
 };
 
 } // namespace rfm::app

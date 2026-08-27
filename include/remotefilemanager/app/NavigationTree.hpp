@@ -70,6 +70,7 @@ class NavigationTree final : public QWidget
     void setStorageVolumes(const QList<rfm::core::StorageVolume>& volumes);
     void setRemoteStorageVolumes(const QString& profileId,
                                  const QList<rfm::core::StorageVolume>& volumes);
+    [[nodiscard]] bool hasLoadedLocalDirectory(const QString& path) const;
     void setLocalDirectory(const QString& path, const QList<rfm::core::RemoteEntry>& entries);
     void setRemoteDirectory(const QString& profileId, const QString& path,
                             const QList<rfm::core::RemoteEntry>& entries);

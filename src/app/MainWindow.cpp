@@ -160,11 +160,11 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
 
     createPaneWorkspace();
     createActions();
-    createMenus();
     createNavigationBar();
     createCentralPages();
     createPlacesDock();
     createOperationDock();
+    createMenus();
 
     m_historySaveTimer = new QTimer(this);
     m_historySaveTimer->setObjectName(QStringLiteral("operationHistorySaveTimer"));
@@ -210,6 +210,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     qRegisterMetaType<rfm::core::TransferRequest>();
     qRegisterMetaType<rfm::core::TransferProgress>();
     qRegisterMetaType<rfm::core::BrowserLocation>();
+    qRegisterMetaType<rfm::core::LocalFileOperationRequest>();
+    qRegisterMetaType<rfm::core::LocalFileOperationResult>();
     qRegisterMetaType<QList<rfm::core::StorageVolume>>();
     qRegisterMetaType<rfm::core::VolumeOperationRequest>();
     qRegisterMetaType<rfm::core::VolumeOperationResult>();
@@ -236,6 +238,17 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::volumesProbed, this,
             &MainWindow::handleLocalStorageProbe);
     m_localThread->start();
+
+    m_localOperationThread = new QThread(this);
+    m_localFileOperationWorker = new rfm::core::LocalFileOperationWorker;
+    m_localFileOperationWorker->moveToThread(m_localOperationThread);
+    connect(m_localOperationThread, &QThread::finished, m_localFileOperationWorker,
+            &QObject::deleteLater);
+    connect(this, &MainWindow::localFileOperationRequested, m_localFileOperationWorker,
+            &rfm::core::LocalFileOperationWorker::execute);
+    connect(m_localFileOperationWorker, &rfm::core::LocalFileOperationWorker::finished, this,
+            &MainWindow::handleLocalFileOperationResult);
+    m_localOperationThread->start();
 
     if (volumeService == nullptr) {
         volumeService = std::make_unique<rfm::core::LocalLinuxVolumeService>();
@@ -360,6 +373,10 @@ MainWindow::~MainWindow()
         m_historySaveTimer->stop();
         saveOperationHistory();
     }
+    if (m_localOperationThread != nullptr && m_localOperationThread->isRunning()) {
+        m_localOperationThread->quit();
+        m_localOperationThread->wait();
+    }
     if (m_localThread != nullptr && m_localThread->isRunning()) {
         m_localThread->quit();
         m_localThread->wait();
@@ -389,7 +406,7 @@ void MainWindow::createActions()
 
     m_createDirectoryAction = new QAction(tr("New folder…"), this);
     m_createDirectoryAction->setObjectName(QStringLiteral("createDirectoryAction"));
-    connect(m_createDirectoryAction, &QAction::triggered, this, &MainWindow::createRemoteDirectory);
+    connect(m_createDirectoryAction, &QAction::triggered, this, &MainWindow::createDirectory);
     m_renameAction = new QAction(tr("Rename…"), this);
     m_renameAction->setObjectName(QStringLiteral("renameAction"));
     m_renameAction->setShortcut(QKeySequence(Qt::Key_F2));
@@ -493,6 +510,9 @@ void MainWindow::createMenus()
     editMenu->addAction(m_selectAllAction);
 
     QMenu* const viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(m_placesDockAction);
+    viewMenu->addAction(m_operationDockAction);
+    viewMenu->addSeparator();
     viewMenu->addAction(m_splitViewAction);
     viewMenu->addAction(m_focusLocationAction);
     viewMenu->addAction(m_switchPaneAction);
@@ -605,8 +625,10 @@ void MainWindow::createNavigationBar()
     connect(m_forwardAction, &QAction::triggered, this,
             [this] { m_paneWorkspace->activePane()->requestForward(); });
     connect(m_upAction, &QAction::triggered, this, &MainWindow::requestParentDirectory);
-    connect(m_refreshAction, &QAction::triggered, this,
-            [this] { m_paneWorkspace->activePane()->requestRefresh(); });
+    connect(m_refreshAction, &QAction::triggered, this, [this] {
+        m_paneWorkspace->activePane()->requestRefresh();
+        refreshStorage();
+    });
 
     navigationBar->addSeparator();
     navigationBar->addAction(m_splitViewAction);
@@ -630,25 +652,9 @@ void MainWindow::createPlacesDock()
     m_serverProfileErrorLabel->setVisible(false);
     layout->addWidget(m_serverProfileErrorLabel);
 
-    auto* const storageHeader = new QHBoxLayout;
     auto* const storageLabel = new QLabel(tr("Storage"), container);
     storageLabel->setObjectName(QStringLiteral("storageHeaderLabel"));
-    m_storageRefreshAction =
-        new QAction(QIcon::fromTheme(QStringLiteral("view-refresh"),
-                                     style()->standardIcon(QStyle::SP_BrowserReload)),
-                    tr("Refresh storage"), this);
-    m_storageRefreshAction->setObjectName(QStringLiteral("storageRefreshAction"));
-    m_storageRefreshAction->setToolTip(
-        tr("Refresh local and connected-server volumes and external devices"));
-    auto* const storageRefreshButton = new QToolButton(container);
-    storageRefreshButton->setObjectName(QStringLiteral("storageRefreshButton"));
-    storageRefreshButton->setDefaultAction(m_storageRefreshAction);
-    storageRefreshButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    storageHeader->addWidget(storageLabel);
-    storageHeader->addStretch();
-    storageHeader->addWidget(storageRefreshButton);
-    layout->addLayout(storageHeader);
-    connect(m_storageRefreshAction, &QAction::triggered, this, &MainWindow::refreshStorage);
+    layout->addWidget(storageLabel);
 
     m_navigationTree = new NavigationTree(container);
     layout->addWidget(m_navigationTree);
@@ -723,6 +729,8 @@ void MainWindow::createPlacesDock()
 
     placesDock->setWidget(container);
     addDockWidget(Qt::LeftDockWidgetArea, placesDock);
+    m_placesDockAction = placesDock->toggleViewAction();
+    m_placesDockAction->setObjectName(QStringLiteral("placesDockAction"));
     loadServerProfiles();
 }
 
@@ -741,7 +749,6 @@ void MainWindow::refreshStorage()
         m_remoteStorageRequestConnectionGeneration = m_connectionGeneration;
         emit remoteStorageRequested(m_remoteStorageRequestId);
     }
-    updateStorageRefreshAction();
 }
 
 void MainWindow::probeStorage()
@@ -790,7 +797,6 @@ void MainWindow::handleLocalStorageVolumes(const QList<rfm::core::StorageVolume>
     m_volumeOperationsAwaitingRefresh.clear();
     m_localStorageVolumes = volumes;
     m_navigationTree->setStorageVolumes(volumes);
-    updateStorageRefreshAction();
 }
 
 void MainWindow::handleLocalStorageProbe(quint64 requestId, const QByteArray& fingerprint)
@@ -833,7 +839,6 @@ void MainWindow::handleRemoteStorageVolumes(quint64 requestId,
         m_remoteStorageVolumes = volumes;
         m_navigationTree->setRemoteStorageVolumes(activeRemoteMachineId(), volumes);
     }
-    updateStorageRefreshAction();
 }
 
 void MainWindow::handleRemoteStorageError(quint64 requestId, const QString& error)
@@ -859,7 +864,6 @@ void MainWindow::handleRemoteStorageError(quint64 requestId, const QString& erro
         }
     }
     m_remoteVolumeOperationsAwaitingRefresh.clear();
-    updateStorageRefreshAction();
     if (m_connected && !error.isEmpty()) {
         statusBar()->showMessage(tr("Unable to refresh server storage: %1").arg(error), 8000);
     }
@@ -897,14 +901,6 @@ void MainWindow::handleRemoteStorageProbeError(quint64 requestId, const QString&
     m_remoteStorageProbeConnectionGeneration = 0;
     if (m_connected && !error.isEmpty()) {
         statusBar()->showMessage(tr("Unable to probe server storage: %1").arg(error), 8000);
-    }
-}
-
-void MainWindow::updateStorageRefreshAction()
-{
-    if (m_storageRefreshAction != nullptr) {
-        m_storageRefreshAction->setEnabled(!m_localStorageRefreshPending &&
-                                           !m_remoteStorageRefreshPending);
     }
 }
 
@@ -1104,6 +1100,8 @@ void MainWindow::createOperationDock()
     m_operationPanel = new OperationPanel(operationDock);
     operationDock->setWidget(m_operationPanel);
     addDockWidget(Qt::BottomDockWidgetArea, operationDock);
+    m_operationDockAction = operationDock->toggleViewAction();
+    m_operationDockAction->setObjectName(QStringLiteral("operationDockAction"));
 
     connect(m_operationPanel, &OperationPanel::pauseRequested, this,
             &MainWindow::pauseTransferRequested);
@@ -1387,7 +1385,6 @@ void MainWindow::resetDisconnectedUi()
     }
     m_remoteVolumeOperations.clear();
     m_remoteVolumeOperationsAwaitingRefresh.clear();
-    updateStorageRefreshAction();
     clearInternalClipboard();
     updatePaneTransferContexts();
     stopAutomaticRefresh();
@@ -1459,25 +1456,45 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
     menu.exec(globalPosition);
 }
 
-void MainWindow::createRemoteDirectory()
+void MainWindow::createDirectory()
 {
+    FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    const bool local = pane->source() == rfm::core::FileSource::Local;
+    const bool remote = pane->source() == rfm::core::FileSource::Ssh && m_connected &&
+                        pane->currentLocation().machineId == activeRemoteMachineId();
+    if (!local && !remote) {
+        return;
+    }
     bool accepted = false;
     const QString name = QInputDialog::getText(this, tr("New folder"), tr("Folder name:"),
                                                QLineEdit::Normal, {}, &accepted);
     if (!accepted) {
         return;
     }
-    if (!rfm::core::RemotePath::isValidName(name)) {
+    const bool validName = local ? rfm::core::LocalFileSystem::isValidName(name)
+                                 : rfm::core::RemotePath::isValidName(name);
+    if (!validName) {
         QMessageBox::warning(this, tr("Invalid folder name"),
-                             tr("The name must not be empty, '.', '..', or contain '/'."));
+                             tr("The name must not be empty, '.', '..', or contain a path "
+                                "separator or another character invalid on this platform."));
+        return;
+    }
+    const quint64 id = nextOperationId();
+    const quint64 paneId = m_paneWorkspace->paneId(pane);
+    if (local) {
+        m_localOperationContexts.insert(id,
+                                        {paneId, paneId, pane->currentPath(), pane->currentPath()});
+        setPaneBusy(paneId, true, tr("Creating folder %1…").arg(name));
+        emit localFileOperationRequested({id,
+                                          rfm::core::LocalFileOperationKind::CreateDirectory,
+                                          pane->currentPath(),
+                                          {},
+                                          name});
         return;
     }
     setBusy(true, tr("Creating folder %1…").arg(name));
-    const quint64 id = nextOperationId();
-    const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
-    m_operationContexts.insert(id, {paneId, paneId, m_paneWorkspace->activePane()->currentPath(),
-                                    m_paneWorkspace->activePane()->currentPath()});
-    emit createDirectoryRequested(id, m_paneWorkspace->activePane()->currentPath(), name);
+    m_operationContexts.insert(id, {paneId, paneId, pane->currentPath(), pane->currentPath()});
+    emit createDirectoryRequested(id, pane->currentPath(), name);
 }
 
 void MainWindow::renameSelectedEntry()
@@ -1486,23 +1503,44 @@ void MainWindow::renameSelectedEntry()
     if (selection.size() != 1) {
         return;
     }
-    const QString oldName = rfm::core::RemotePath::fileName(selection.constFirst().path);
+    FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    const bool local = pane->source() == rfm::core::FileSource::Local;
+    const bool remote = pane->source() == rfm::core::FileSource::Ssh && m_connected &&
+                        pane->currentLocation().machineId == activeRemoteMachineId();
+    if (!local && !remote) {
+        return;
+    }
+    const QString oldName = local ? QFileInfo(selection.constFirst().path).fileName()
+                                  : rfm::core::RemotePath::fileName(selection.constFirst().path);
     bool accepted = false;
     const QString newName = QInputDialog::getText(this, tr("Rename"), tr("New name:"),
                                                   QLineEdit::Normal, oldName, &accepted);
     if (!accepted) {
         return;
     }
-    if (!rfm::core::RemotePath::isValidName(newName)) {
+    const bool validName = local ? rfm::core::LocalFileSystem::isValidName(newName)
+                                 : rfm::core::RemotePath::isValidName(newName);
+    if (!validName) {
         QMessageBox::warning(this, tr("Invalid name"),
-                             tr("The name must not be empty, '.', '..', or contain '/'."));
+                             tr("The name must not be empty, '.', '..', or contain a path "
+                                "separator or another character invalid on this platform."));
+        return;
+    }
+    const quint64 id = nextOperationId();
+    const quint64 paneId = m_paneWorkspace->paneId(pane);
+    if (local) {
+        m_localOperationContexts.insert(id,
+                                        {paneId, paneId, pane->currentPath(), pane->currentPath()});
+        setPaneBusy(paneId, true, tr("Renaming %1…").arg(oldName));
+        emit localFileOperationRequested({id,
+                                          rfm::core::LocalFileOperationKind::Rename,
+                                          pane->currentPath(),
+                                          {selection.constFirst().path},
+                                          newName});
         return;
     }
     setBusy(true, tr("Renaming %1…").arg(oldName));
-    const quint64 id = nextOperationId();
-    const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
-    m_operationContexts.insert(id, {paneId, paneId, m_paneWorkspace->activePane()->currentPath(),
-                                    m_paneWorkspace->activePane()->currentPath()});
+    m_operationContexts.insert(id, {paneId, paneId, pane->currentPath(), pane->currentPath()});
     emit renameRequested(id, selection.constFirst().path, newName);
 }
 
@@ -1710,8 +1748,16 @@ void MainWindow::removeSelectedEntries()
     }
     QStringList names;
     bool recursive = false;
+    const FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    const bool local = pane->source() == rfm::core::FileSource::Local;
+    const bool remote = pane->source() == rfm::core::FileSource::Ssh && m_connected &&
+                        pane->currentLocation().machineId == activeRemoteMachineId();
+    if (!local && !remote) {
+        return;
+    }
     for (const auto& item : selection) {
-        names.push_back(rfm::core::RemotePath::fileName(item.path));
+        names.push_back(local ? QFileInfo(item.path).fileName()
+                              : rfm::core::RemotePath::fileName(item.path));
         recursive = recursive || item.directory;
     }
     const QString warning =
@@ -1725,10 +1771,22 @@ void MainWindow::removeSelectedEntries()
                              QMessageBox::Cancel) != QMessageBox::Yes) {
         return;
     }
-    setBusy(true, tr("Deleting %1 item(s)…").arg(selection.size()));
     const quint64 id = nextOperationId();
-    const quint64 paneId = m_paneWorkspace->paneId(m_paneWorkspace->activePane());
-    m_operationContexts.insert(id, {paneId, 0, m_paneWorkspace->activePane()->currentPath(), {}});
+    const quint64 paneId = m_paneWorkspace->paneId(pane);
+    if (local) {
+        QStringList paths;
+        paths.reserve(selection.size());
+        for (const rfm::core::RemoteSelection& item : selection) {
+            paths.push_back(item.path);
+        }
+        m_localOperationContexts.insert(id, {paneId, 0, pane->currentPath(), {}});
+        setPaneBusy(paneId, true, tr("Deleting %1 item(s)…").arg(selection.size()));
+        emit localFileOperationRequested(
+            {id, rfm::core::LocalFileOperationKind::Remove, pane->currentPath(), paths, {}});
+        return;
+    }
+    setBusy(true, tr("Deleting %1 item(s)…").arg(selection.size()));
+    m_operationContexts.insert(id, {paneId, 0, pane->currentPath(), {}});
     emit removeRequested(id, selection, recursive);
 }
 
@@ -1966,6 +2024,57 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
             }
         }
         scheduleVisiblePanesForPaths(affectedPaths, true);
+    }
+}
+
+void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperationResult& result)
+{
+    const OperationContext context = m_localOperationContexts.take(result.id);
+    if (context.sourcePaneId == 0) {
+        return;
+    }
+    setPaneBusy(context.sourcePaneId, false);
+
+    QStringList failures;
+    bool anySuccess = false;
+    QStringList selectionNames;
+    for (const rfm::core::LocalFileOperationItemResult& item : result.items) {
+        if (item.success) {
+            anySuccess = true;
+            if (!item.destination.isEmpty() &&
+                (result.kind == rfm::core::LocalFileOperationKind::CreateDirectory ||
+                 result.kind == rfm::core::LocalFileOperationKind::Rename)) {
+                selectionNames.push_back(QFileInfo(item.destination).fileName());
+            }
+            continue;
+        }
+        const QString label = !item.source.isEmpty() && !item.destination.isEmpty()
+                                  ? tr("%1 → %2").arg(item.source, item.destination)
+                                  : (item.source.isEmpty() ? item.destination : item.source);
+        failures.push_back(label.isEmpty() ? item.error : tr("%1: %2").arg(label, item.error));
+    }
+    if (!failures.isEmpty()) {
+        QMessageBox::warning(this, tr("Local operation incomplete"), failures.join(QChar{'\n'}));
+    }
+    statusBar()->showMessage(failures.isEmpty() ? tr("Local operation completed")
+                                                : tr("Local operation completed with errors"),
+                             5000);
+    if (!anySuccess || context.sourceDirectory.isEmpty()) {
+        return;
+    }
+
+    requestLocalTreeDirectoryRefresh(context.sourceDirectory);
+    for (const quint64 paneId : m_paneWorkspace->visiblePaneIds()) {
+        FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+        if (pane->source() != rfm::core::FileSource::Local ||
+            !rfm::core::localPathIsAtOrBelow(pane->currentPath(), context.sourceDirectory) ||
+            !rfm::core::localPathIsAtOrBelow(context.sourceDirectory, pane->currentPath())) {
+            continue;
+        }
+        if (!selectionNames.isEmpty()) {
+            pane->setPendingSelectionNames(selectionNames);
+        }
+        schedulePaneRefresh(paneId, true);
     }
 }
 
@@ -2215,9 +2324,20 @@ void MainWindow::requestLocalDirectoryListing(quint64 paneId, const QString& pat
     }
     const quint64 navigationGeneration =
         treeRequest ? 0 : beginPaneNavigation(paneId, rfm::core::FileSource::Local);
+    if (treeRequest) {
+        for (auto iterator = m_localDirectoryRequests.begin();
+             iterator != m_localDirectoryRequests.end();) {
+            if (iterator->treeRequest && rfm::core::localPathIsAtOrBelow(iterator->path, path) &&
+                rfm::core::localPathIsAtOrBelow(path, iterator->path)) {
+                iterator = m_localDirectoryRequests.erase(iterator);
+            } else {
+                ++iterator;
+            }
+        }
+    }
     const quint64 requestId = nextOperationId();
     m_localDirectoryRequests.insert(requestId,
-                                    {paneId, navigation, treeRequest, navigationGeneration});
+                                    {paneId, navigation, treeRequest, navigationGeneration, path});
     if (paneId != 0) {
         m_expectedLocalDirectoryRequests.insert(paneId, requestId);
         if (showBusy) {
@@ -2225,6 +2345,13 @@ void MainWindow::requestLocalDirectoryListing(quint64 paneId, const QString& pat
         }
     }
     emit localDirectoryRequested(requestId, path);
+}
+
+void MainWindow::requestLocalTreeDirectoryRefresh(const QString& path)
+{
+    if (m_navigationTree->hasLoadedLocalDirectory(path)) {
+        requestLocalDirectoryListing(0, path, false, PaneNavigation::Refresh, true);
+    }
 }
 
 void MainWindow::requestRemoteTreeDirectory(const QString& profileId, const QString& path)
@@ -2278,6 +2405,9 @@ void MainWindow::handleLocalDirectoryListed(quint64 requestId, const QString& pa
     FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId);
     if (pane == nullptr || pane->isHidden()) {
         return;
+    }
+    if (m_navigationTree->hasLoadedLocalDirectory(path)) {
+        m_navigationTree->setLocalDirectory(path, entries);
     }
     const rfm::core::BrowserLocation location{rfm::core::FileSource::Local,
                                               QString::fromLatin1(rfm::core::LocalMachineId), path};
@@ -2747,13 +2877,18 @@ void MainWindow::updateOperationActions()
     const FileBrowserPane* const activePane = m_paneWorkspace->activePane();
     const bool locationAvailable =
         activePane->hasLocation() && !m_busy && !m_busyPanes.contains(paneId);
-    const bool available = locationAvailable && m_connected &&
-                           activePane->source() == rfm::core::FileSource::Ssh &&
-                           activePane->currentLocation().machineId == activeRemoteMachineId();
-    m_createDirectoryAction->setEnabled(available);
-    m_renameAction->setEnabled(available && count == 1);
-    m_moveAction->setEnabled(available && count > 0);
-    m_copyAction->setEnabled(available && count > 0);
+    const QFileInfo localDirectory(activePane->currentPath());
+    const bool localOperationAvailable = locationAvailable &&
+                                         activePane->source() == rfm::core::FileSource::Local &&
+                                         localDirectory.isDir() && localDirectory.isWritable();
+    const bool remoteOperationAvailable =
+        locationAvailable && m_connected && activePane->source() == rfm::core::FileSource::Ssh &&
+        activePane->currentLocation().machineId == activeRemoteMachineId();
+    const bool mutationAvailable = localOperationAvailable || remoteOperationAvailable;
+    m_createDirectoryAction->setEnabled(mutationAvailable);
+    m_renameAction->setEnabled(mutationAvailable && count == 1);
+    m_moveAction->setEnabled(remoteOperationAvailable && count > 0);
+    m_copyAction->setEnabled(remoteOperationAvailable && count > 0);
     FileBrowserPane* const otherPane = m_paneWorkspace->otherVisiblePane(paneId);
     const quint64 otherPaneId = m_paneWorkspace->paneId(otherPane);
     const bool distinctDirectories =
@@ -2764,19 +2899,19 @@ void MainWindow::updateOperationActions()
         otherPane != nullptr && pathsUseSameConvention(m_paneWorkspace->activePane()->currentPath(),
                                                        otherPane->currentPath());
     const bool otherPaneAvailable =
-        available && count > 0 && otherPane != nullptr && !otherPane->currentPath().isEmpty() &&
-        otherPane->source() == rfm::core::FileSource::Ssh &&
+        remoteOperationAvailable && count > 0 && otherPane != nullptr &&
+        !otherPane->currentPath().isEmpty() && otherPane->source() == rfm::core::FileSource::Ssh &&
         otherPane->currentLocation().machineId == activeRemoteMachineId() &&
         !m_busyPanes.contains(otherPaneId) && distinctDirectories && compatiblePathConventions;
     m_moveToOtherPaneAction->setEnabled(otherPaneAvailable);
     m_copyToOtherPaneAction->setEnabled(otherPaneAvailable);
-    m_removeAction->setEnabled(available && count > 0);
-    m_uploadAction->setEnabled(available);
-    m_downloadAction->setEnabled(available && count > 0);
-    m_clipboardCopyAction->setEnabled(available && count > 0);
-    m_clipboardCutAction->setEnabled(available && count > 0);
+    m_removeAction->setEnabled(mutationAvailable && count > 0);
+    m_uploadAction->setEnabled(remoteOperationAvailable);
+    m_downloadAction->setEnabled(remoteOperationAvailable && count > 0);
+    m_clipboardCopyAction->setEnabled(remoteOperationAvailable && count > 0);
+    m_clipboardCutAction->setEnabled(remoteOperationAvailable && count > 0);
     bool pasteAvailable = false;
-    if (available && m_internalClipboard.content().has_value()) {
+    if (remoteOperationAvailable && m_internalClipboard.content().has_value()) {
         pasteAvailable =
             rfm::core::validateInternalTransfer(
                 m_internalClipboard.content()->payload, m_applicationInstanceId,

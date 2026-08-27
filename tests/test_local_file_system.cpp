@@ -52,6 +52,9 @@ class LocalFileSystemTest final : public QObject
   private slots:
     void listsOnlyImmediateEntriesFromTemporaryDirectory();
     void rejectsMissingDirectory();
+    void createsLocalFoldersWithValidation();
+    void renamesLocalFilesAndFoldersWithValidation();
+    void removesLocalSelectionsRecursivelyWithoutFollowingSymlinks();
     void classifiesInternalStorage();
     void classifiesDirectUsbStorage();
     void classifiesExternalStorageIndependentlyFromRemovableFlag();
@@ -113,6 +116,169 @@ void LocalFileSystemTest::rejectsMissingDirectory()
         rfm::core::LocalFileSystem::listDirectory(missing);
     QVERIFY(!result.succeeded());
     QVERIFY(!result.error.isEmpty());
+}
+
+void LocalFileSystemTest::createsLocalFoldersWithValidation()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+
+    const rfm::core::LocalFileOperationResult created =
+        rfm::core::LocalFileSystem::executeOperation(
+            {1,
+             rfm::core::LocalFileOperationKind::CreateDirectory,
+             temporary.path(),
+             {},
+             QStringLiteral("created")});
+    QVERIFY2(created.allSucceeded(), qPrintable(created.items.constFirst().error));
+    QVERIFY(QFileInfo(QDir(temporary.path()).filePath(QStringLiteral("created"))).isDir());
+
+    const rfm::core::LocalFileOperationResult duplicate =
+        rfm::core::LocalFileSystem::executeOperation(
+            {2,
+             rfm::core::LocalFileOperationKind::CreateDirectory,
+             temporary.path(),
+             {},
+             QStringLiteral("created")});
+    QVERIFY(!duplicate.allSucceeded());
+    QVERIFY(!duplicate.items.constFirst().error.isEmpty());
+
+    const rfm::core::LocalFileOperationResult traversal =
+        rfm::core::LocalFileSystem::executeOperation(
+            {3,
+             rfm::core::LocalFileOperationKind::CreateDirectory,
+             temporary.path(),
+             {},
+             QStringLiteral("../escaped")});
+    QVERIFY(!traversal.allSucceeded());
+    QVERIFY(!QFileInfo(QDir(temporary.path()).filePath(QStringLiteral("../escaped"))).exists());
+    QVERIFY(!rfm::core::LocalFileSystem::isValidName(QStringLiteral("child/name")));
+#ifdef Q_OS_WIN
+    QVERIFY(!rfm::core::LocalFileSystem::isValidName(QStringLiteral("child\\name")));
+#else
+    QVERIFY(rfm::core::LocalFileSystem::isValidName(QStringLiteral("child\\name")));
+#endif
+    QVERIFY(!rfm::core::LocalFileSystem::isValidName(QStringLiteral("..")));
+    QVERIFY(!rfm::core::LocalFileSystem::isValidName(QStringLiteral("   ")));
+}
+
+void LocalFileSystemTest::renamesLocalFilesAndFoldersWithValidation()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir parent(temporary.path());
+    QFile file(parent.filePath(QStringLiteral("file.txt")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    QVERIFY(parent.mkdir(QStringLiteral("folder")));
+
+    const auto rename = [&parent](quint64 id, const QString& source, const QString& newName) {
+        return rfm::core::LocalFileSystem::executeOperation(
+            {id,
+             rfm::core::LocalFileOperationKind::Rename,
+             parent.absolutePath(),
+             {source},
+             newName});
+    };
+    const rfm::core::LocalFileOperationResult renamedFile =
+        rename(1, parent.filePath(QStringLiteral("file.txt")), QStringLiteral("renamed.txt"));
+    QVERIFY2(renamedFile.allSucceeded(), qPrintable(renamedFile.items.constFirst().error));
+    QVERIFY(QFileInfo(parent.filePath(QStringLiteral("renamed.txt"))).isFile());
+
+    const rfm::core::LocalFileOperationResult renamedFolder =
+        rename(2, parent.filePath(QStringLiteral("folder")), QStringLiteral("renamed-folder"));
+    QVERIFY2(renamedFolder.allSucceeded(), qPrintable(renamedFolder.items.constFirst().error));
+    QVERIFY(QFileInfo(parent.filePath(QStringLiteral("renamed-folder"))).isDir());
+
+    QFile collision(parent.filePath(QStringLiteral("collision.txt")));
+    QVERIFY(collision.open(QIODevice::WriteOnly));
+    collision.close();
+    const rfm::core::LocalFileOperationResult duplicate =
+        rename(3, parent.filePath(QStringLiteral("renamed.txt")), QStringLiteral("collision.txt"));
+    QVERIFY(!duplicate.allSucceeded());
+    QVERIFY(QFileInfo(parent.filePath(QStringLiteral("renamed.txt"))).exists());
+
+    const rfm::core::LocalFileOperationResult traversal =
+        rename(4, parent.filePath(QStringLiteral("renamed.txt")), QStringLiteral("../escaped"));
+    QVERIFY(!traversal.allSucceeded());
+    QVERIFY(!QFileInfo(parent.filePath(QStringLiteral("../escaped"))).exists());
+
+    const QString linkPath = parent.filePath(QStringLiteral("file-link"));
+    if (QFile::link(parent.filePath(QStringLiteral("renamed.txt")), linkPath)) {
+        const rfm::core::LocalFileOperationResult renamedLink =
+            rename(5, linkPath, QStringLiteral("renamed-link"));
+        QVERIFY2(renamedLink.allSucceeded(), qPrintable(renamedLink.items.constFirst().error));
+        QVERIFY(QFileInfo(parent.filePath(QStringLiteral("renamed-link"))).exists() ||
+                QFileInfo(parent.filePath(QStringLiteral("renamed-link"))).isSymbolicLink());
+        QVERIFY(QFileInfo(parent.filePath(QStringLiteral("renamed.txt"))).exists());
+    }
+
+    QTemporaryDir outside;
+    QVERIFY(outside.isValid());
+    QFile outsideFile(QDir(outside.path()).filePath(QStringLiteral("outside.txt")));
+    QVERIFY(outsideFile.open(QIODevice::WriteOnly));
+    outsideFile.close();
+    const rfm::core::LocalFileOperationResult outsideSource =
+        rename(6, outsideFile.fileName(), QStringLiteral("stolen.txt"));
+    QVERIFY(!outsideSource.allSucceeded());
+    QVERIFY(outsideFile.exists());
+}
+
+void LocalFileSystemTest::removesLocalSelectionsRecursivelyWithoutFollowingSymlinks()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir parent(temporary.path());
+    QFile first(parent.filePath(QStringLiteral("first.txt")));
+    QVERIFY(first.open(QIODevice::WriteOnly));
+    first.close();
+    QVERIFY(parent.mkdir(QStringLiteral("empty")));
+    QVERIFY(parent.mkpath(QStringLiteral("recursive/nested")));
+    QFile nested(parent.filePath(QStringLiteral("recursive/nested/data.txt")));
+    QVERIFY(nested.open(QIODevice::WriteOnly));
+    nested.close();
+
+    const rfm::core::LocalFileOperationResult removed =
+        rfm::core::LocalFileSystem::executeOperation(
+            {1,
+             rfm::core::LocalFileOperationKind::Remove,
+             parent.absolutePath(),
+             {first.fileName(), parent.filePath(QStringLiteral("empty")),
+              parent.filePath(QStringLiteral("recursive"))},
+             {}});
+    QVERIFY2(removed.allSucceeded(), qPrintable(removed.items.constFirst().error));
+    QVERIFY(!QFileInfo(first.fileName()).exists());
+    QVERIFY(!QFileInfo(parent.filePath(QStringLiteral("empty"))).exists());
+    QVERIFY(!QFileInfo(parent.filePath(QStringLiteral("recursive"))).exists());
+
+    QVERIFY(parent.mkpath(QStringLiteral("target")));
+    QFile target(parent.filePath(QStringLiteral("target/survives.txt")));
+    QVERIFY(target.open(QIODevice::WriteOnly));
+    target.close();
+    QVERIFY(parent.mkdir(QStringLiteral("with-link")));
+    const QString linkPath = parent.filePath(QStringLiteral("with-link/target-link"));
+    if (!QFile::link(parent.filePath(QStringLiteral("target")), linkPath)) {
+        QSKIP("Symbolic links are not available in this test environment.");
+    }
+    const rfm::core::LocalFileOperationResult removedLinkTree =
+        rfm::core::LocalFileSystem::executeOperation(
+            {2,
+             rfm::core::LocalFileOperationKind::Remove,
+             parent.absolutePath(),
+             {parent.filePath(QStringLiteral("with-link"))},
+             {}});
+    QVERIFY2(removedLinkTree.allSucceeded(), qPrintable(removedLinkTree.items.constFirst().error));
+    QVERIFY(QFileInfo(target.fileName()).exists());
+    QVERIFY(!QFileInfo(linkPath).exists());
+
+    const rfm::core::LocalFileOperationResult missing =
+        rfm::core::LocalFileSystem::executeOperation({3,
+                                                      rfm::core::LocalFileOperationKind::Remove,
+                                                      parent.absolutePath(),
+                                                      {parent.filePath(QStringLiteral("missing"))},
+                                                      {}});
+    QVERIFY(!missing.allSucceeded());
+    QVERIFY(!missing.items.constFirst().error.isEmpty());
 }
 
 void LocalFileSystemTest::classifiesInternalStorage()

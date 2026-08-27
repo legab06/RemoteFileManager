@@ -18,6 +18,7 @@ class NavigationTreeTest final : public QObject
   private slots:
     void buildsMachinesProfilesAndMachineScopedVolumes();
     void loadsLocalChildrenOnlyWhenExpanded();
+    void refreshesDirectoryChildrenWithoutLosingValidTreeState();
     void exposesOnlyTheActiveServerFileTree();
     void omitsEmptyExternalDevicesCategory();
     void deduplicatesAndNavigatesExternalDevice();
@@ -153,12 +154,16 @@ void NavigationTreeTest::loadsLocalChildrenOnlyWhenExpanded()
         childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"));
     QVERIFY(volumes != nullptr);
     QTreeWidgetItem* const fixture = volumes->child(0);
+    QVERIFY(!navigation.hasLoadedLocalDirectory(temporary.path()));
+    QVERIFY(!navigation.hasLoadedLocalDirectory(
+        QDir(temporary.path()).filePath(QStringLiteral("not-represented"))));
     QCOMPARE(fixture->childCount(), 1);
     QCOMPARE(fixture->child(0)->text(0), QStringLiteral("Expand to load"));
 
     QSignalSpy expansion(&navigation, &rfm::app::NavigationTree::localDirectoryExpansionRequested);
     fixture->setExpanded(true);
     QCOMPARE(expansion.size(), 1);
+    QVERIFY(navigation.hasLoadedLocalDirectory(temporary.path()));
     QCOMPARE(expansion.constFirst().constFirst().toString(), QDir(temporary.path()).absolutePath());
 
     navigation.setLocalDirectory(temporary.path(),
@@ -171,6 +176,43 @@ void NavigationTreeTest::loadsLocalChildrenOnlyWhenExpanded()
     QVERIFY(!fixture->isExpanded());
     fixture->setExpanded(true);
     QCOMPARE(expansion.size(), 1);
+}
+
+void NavigationTreeTest::refreshesDirectoryChildrenWithoutLosingValidTreeState()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::NavigationTree navigation;
+    navigation.setStorageVolumes({storageVolume(QStringLiteral("Fixture"), temporary.path(),
+                                                rfm::core::StorageKind::Internal)});
+    QTreeWidgetItem* const volumes =
+        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"));
+    QVERIFY(volumes != nullptr);
+    QTreeWidgetItem* const fixture = volumes->child(0);
+    fixture->setExpanded(true);
+    navigation.setLocalDirectory(temporary.path(),
+                                 {{QStringLiteral("kept"), 0, {}, true, false},
+                                  {QStringLiteral("removed"), 0, {}, true, false}});
+
+    QTreeWidgetItem* const kept = childNamed(fixture, QStringLiteral("kept"));
+    QVERIFY(kept != nullptr);
+    kept->setExpanded(true);
+    navigation.setLocalDirectory(QDir(temporary.path()).filePath(QStringLiteral("kept")),
+                                 {{QStringLiteral("nested"), 0, {}, true, false}});
+    QTreeWidgetItem* const nested = childNamed(kept, QStringLiteral("nested"));
+    QVERIFY(nested != nullptr);
+    navigation.tree()->setCurrentItem(nested);
+
+    navigation.setLocalDirectory(temporary.path(), {{QStringLiteral("added"), 0, {}, true, false},
+                                                    {QStringLiteral("kept"), 0, {}, true, false}});
+
+    QCOMPARE(childNamed(fixture, QStringLiteral("kept")), kept);
+    QCOMPARE(childNamed(kept, QStringLiteral("nested")), nested);
+    QVERIFY(childNamed(fixture, QStringLiteral("added")) != nullptr);
+    QVERIFY(childNamed(fixture, QStringLiteral("removed")) == nullptr);
+    QVERIFY(fixture->isExpanded());
+    QVERIFY(kept->isExpanded());
+    QCOMPARE(navigation.tree()->currentItem(), nested);
 }
 
 void NavigationTreeTest::exposesOnlyTheActiveServerFileTree()
