@@ -16,6 +16,7 @@ add_library(
     core/ServerSideCopyJob.cpp
     core/TransferDirectoryJob.cpp
     core/TransferFileJob.cpp
+    core/TransferCoordinator.cpp
     core/TransferQueue.cpp
     core/VolumeService.cpp
     ssh/LibsshRuntime.cpp
@@ -28,6 +29,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/RemoteMoveSafety.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/Storage.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/SecurePassword.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/TransferCoordinator.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageScanner.hpp

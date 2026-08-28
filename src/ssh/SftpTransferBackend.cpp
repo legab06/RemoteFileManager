@@ -51,8 +51,25 @@ rfm::core::TransferBackendError map(int e)
         return rfm::core::TransferBackendError::Unsupported;
     return rfm::core::TransferBackendError::Io;
 }
+
+bool transportFatal(ssh_session session)
+{
+    if (session == nullptr || ssh_is_connected(session) == 0) {
+        return true;
+    }
+    const int status = ssh_get_status(session);
+    if ((status & (SSH_CLOSED | SSH_CLOSED_ERROR)) != 0) {
+        return true;
+    }
+    const int error = ssh_get_error_code(session);
+    // SFTP may report a generic status even though the underlying channel operation
+    // has already marked the SSH session as non-recoverable.
+    return error != SSH_NO_ERROR && error != SSH_REQUEST_DENIED && error != SSH_EINTR;
+}
 } // namespace
-SftpTransferBackend::SftpTransferBackend(sftp_session s) : m_session(s) {}
+SftpTransferBackend::SftpTransferBackend(ssh_session sshSession, sftp_session sftpSession)
+    : m_sshSession(sshSession), m_sftpSession(sftpSession)
+{}
 SftpTransferBackend::~SftpTransferBackend()
 {
     for (auto h : m_handles)
@@ -60,13 +77,24 @@ SftpTransferBackend::~SftpTransferBackend()
     for (auto h : m_directoryHandles)
         sftp_closedir(h);
 }
+bool SftpTransferBackend::connectionAlive() const
+{
+    return !m_transportFatal && m_sftpSession != nullptr && !transportFatal(m_sshSession);
+}
 rfm::core::TransferBackendResult SftpTransferBackend::result() const
 {
-    return {map(sftp_get_error(m_session)), {}};
+    rfm::core::TransferBackendError error = map(sftp_get_error(m_sftpSession));
+    m_transportFatal = m_transportFatal ||
+                       error == rfm::core::TransferBackendError::ConnectionLost ||
+                       transportFatal(m_sshSession);
+    if (m_transportFatal) {
+        error = rfm::core::TransferBackendError::ConnectionLost;
+    }
+    return {error, {}};
 }
 rfm::core::TransferStatResult SftpTransferBackend::stat(const QString& p)
 {
-    auto a = sftp_lstat(m_session, p.toUtf8().constData());
+    auto a = sftp_lstat(m_sftpSession, p.toUtf8().constData());
     if (!a)
         return {result(), {}};
     const rfm::core::TransferNodeType type = nodeType(a);
@@ -76,7 +104,7 @@ rfm::core::TransferStatResult SftpTransferBackend::stat(const QString& p)
 }
 rfm::core::TransferBackendResult SftpTransferBackend::openRead(const QString& p, quint64& id)
 {
-    auto h = sftp_open(m_session, p.toUtf8().constData(), O_RDONLY, 0);
+    auto h = sftp_open(m_sftpSession, p.toUtf8().constData(), O_RDONLY, 0);
     if (!h)
         return result();
     id = m_nextHandle++;
@@ -86,7 +114,7 @@ rfm::core::TransferBackendResult SftpTransferBackend::openRead(const QString& p,
 rfm::core::TransferBackendResult SftpTransferBackend::openWriteExclusive(const QString& p,
                                                                          quint64& id)
 {
-    auto h = sftp_open(m_session, p.toUtf8().constData(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+    auto h = sftp_open(m_sftpSession, p.toUtf8().constData(), O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (!h)
         return result();
     id = m_nextHandle++;
@@ -125,25 +153,25 @@ rfm::core::TransferBackendResult SftpTransferBackend::close(quint64 id)
 }
 rfm::core::TransferBackendResult SftpTransferBackend::createDirectory(const QString& p)
 {
-    return sftp_mkdir(m_session, p.toUtf8().constData(), 0755) == SSH_OK
+    return sftp_mkdir(m_sftpSession, p.toUtf8().constData(), 0755) == SSH_OK
                ? rfm::core::TransferBackendResult{}
                : result();
 }
 rfm::core::TransferBackendResult SftpTransferBackend::rename(const QString& a, const QString& b)
 {
-    return sftp_rename(m_session, a.toUtf8().constData(), b.toUtf8().constData()) == SSH_OK
+    return sftp_rename(m_sftpSession, a.toUtf8().constData(), b.toUtf8().constData()) == SSH_OK
                ? rfm::core::TransferBackendResult{}
                : result();
 }
 rfm::core::TransferBackendResult SftpTransferBackend::remove(const QString& p)
 {
-    return sftp_unlink(m_session, p.toUtf8().constData()) == SSH_OK
+    return sftp_unlink(m_sftpSession, p.toUtf8().constData()) == SSH_OK
                ? rfm::core::TransferBackendResult{}
                : result();
 }
 rfm::core::TransferBackendResult SftpTransferBackend::openDirectory(const QString& p, quint64& id)
 {
-    auto directory = sftp_opendir(m_session, p.toUtf8().constData());
+    auto directory = sftp_opendir(m_sftpSession, p.toUtf8().constData());
     if (!directory)
         return result();
     id = m_nextHandle++;
@@ -158,14 +186,14 @@ SftpTransferBackend::readDirectory(quint64 id,
     if (!directory)
         return {rfm::core::TransferBackendError::Failure,
                 QStringLiteral("Invalid remote directory handle.")};
-    auto attributes = sftp_readdir(m_session, directory);
+    auto attributes = sftp_readdir(m_sftpSession, directory);
     if (!attributes) {
         entry.reset();
         return sftp_dir_eof(directory) != 0 ? rfm::core::TransferBackendResult{} : result();
     }
     const rfm::core::TransferNodeType type = nodeType(attributes);
-    entry = rfm::core::TransferDirectoryEntry{
-        QString::fromUtf8(attributes->name), {true, type, attributes->size}};
+    entry = rfm::core::TransferDirectoryEntry{QString::fromUtf8(attributes->name),
+                                              {true, type, attributes->size}};
     sftp_attributes_free(attributes);
     return {};
 }

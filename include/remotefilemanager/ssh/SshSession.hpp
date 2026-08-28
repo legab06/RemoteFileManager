@@ -11,10 +11,18 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <functional>
 #include <memory>
+
+namespace rfm::core
+{
+class RemoteTransferBackend;
+}
 
 namespace rfm::ssh
 {
+
+class SshSessionTransferTest;
 
 class SshSession final : public QObject
 {
@@ -42,7 +50,7 @@ class SshSession final : public QObject
     void copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
                      QString destinationDirectory);
     void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
-    void enqueueTransfer(rfm::core::TransferRequest request);
+    void startTransfer(rfm::core::TransferRequest request);
     void pauseTransfer(quint64 id);
     void resumeTransfer(quint64 id);
     void cancelTransfer(quint64 id);
@@ -65,6 +73,7 @@ class SshSession final : public QObject
     void operationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
     void transferRejected(quint64 id, QString error);
+    void transferExecutorFailed(QString error);
     void transfersShutdown();
     void failed(QString message);
     void disconnected();
@@ -73,8 +82,15 @@ class SshSession final : public QObject
     bool event(QEvent* event) override;
 
   private:
+    using TransferBackendFactory =
+        std::function<std::unique_ptr<rfm::core::RemoteTransferBackend>()>;
+
     class Impl;
     std::unique_ptr<Impl> m_impl;
+    friend class SshSessionTransferTest;
+
+    SshSession(TransferBackendFactory transferBackendFactory,
+               std::function<bool()> transferConnectionAvailable, QObject* parent);
 
     void authenticateAndOpen();
     void processTransferStep();
@@ -94,6 +110,8 @@ class SshSession final : public QObject
     void startRemoteStorageScanner(quint64 requestId);
     void startPendingRemoteWork();
     void completeShutdownIfReady();
+    void publishTransferProgress(const rfm::core::TransferProgress& progress);
+    void terminalizeTransfer(rfm::core::TransferState state, const QString& error);
     void fail(const QString& message);
 };
 

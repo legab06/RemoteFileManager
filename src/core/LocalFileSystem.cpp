@@ -332,7 +332,130 @@ StorageDeviceEvidence platformStorageDetails(const QString& device)
 #endif
 }
 
+Qt::CaseSensitivity localPathCaseSensitivity()
+{
+#ifdef Q_OS_WIN
+    return Qt::CaseInsensitive;
+#else
+    return Qt::CaseSensitive;
+#endif
+}
+
+QString normalizedAbsoluteLocalPath(const QString& path)
+{
+    if (path.trimmed().isEmpty() || path.contains(QChar{'\0'})) {
+        return {};
+    }
+    return QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath()));
+}
+
+bool localPathsEqual(const QString& first, const QString& second)
+{
+    return first.compare(second, localPathCaseSensitivity()) == 0;
+}
+
+bool localEntryExists(const QFileInfo& info) { return info.exists() || info.isSymbolicLink(); }
+
+QString validatedParentPath(const QString& path)
+{
+    const QString normalized = normalizedAbsoluteLocalPath(path);
+    const QFileInfo info(normalized);
+    return !normalized.isEmpty() && info.exists() && info.isDir() ? normalized : QString{};
+}
+
+QString directChildPath(const QString& parentPath, const QString& sourcePath)
+{
+    const QString normalizedSource = normalizedAbsoluteLocalPath(sourcePath);
+    if (normalizedSource.isEmpty() ||
+        !localPathsEqual(QFileInfo(normalizedSource).absolutePath(), parentPath)) {
+        return {};
+    }
+    return normalizedSource;
+}
+
+QString removeLocalEntry(const QString& path)
+{
+    const QFileInfo info(path);
+    if (info.isSymbolicLink() || !info.isDir()) {
+        if (!localEntryExists(info)) {
+            return QObject::tr("The selected local entry no longer exists.");
+        }
+        QFile file(path);
+        if (!file.remove()) {
+            return file.errorString().isEmpty()
+                       ? QObject::tr("The selected local entry could not be deleted.")
+                       : file.errorString();
+        }
+        return {};
+    }
+
+    QDir directory(path);
+    const QFileInfoList children = directory.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot |
+                                                           QDir::Hidden | QDir::System);
+    for (const QFileInfo& child : children) {
+        const QString error = removeLocalEntry(child.absoluteFilePath());
+        if (!error.isEmpty()) {
+            return error;
+        }
+    }
+    QDir parent(info.absolutePath());
+    if (!parent.rmdir(info.fileName())) {
+        return QObject::tr("The local folder could not be deleted.");
+    }
+    return {};
+}
+
+LocalFileOperationItemResult invalidRequestResult(const QString& source, const QString& destination,
+                                                  const QString& error)
+{
+    return {source, destination, false, error};
+}
+
 } // namespace
+
+bool LocalFileOperationResult::allSucceeded() const
+{
+    return !items.isEmpty() &&
+           std::ranges::all_of(
+               items, [](const LocalFileOperationItemResult& item) { return item.success; });
+}
+
+bool LocalFileSystem::isValidName(const QString& name)
+{
+    if (name.trimmed().isEmpty() || name == QStringLiteral(".") || name == QStringLiteral("..") ||
+        name.contains(QChar{'/'}) || name.contains(QChar{'\0'})) {
+        return false;
+    }
+#ifdef Q_OS_WIN
+    static const QString invalidCharacters = QStringLiteral("<>:\"\\|?*");
+    for (const QChar character : name) {
+        if (character.unicode() < 32 || invalidCharacters.contains(character)) {
+            return false;
+        }
+    }
+    if (name.endsWith(QChar{' '}) || name.endsWith(QChar{'.'})) {
+        return false;
+    }
+    const QString baseName = name.section(QChar{'.'}, 0, 0).toUpper();
+    static const QSet<QString> reservedNames{
+        QStringLiteral("CON"),  QStringLiteral("PRN"),  QStringLiteral("AUX"),
+        QStringLiteral("NUL"),  QStringLiteral("COM1"), QStringLiteral("COM2"),
+        QStringLiteral("COM3"), QStringLiteral("COM4"), QStringLiteral("COM5"),
+        QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
+        QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"),
+        QStringLiteral("LPT3"), QStringLiteral("LPT4"), QStringLiteral("LPT5"),
+        QStringLiteral("LPT6"), QStringLiteral("LPT7"), QStringLiteral("LPT8"),
+        QStringLiteral("LPT9")};
+    if (reservedNames.contains(baseName)) {
+        return false;
+    }
+#elif defined(Q_OS_MACOS)
+    if (name.contains(QChar{':'})) {
+        return false;
+    }
+#endif
+    return true;
+}
 
 LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
 {
@@ -361,6 +484,95 @@ LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
                            info.lastModified(), info.isDir(), info.isSymbolicLink()});
     }
     return {directory.absolutePath(), std::move(entries), {}};
+}
+
+LocalFileOperationResult LocalFileSystem::executeOperation(const LocalFileOperationRequest& request)
+{
+    LocalFileOperationResult result{request.id, request.kind, {}};
+    const QString parentPath = validatedParentPath(request.parentPath);
+    if (parentPath.isEmpty()) {
+        result.items.push_back(invalidRequestResult(
+            request.parentPath, {}, QObject::tr("The current local folder is not valid.")));
+        return result;
+    }
+    if (!QFileInfo(parentPath).isWritable()) {
+        result.items.push_back(invalidRequestResult(
+            parentPath, {}, QObject::tr("The current local folder is not writable.")));
+        return result;
+    }
+
+    if (request.kind == LocalFileOperationKind::CreateDirectory) {
+        if (!isValidName(request.newName)) {
+            result.items.push_back(invalidRequestResult(
+                {}, {}, QObject::tr("The folder name is not valid on this platform.")));
+            return result;
+        }
+        const QString destination = QDir(parentPath).filePath(request.newName);
+        if (localEntryExists(QFileInfo(destination))) {
+            result.items.push_back(invalidRequestResult(
+                {}, destination, QObject::tr("A local entry with this name already exists.")));
+            return result;
+        }
+        const bool created = QDir(parentPath).mkdir(request.newName);
+        result.items.push_back(
+            {{},
+             destination,
+             created,
+             created ? QString{} : QObject::tr("The local folder could not be created.")});
+        return result;
+    }
+
+    if (request.kind == LocalFileOperationKind::Rename) {
+        const QString source = request.sourcePaths.size() == 1
+                                   ? directChildPath(parentPath, request.sourcePaths.constFirst())
+                                   : QString{};
+        if (source.isEmpty()) {
+            result.items.push_back(invalidRequestResult(
+                request.sourcePaths.value(0), {},
+                QObject::tr("The selected entry is outside the current local folder.")));
+            return result;
+        }
+        if (!localEntryExists(QFileInfo(source))) {
+            result.items.push_back(invalidRequestResult(
+                source, {}, QObject::tr("The selected local entry no longer exists.")));
+            return result;
+        }
+        if (!isValidName(request.newName)) {
+            result.items.push_back(invalidRequestResult(
+                source, {}, QObject::tr("The new name is not valid on this platform.")));
+            return result;
+        }
+        const QString destination = QDir(parentPath).filePath(request.newName);
+        if (localEntryExists(QFileInfo(destination))) {
+            result.items.push_back(invalidRequestResult(
+                source, destination, QObject::tr("A local entry with this name already exists.")));
+            return result;
+        }
+        const bool renamed = QDir(parentPath).rename(QFileInfo(source).fileName(), request.newName);
+        result.items.push_back(
+            {source, destination, renamed,
+             renamed ? QString{} : QObject::tr("The local entry could not be renamed.")});
+        return result;
+    }
+
+    if (request.sourcePaths.isEmpty()) {
+        result.items.push_back(
+            invalidRequestResult({}, {}, QObject::tr("No local entry was selected for deletion.")));
+        return result;
+    }
+    result.items.reserve(request.sourcePaths.size());
+    for (const QString& requestedPath : request.sourcePaths) {
+        const QString source = directChildPath(parentPath, requestedPath);
+        if (source.isEmpty()) {
+            result.items.push_back(invalidRequestResult(
+                requestedPath, {},
+                QObject::tr("The selected entry is outside the current local folder.")));
+            continue;
+        }
+        const QString error = removeLocalEntry(source);
+        result.items.push_back({source, {}, error.isEmpty(), error});
+    }
+    return result;
 }
 
 bool localPathIsAtOrBelow(const QString& path, const QString& rootPath)
@@ -478,6 +690,11 @@ void LocalFileSystemWorker::listVolumes()
 void LocalFileSystemWorker::probeVolumes(quint64 requestId)
 {
     emit volumesProbed(requestId, LocalFileSystem::storageFingerprint());
+}
+
+void LocalFileOperationWorker::execute(LocalFileOperationRequest request)
+{
+    emit finished(LocalFileSystem::executeOperation(request));
 }
 
 } // namespace rfm::core

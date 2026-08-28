@@ -13,6 +13,7 @@
 #include <QHeaderView>
 #include <QLocale>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSet>
 #include <QStandardPaths>
 #include <QStringList>
@@ -335,6 +336,16 @@ void NavigationTree::setRemoteStorageVolumes(const QString& profileId,
     synchronizeStorageBranches(machineItem, volumesItem, externalDevicesItem,
                                uniqueStorageVolumes(volumes, false), false, profileId);
     updateVolumeActions();
+}
+
+bool NavigationTree::hasLoadedLocalDirectory(const QString& path) const
+{
+    const QString normalizedPath = normalizedLocalPath(path);
+    QList<QTreeWidgetItem*> items = matchingItems(NodeKind::LocalLocation, normalizedPath);
+    items += matchingItems(NodeKind::LocalDirectory, normalizedPath);
+    return std::ranges::any_of(items, [](const QTreeWidgetItem* item) {
+        return item->data(0, LoadedRole).toBool();
+    });
 }
 
 QList<rfm::core::StorageVolume>
@@ -813,25 +824,71 @@ void NavigationTree::replaceDirectoryChildren(QTreeWidgetItem* item,
                                               const QList<rfm::core::RemoteEntry>& entries,
                                               bool local, const QString& profileId)
 {
-    qDeleteAll(item->takeChildren());
+    const int scrollPosition = m_tree->verticalScrollBar()->value();
+    const bool updatesEnabled = m_tree->updatesEnabled();
+    m_tree->setUpdatesEnabled(false);
+
+    auto childKey = [local](const QString& path) {
+#ifdef Q_OS_WIN
+        return local ? path.toCaseFolded() : path;
+#else
+        return path;
+#endif
+    };
+    QHash<QString, QTreeWidgetItem*> existingChildren;
+    QList<QTreeWidgetItem*> obsoleteChildren;
+    const NodeKind expectedKind = local ? NodeKind::LocalDirectory : NodeKind::RemoteDirectory;
+    for (int index = 0; index < item->childCount(); ++index) {
+        QTreeWidgetItem* const child = item->child(index);
+        if (itemKind(child) != expectedKind) {
+            obsoleteChildren.push_back(child);
+            continue;
+        }
+        const QString key = childKey(child->data(0, PathRole).toString());
+        if (key.isEmpty() || existingChildren.contains(key)) {
+            obsoleteChildren.push_back(child);
+        } else {
+            existingChildren.insert(key, child);
+        }
+    }
+
     QFileIconProvider icons;
+    int directoryIndex = 0;
     for (const rfm::core::RemoteEntry& entry : entries) {
         if (!entry.directory) {
             continue;
         }
-        auto* const child = createItem(item, entry.name,
-                                       local ? NodeKind::LocalDirectory : NodeKind::RemoteDirectory,
-                                       icons.icon(QFileIconProvider::Folder));
         const QString parentPath = item->data(0, PathRole).toString();
         const QString childPath = local ? QDir(parentPath).filePath(entry.name)
                                         : rfm::core::RemotePath::join(parentPath, entry.name);
-        child->setData(0, PathRole,
-                       local ? normalizedLocalPath(childPath)
-                             : rfm::core::RemotePath::normalize(childPath));
+        const QString normalizedPath =
+            local ? normalizedLocalPath(childPath) : rfm::core::RemotePath::normalize(childPath);
+        QTreeWidgetItem* child = existingChildren.take(childKey(normalizedPath));
+        if (child == nullptr) {
+            child =
+                createItem(item, entry.name, expectedKind, icons.icon(QFileIconProvider::Folder));
+            addLazyPlaceholder(child);
+        } else {
+            child->setText(0, entry.name);
+            child->setIcon(0, icons.icon(QFileIconProvider::Folder));
+        }
+        child->setData(0, PathRole, normalizedPath);
         child->setData(0, ProfileIdRole, profileId);
-        addLazyPlaceholder(child);
+        const int currentIndex = item->indexOfChild(child);
+        if (currentIndex != directoryIndex) {
+            item->takeChild(currentIndex);
+            item->insertChild(directoryIndex, child);
+        }
+        ++directoryIndex;
+    }
+    obsoleteChildren.append(existingChildren.values());
+    for (QTreeWidgetItem* const child : std::as_const(obsoleteChildren)) {
+        item->removeChild(child);
+        delete child;
     }
     item->setData(0, LoadedRole, true);
+    m_tree->verticalScrollBar()->setValue(scrollPosition);
+    m_tree->setUpdatesEnabled(updatesEnabled);
 }
 
 QList<QTreeWidgetItem*> NavigationTree::matchingItems(NodeKind kind, const QString& path,

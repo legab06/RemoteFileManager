@@ -4,6 +4,7 @@
 #include "remotefilemanager/core/BrowserLocation.hpp"
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
+#include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
@@ -39,6 +40,8 @@ namespace rfm::core
 class OperationHistoryStore;
 class ServerProfileStore;
 class LocalFileSystemWorker;
+class LocalFileOperationWorker;
+class TransferCoordinator;
 } // namespace rfm::core
 
 namespace rfm::app
@@ -67,6 +70,7 @@ class MainWindow final : public QMainWindow
     void hostKeyDecision(bool accepted);
     void directoryRequested(quint64 requestId, QString path);
     void localDirectoryRequested(quint64 requestId, QString path);
+    void localFileOperationRequested(rfm::core::LocalFileOperationRequest request);
     void localVolumesRequested();
     void localStorageProbeRequested(quint64 requestId);
     void volumeOperationRequested(rfm::core::VolumeOperationRequest request);
@@ -128,7 +132,7 @@ class MainWindow final : public QMainWindow
     void resetDisconnectedUi();
     void requestParentDirectory();
     void showFileContextMenu(const QPoint& globalPosition);
-    void createRemoteDirectory();
+    void createDirectory();
     void renameSelectedEntry();
     void moveSelectedEntries();
     void copySelectedEntries();
@@ -179,6 +183,7 @@ class MainWindow final : public QMainWindow
     void requestLocalDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
                                       PaneNavigation navigation = PaneNavigation::Refresh,
                                       bool treeRequest = false);
+    void requestLocalTreeDirectoryRefresh(const QString& path);
     void requestRemoteTreeDirectory(const QString& profileId, const QString& path);
     void requestLocationListing(quint64 paneId, const rfm::core::BrowserLocation& location,
                                 bool showBusy, PaneNavigation navigation);
@@ -186,6 +191,8 @@ class MainWindow final : public QMainWindow
                                                 const QList<rfm::core::RemoteEntry>& entries);
     Q_INVOKABLE void handleLocalDirectoryListingError(quint64 requestId, const QString& path,
                                                       const QString& error);
+    Q_INVOKABLE void
+    handleLocalFileOperationResult(const rfm::core::LocalFileOperationResult& result);
     void openLocalLocation(const QString& path);
     void beginVolumeOperation(const rfm::core::StorageVolume& volume,
                               rfm::core::VolumeOperation operation);
@@ -214,7 +221,6 @@ class MainWindow final : public QMainWindow
                                                     const QByteArray& fingerprint);
     Q_INVOKABLE void handleRemoteStorageProbe(quint64 requestId, const QByteArray& fingerprint);
     Q_INVOKABLE void handleRemoteStorageProbeError(quint64 requestId, const QString& error);
-    void updateStorageRefreshAction();
     void updateNavigationActions();
     [[nodiscard]] QString activeRemoteMachineId() const;
     [[nodiscard]] RemoteMachineDescriptor activeRemoteMachine() const;
@@ -244,7 +250,6 @@ class MainWindow final : public QMainWindow
     QAction* m_forwardAction{nullptr};
     QAction* m_upAction{nullptr};
     QAction* m_refreshAction{nullptr};
-    QAction* m_storageRefreshAction{nullptr};
     QAction* m_createDirectoryAction{nullptr};
     QAction* m_renameAction{nullptr};
     QAction* m_moveAction{nullptr};
@@ -255,6 +260,8 @@ class MainWindow final : public QMainWindow
     QAction* m_uploadAction{nullptr};
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_placesDockAction{nullptr};
+    QAction* m_operationDockAction{nullptr};
     QAction* m_clipboardCopyAction{nullptr};
     QAction* m_clipboardCutAction{nullptr};
     QAction* m_clipboardPasteAction{nullptr};
@@ -274,9 +281,12 @@ class MainWindow final : public QMainWindow
     QTimer* m_historySaveTimer{nullptr};
     QThread* m_sshThread{nullptr};
     QThread* m_localThread{nullptr};
+    QThread* m_localOperationThread{nullptr};
     QThread* m_volumeThread{nullptr};
     rfm::ssh::SshSession* m_sshSession{nullptr};
+    rfm::core::TransferCoordinator* m_transferCoordinator{nullptr};
     rfm::core::LocalFileSystemWorker* m_localFileSystem{nullptr};
+    rfm::core::LocalFileOperationWorker* m_localFileOperationWorker{nullptr};
     rfm::core::VolumeOperationWorker* m_volumeOperationWorker{nullptr};
     rfm::core::ConnectionProfile m_activeProfile;
     QString m_activeSavedProfileId;
@@ -301,6 +311,7 @@ class MainWindow final : public QMainWindow
         PaneNavigation navigation{PaneNavigation::Refresh};
         bool treeRequest{false};
         quint64 navigationGeneration{0};
+        QString path;
     };
     QHash<quint64, LocalDirectoryRequest> m_localDirectoryRequests;
     QHash<quint64, quint64> m_expectedLocalDirectoryRequests;
@@ -314,6 +325,7 @@ class MainWindow final : public QMainWindow
         QString destinationDirectory;
     };
     QHash<quint64, OperationContext> m_operationContexts;
+    QHash<quint64, OperationContext> m_localOperationContexts;
     QHash<quint64, rfm::core::VolumeOperationRequest> m_volumeOperations;
     QSet<quint64> m_volumeOperationsAwaitingRefresh;
     struct RemoteVolumeOperationContext {
@@ -352,6 +364,7 @@ class MainWindow final : public QMainWindow
     QList<rfm::core::StorageVolume> m_localStorageVolumes;
     QList<rfm::core::StorageVolume> m_remoteStorageVolumes;
     bool m_connected{false};
+    bool m_connectionErrorNotificationActive{false};
     bool m_busy{false};
     bool m_localStorageRefreshPending{false};
     bool m_localStorageRefreshAfterCurrent{false};

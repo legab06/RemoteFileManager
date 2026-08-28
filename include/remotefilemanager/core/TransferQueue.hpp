@@ -16,9 +16,9 @@ class TransferQueue final
     [[nodiscard]] bool contains(quint64 id) const;
     [[nodiscard]] bool cancel(quint64 id, TransferRequest& cancelled);
     [[nodiscard]] std::optional<TransferRequest> takeNext();
+    [[nodiscard]] QList<TransferRequest> takeAll();
     [[nodiscard]] bool isEmpty() const;
     [[nodiscard]] qsizetype size() const;
-    void clear();
 
   private:
     QQueue<TransferRequest> m_requests;

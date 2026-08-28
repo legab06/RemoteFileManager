@@ -31,6 +31,16 @@ target_link_libraries(rfm_transfer_tests PRIVATE Qt6::Test RemoteFileManager::Co
 rfm_set_project_warnings(rfm_transfer_tests)
 add_test(NAME unit.transfer_file_job COMMAND rfm_transfer_tests)
 
+qt_add_executable(rfm_transfer_coordinator_tests test_transfer_coordinator.cpp)
+target_link_libraries(rfm_transfer_coordinator_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_transfer_coordinator_tests)
+add_test(NAME unit.transfer_coordinator COMMAND rfm_transfer_coordinator_tests)
+
+qt_add_executable(rfm_ssh_transfer_lifecycle_tests test_ssh_transfer_lifecycle.cpp)
+target_link_libraries(rfm_ssh_transfer_lifecycle_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_ssh_transfer_lifecycle_tests)
+add_test(NAME unit.ssh_transfer_lifecycle COMMAND rfm_ssh_transfer_lifecycle_tests)
+
 qt_add_executable(rfm_local_file_system_tests test_local_file_system.cpp)
 target_link_libraries(rfm_local_file_system_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_local_file_system_tests)

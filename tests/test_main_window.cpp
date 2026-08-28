@@ -19,6 +19,7 @@
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDockWidget>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHeaderView>
@@ -31,6 +32,7 @@
 #include <QMessageBox>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QStackedWidget>
@@ -164,6 +166,32 @@ int rowForId(QTableWidget* table, quint64 id)
     return -1;
 }
 
+QList<quint64> operationIds(QTableWidget* table)
+{
+    QList<quint64> ids;
+    ids.reserve(table->rowCount());
+    for (int row = 0; row < table->rowCount(); ++row) {
+        ids.push_back(table->item(row, 0)->data(Qt::UserRole).toULongLong());
+    }
+    return ids;
+}
+
+quint64 topVisibleOperationId(QTableWidget* table)
+{
+    const int row = table->rowAt(0);
+    return row < 0 ? 0 : table->item(row, 0)->data(Qt::UserRole).toULongLong();
+}
+
+int rowNamed(QTableWidget* table, const QString& name)
+{
+    for (int row = 0; row < table->rowCount(); ++row) {
+        if (table->item(row, 0)->text() == name) {
+            return row;
+        }
+    }
+    return -1;
+}
+
 QTreeWidgetItem* serverProfileItem(QTreeWidget* tree, int index)
 {
     if (tree == nullptr || tree->topLevelItemCount() < 2) {
@@ -281,6 +309,17 @@ void showPaneLocation(rfm::app::FileBrowserPane* pane, rfm::core::FileSource sou
     pane->showDirectory({source, machineId, path}, path, {}, navigation);
 }
 
+void waitForInitialLocalStorageRefresh(rfm::app::MainWindow& window)
+{
+    QObject::disconnect(&window, &rfm::app::MainWindow::localStorageProbeRequested, nullptr,
+                        nullptr);
+    QSignalSpy probes(&window, &rfm::app::MainWindow::localStorageProbeRequested);
+    auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(timer != nullptr);
+    QTRY_VERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection) &&
+                !probes.isEmpty());
+}
+
 } // namespace
 
 class MainWindowTest final : public QObject
@@ -289,6 +328,7 @@ class MainWindowTest final : public QObject
 
   private slots:
     void exposesInitialDisconnectedShell();
+    void dockVisibilityActionsTrackPanels();
     void validatesSecureConnectionForm();
     void keepsConnectionDialogOpenAcrossFailureAndRetry();
     void loadsSavedServersAndPrefillsQuickConnection();
@@ -298,11 +338,16 @@ class MainWindowTest final : public QObject
     void addsEditsAndRemovesSavedServers();
     void savesManualServerOnlyAfterSuccessAndAvoidsDuplicates();
     void disconnectActionFollowsSessionLifecycle();
+    void coalescesConnectionErrorsFromOneDisconnect();
+    void terminalTransferReleasesDisconnectProtection();
     void enablesMultipleRemoteSelection();
     void buildsPortableTransferRequests();
     void queuesFilesAndFoldersAsSeparateUploads();
     void queuesDownloadsFromRemoteSelection();
     void displaysTransferProgressAndMultipleEntries();
+    void ordersOperationRowsWithoutDuplicates();
+    void preservesOperationPanelContextAcrossReordering();
+    void displaysDirectoryTransferDetails();
     void displaysTransferStatesInEnglish();
     void displaysRemoteCopyAndMoveOperations();
     void acceptsRemoteMoveProgressFromWorker();
@@ -310,6 +355,7 @@ class MainWindowTest final : public QObject
     void exposesPauseResumeAndCancelIntentions();
     void displaysTerminalTransferStatesAndErrors();
     void formatsTransferSizesAndSpeeds();
+    void displaysSpeedOnlyForRunningTransfers();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void refreshesAfterCompletedUpload();
     void appliesOnlyExpectedDirectoryResult();
@@ -334,9 +380,10 @@ class MainWindowTest final : public QObject
     void dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds();
     void keyboardActionsExposeShortcutsAndTargetTheActivePane();
     void opensLocalDirectoryWithoutSshAndNavigatesAsynchronously();
+    void mutatesLocalEntriesAndRefreshesMatchingPanes();
     void keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect();
-    void storageRefreshWorksWithoutConnectionAndUpdatesOpenTree();
-    void storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks();
+    void mainRefreshWorksWithoutConnectionAndUpdatesOpenTree();
+    void mainRefreshRequestsRemoteDiscoveryAndCoalescesRequests();
     void temporaryConnectionAppearsInPlacesAndRejectsStaleStorage();
     void ignoresStaleResultsAfterSwitchingNavigationSource();
     void refreshesRemoteStorageOnlyAfterProbeFingerprintChanges();
@@ -468,26 +515,34 @@ void MainWindowTest::volumeRequestsPreserveInconsistentSiblingEvidence()
              rfm::core::VolumeUnmountTargetMode::Invalid);
 }
 
-void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
+void MainWindowTest::mainRefreshWorksWithoutConnectionAndUpdatesOpenTree()
 {
     QTemporaryDir first;
     QTemporaryDir second;
     QVERIFY(first.isValid());
     QVERIFY(second.isValid());
     rfm::app::MainWindow window;
-    auto* const action = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const action = window.findChild<QAction*>(QStringLiteral("refreshAction"));
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     QVERIFY(action != nullptr);
     QVERIFY(navigation != nullptr);
-    QTRY_VERIFY(action->isEnabled());
+    QVERIFY(workspace != nullptr);
+    QVERIFY(window.findChild<QObject*>(QStringLiteral("storageRefreshAction")) == nullptr);
+    QVERIFY(window.findChild<QObject*>(QStringLiteral("storageRefreshButton")) == nullptr);
 
+    waitForInitialLocalStorageRefresh(window);
     QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    showPaneLocation(workspace->primaryPane(), rfm::core::FileSource::Local, first.path());
+    QVERIFY(action->isEnabled());
     QSignalSpy localRequests(&window, &rfm::app::MainWindow::localVolumesRequested);
     QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
     action->trigger();
     QCOMPARE(localRequests.size(), 1);
     QCOMPARE(remoteRequests.size(), 0);
-    QVERIFY(!action->isEnabled());
+    QCOMPARE(directoryRequests.size(), 1);
 
     QList<rfm::core::StorageVolume> initial{{QStringLiteral("First"),
                                              first.path(),
@@ -501,6 +556,11 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     initial[0].device = QStringLiteral("/dev/first1");
     initial[0].fileSystemType = QByteArrayLiteral("ext4");
     initial[0].deviceModel = QStringLiteral("First model");
+    const quint64 firstDirectoryRequest = directoryRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalDirectoryListed", Qt::DirectConnection,
+        Q_ARG(quint64, firstDirectoryRequest), Q_ARG(QString, first.path()),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
                                       Q_ARG(QList<rfm::core::StorageVolume>, initial)));
     QVERIFY(action->isEnabled());
@@ -518,8 +578,33 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     QVERIFY(plainToolTip(volumes->child(0)).contains(QStringLiteral("Filesystem: ext4")));
     QVERIFY(plainToolTip(volumes->child(0)).contains(QStringLiteral("Model: First model")));
 
+    QTreeWidgetItem* const firstVolume = volumes->child(0);
+    firstVolume->setExpanded(true);
+    QCOMPARE(directoryRequests.size(), 2);
+    const quint64 treeRequest = directoryRequests.at(1).constFirst().toULongLong();
+    const QList<rfm::core::RemoteEntry> beforeEntries{
+        {QStringLiteral("before"), 0, {}, true, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, treeRequest), Q_ARG(QString, first.path()),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, beforeEntries)));
+    QVERIFY(firstVolume->isExpanded());
+    QVERIFY(childNamed(firstVolume, QStringLiteral("before")) != nullptr);
+    navigation->tree()->setCurrentItem(firstVolume);
+
     action->trigger();
     QCOMPARE(localRequests.size(), 2);
+    QCOMPARE(directoryRequests.size(), 3);
+    const quint64 secondDirectoryRequest = directoryRequests.at(2).constFirst().toULongLong();
+    const QList<rfm::core::RemoteEntry> afterEntries{{QStringLiteral("after"), 0, {}, true, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, secondDirectoryRequest),
+                                      Q_ARG(QString, first.path()),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, afterEntries)));
+    QVERIFY(childNamed(firstVolume, QStringLiteral("before")) == nullptr);
+    QVERIFY(childNamed(firstVolume, QStringLiteral("after")) != nullptr);
+    QVERIFY(firstVolume->isExpanded());
+    QCOMPARE(navigation->tree()->currentItem(), firstVolume);
+
     QList<rfm::core::StorageVolume> replacement{{QStringLiteral("Second"),
                                                  second.path(),
                                                  {},
@@ -543,25 +628,31 @@ void MainWindowTest::storageRefreshWorksWithoutConnectionAndUpdatesOpenTree()
     QVERIFY(!replacementToolTip.contains(QStringLiteral("First model")));
 }
 
-void MainWindowTest::storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks()
+void MainWindowTest::mainRefreshRequestsRemoteDiscoveryAndCoalescesRequests()
 {
     QTemporaryDir history;
     QTemporaryDir profiles;
     QVERIFY(history.isValid());
     QVERIFY(profiles.isValid());
     rfm::app::MainWindow window(nullptr, history.path(), profiles.path());
-    auto* const action = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
+    auto* const action = window.findChild<QAction*>(QStringLiteral("refreshAction"));
     QVERIFY(action != nullptr);
-    QTRY_VERIFY(action->isEnabled());
 
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy localRequests(&window, &rfm::app::MainWindow::localVolumesRequested);
     QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::directoryRequested);
     setConnectionIdentity(window);
     QCOMPARE(remoteRequests.size(), 1);
     const quint64 requestId = remoteRequests.constFirst().constFirst().toULongLong();
     QVERIFY(requestId != 0);
     action->trigger();
     QCOMPARE(remoteRequests.size(), 1);
+    QCOMPARE(localRequests.size(), 1);
+    QCOMPARE(directoryRequests.size(), 1);
 
     const QList<rfm::core::StorageVolume> remoteVolumes{
         {QStringLiteral("USB"), QStringLiteral("/media/usb"), QStringLiteral("/dev/sdb1"),
@@ -569,9 +660,19 @@ void MainWindowTest::storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks()
     QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageVolumes", Qt::DirectConnection,
                                       Q_ARG(quint64, requestId),
                                       Q_ARG(QList<rfm::core::StorageVolume>, remoteVolumes)));
-    QTRY_VERIFY(action->isEnabled());
+    const quint64 firstDirectoryRequest = directoryRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection,
+        Q_ARG(quint64, firstDirectoryRequest), Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+    QVERIFY(action->isEnabled());
     action->trigger();
     QCOMPARE(remoteRequests.size(), 2);
+    QCOMPARE(localRequests.size(), 2);
+    QCOMPARE(directoryRequests.size(), 2);
 
     const quint64 secondRequestId = remoteRequests.at(1).constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
@@ -579,10 +680,7 @@ void MainWindowTest::storageRefreshRequestsRemoteDiscoveryAndCoalescesClicks()
         Q_ARG(quint64, secondRequestId),
         Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
-    const qsizetype requestsBeforeDisconnectedRefresh = remoteRequests.size();
-    QTRY_VERIFY(action->isEnabled());
-    action->trigger();
-    QCOMPARE(remoteRequests.size(), requestsBeforeDisconnectedRefresh);
+    QVERIFY(!action->isEnabled());
 }
 
 void MainWindowTest::temporaryConnectionAppearsInPlacesAndRejectsStaleStorage()
@@ -777,8 +875,117 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QCOMPARE(workspace->activePane()->fileTable()->item(0, 0)->text(), QStringLiteral("local.txt"));
     QCOMPARE(stack->currentWidget(), workspace);
     QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
+    auto* const createAction = window.findChild<QAction*>(QStringLiteral("createDirectoryAction"));
+    auto* const renameAction = window.findChild<QAction*>(QStringLiteral("renameAction"));
+    auto* const removeAction = window.findChild<QAction*>(QStringLiteral("removeAction"));
+    QVERIFY(createAction->isEnabled());
+    QVERIFY(!renameAction->isEnabled());
+    QVERIFY(!removeAction->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("uploadAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("removeAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("downloadAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
+
+    workspace->activePane()->fileTable()->selectRow(0);
+    QVERIFY(renameAction->isEnabled());
+    QVERIFY(removeAction->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
+}
+
+void MainWindowTest::mutatesLocalEntriesAndRefreshesMatchingPanes()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::MainWindow window;
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(navigation != nullptr);
+    QVERIFY(workspace != nullptr);
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+    rfm::core::StorageVolume fixtureVolume;
+    fixtureVolume.displayName = QStringLiteral("Local mutation fixture");
+    fixtureVolume.rootPath = temporary.path();
+    fixtureVolume.device = QStringLiteral("fixture-local-mutations");
+    fixtureVolume.kind = rfm::core::StorageKind::Internal;
+    navigation->setStorageVolumes({fixtureVolume});
+    QTreeWidgetItem* const volumes =
+        childNamed(navigation->tree()->topLevelItem(0), QStringLiteral("Volumes"));
+    QVERIFY(volumes != nullptr);
+    QTreeWidgetItem* const fixture = childNamed(volumes, temporary.path());
+    QVERIFY(fixture != nullptr);
+    fixture->setExpanded(true);
+    QTRY_COMPARE(fixture->childCount(), 0);
+    navigation->tree()->setCurrentItem(fixture);
+
+    QVERIFY(QMetaObject::invokeMethod(navigation, "localLocationActivated", Qt::DirectConnection,
+                                      Q_ARG(QString, temporary.path())));
+    QTRY_COMPARE(workspace->primaryPane()->source(), rfm::core::FileSource::Local);
+
+    workspace->setSplit(true);
+    rfm::app::FileBrowserPane* const primary = workspace->primaryPane();
+    rfm::app::FileBrowserPane* const secondary = workspace->otherVisiblePane();
+    QVERIFY(secondary != nullptr);
+    QTRY_COMPARE(secondary->source(), rfm::core::FileSource::Local);
+    QCOMPARE(secondary->currentPath(), primary->currentPath());
+
+    auto* const createAction = window.findChild<QAction*>(QStringLiteral("createDirectoryAction"));
+    auto* const renameAction = window.findChild<QAction*>(QStringLiteral("renameAction"));
+    auto* const removeAction = window.findChild<QAction*>(QStringLiteral("removeAction"));
+    QVERIFY(QMetaObject::invokeMethod(primary, "activated", Qt::DirectConnection));
+    QVERIFY(createAction->isEnabled());
+    QTimer::singleShot(0, [] {
+        auto* const dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        dialog->setTextValue(QStringLiteral("created"));
+        dialog->accept();
+    });
+    createAction->trigger();
+    const QString createdPath = QDir(temporary.path()).filePath(QStringLiteral("created"));
+    QTRY_VERIFY(QFileInfo(createdPath).isDir());
+    QTRY_VERIFY(rowNamed(primary->fileTable(), QStringLiteral("created")) >= 0);
+    QTRY_VERIFY(rowNamed(secondary->fileTable(), QStringLiteral("created")) >= 0);
+    QTRY_VERIFY(childNamed(fixture, QStringLiteral("created")) != nullptr);
+    QVERIFY(fixture->isExpanded());
+    QCOMPARE(navigation->tree()->currentItem(), fixture);
+
+    primary->fileTable()->selectRow(rowNamed(primary->fileTable(), QStringLiteral("created")));
+    QVERIFY(renameAction->isEnabled());
+    QTimer::singleShot(0, [] {
+        auto* const dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        dialog->setTextValue(QStringLiteral("renamed"));
+        dialog->accept();
+    });
+    renameAction->trigger();
+    const QString renamedPath = QDir(temporary.path()).filePath(QStringLiteral("renamed"));
+    QTRY_VERIFY(!QFileInfo(createdPath).exists() && QFileInfo(renamedPath).isDir());
+    QTRY_VERIFY(rowNamed(primary->fileTable(), QStringLiteral("renamed")) >= 0);
+    QTRY_VERIFY(rowNamed(secondary->fileTable(), QStringLiteral("renamed")) >= 0);
+    QTRY_VERIFY(childNamed(fixture, QStringLiteral("created")) == nullptr);
+    QTRY_VERIFY(childNamed(fixture, QStringLiteral("renamed")) != nullptr);
+    QVERIFY(fixture->isExpanded());
+    QCOMPARE(navigation->tree()->currentItem(), fixture);
+
+    primary->fileTable()->selectRow(rowNamed(primary->fileTable(), QStringLiteral("renamed")));
+    QVERIFY(removeAction->isEnabled());
+    acceptNextQuestion();
+    removeAction->trigger();
+    QTRY_VERIFY(!QFileInfo(renamedPath).exists());
+    QTRY_COMPARE(rowNamed(primary->fileTable(), QStringLiteral("renamed")), -1);
+    QTRY_COMPARE(rowNamed(secondary->fileTable(), QStringLiteral("renamed")), -1);
+    QTRY_VERIFY(childNamed(fixture, QStringLiteral("renamed")) == nullptr);
+    QVERIFY(fixture->isExpanded());
+    QCOMPARE(navigation->tree()->currentItem(), fixture);
 }
 
 void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect()
@@ -863,6 +1070,74 @@ void MainWindowTest::exposesInitialDisconnectedShell()
     QVERIFY(refreshTimer != nullptr);
     QCOMPARE(refreshTimer->interval(), 3000);
     QVERIFY(refreshTimer->isActive());
+}
+
+void MainWindowTest::dockVisibilityActionsTrackPanels()
+{
+    rfm::app::MainWindow window;
+    window.show();
+    QApplication::processEvents();
+
+    auto* const placesDock = window.findChild<QDockWidget*>(QStringLiteral("placesDock"));
+    auto* const operationDock = window.findChild<QDockWidget*>(QStringLiteral("operationDock"));
+    auto* const placesAction = window.findChild<QAction*>(QStringLiteral("placesDockAction"));
+    auto* const operationAction = window.findChild<QAction*>(QStringLiteral("operationDockAction"));
+    QVERIFY(placesDock != nullptr);
+    QVERIFY(operationDock != nullptr);
+    QVERIFY(placesAction != nullptr);
+    QVERIFY(operationAction != nullptr);
+    QCOMPARE(placesAction->text(), QStringLiteral("Places"));
+    QCOMPARE(operationAction->text(), QStringLiteral("Operations"));
+
+    QMenu* viewMenu = nullptr;
+    for (QMenu* const menu : window.findChildren<QMenu*>()) {
+        if (menu->title() == QStringLiteral("&View")) {
+            viewMenu = menu;
+            break;
+        }
+    }
+    QVERIFY(viewMenu != nullptr);
+    QVERIFY(viewMenu->actions().contains(placesAction));
+    QVERIFY(viewMenu->actions().contains(operationAction));
+
+    QWidget* const placesWidget = placesDock->widget();
+    QWidget* const operationWidget = operationDock->widget();
+    QVERIFY(placesDock->isVisible());
+    QVERIFY(operationDock->isVisible());
+    QVERIFY(placesAction->isCheckable());
+    QVERIFY(operationAction->isCheckable());
+    QVERIFY(placesAction->isChecked());
+    QVERIFY(operationAction->isChecked());
+
+    placesDock->close();
+    QVERIFY(!placesDock->isVisible());
+    QVERIFY(!placesAction->isChecked());
+    placesAction->trigger();
+    QVERIFY(placesDock->isVisible());
+    QVERIFY(placesAction->isChecked());
+    QCOMPARE(placesDock->widget(), placesWidget);
+
+    placesAction->trigger();
+    QVERIFY(!placesDock->isVisible());
+    QVERIFY(!placesAction->isChecked());
+    placesAction->trigger();
+    QVERIFY(placesDock->isVisible());
+    QVERIFY(placesAction->isChecked());
+
+    operationDock->close();
+    QVERIFY(!operationDock->isVisible());
+    QVERIFY(!operationAction->isChecked());
+    operationAction->trigger();
+    QVERIFY(operationDock->isVisible());
+    QVERIFY(operationAction->isChecked());
+    QCOMPARE(operationDock->widget(), operationWidget);
+
+    operationAction->trigger();
+    QVERIFY(!operationDock->isVisible());
+    QVERIFY(!operationAction->isChecked());
+    operationAction->trigger();
+    QVERIFY(operationDock->isVisible());
+    QVERIFY(operationAction->isChecked());
 }
 
 void MainWindowTest::enablesMultipleRemoteSelection()
@@ -1345,6 +1620,76 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     QVERIFY(error.isEmpty());
 }
 
+void MainWindowTest::coalescesConnectionErrorsFromOneDisconnect()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    rfm::app::MainWindow window(nullptr, directory.path());
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+
+    int simultaneousMessages = 0;
+    QTimer::singleShot(0, &window, [&window, &simultaneousMessages] {
+        QTimer::singleShot(0, &window, [&simultaneousMessages] {
+            for (QWidget* const widget : QApplication::topLevelWidgets()) {
+                if (auto* const messageBox = qobject_cast<QMessageBox*>(widget);
+                    messageBox != nullptr && messageBox->isVisible()) {
+                    ++simultaneousMessages;
+                    messageBox->accept();
+                }
+            }
+        });
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "showConnectionError", Qt::DirectConnection,
+            Q_ARG(QString, QStringLiteral("No active SFTP connection."))));
+    });
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showConnectionError", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral("The SSH/SFTP connection was lost during a transfer."))));
+    QCOMPARE(simultaneousMessages, 1);
+
+    QCoreApplication::processEvents();
+    bool laterErrorShown = false;
+    QTimer::singleShot(0, &window, [&laterErrorShown] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        laterErrorShown = messageBox != nullptr && messageBox->isVisible() &&
+                          messageBox->text() == QStringLiteral("No active SFTP connection.");
+        if (messageBox != nullptr) {
+            messageBox->accept();
+        }
+    });
+    QVERIFY(
+        QMetaObject::invokeMethod(&window, "showConnectionError", Qt::DirectConnection,
+                                  Q_ARG(QString, QStringLiteral("No active SFTP connection."))));
+    QVERIFY(laterErrorShown);
+}
+
+void MainWindowTest::terminalTransferReleasesDisconnectProtection()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    rfm::app::MainWindow window(nullptr, directory.path());
+    auto* const disconnect = window.findChild<QAction*>(QStringLiteral("disconnectAction"));
+    QVERIFY(disconnect != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QVERIFY(disconnect->isEnabled());
+
+    const auto running = progress(61, rfm::core::TransferState::Transferring, 1, 10);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, running)));
+    QVERIFY(!disconnect->isEnabled());
+
+    auto failed = running;
+    failed.state = rfm::core::TransferState::Failed;
+    failed.error = QStringLiteral("connection lost");
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, failed)));
+    QVERIFY(disconnect->isEnabled());
+}
+
 void MainWindowTest::buildsPortableTransferRequests()
 {
     QTemporaryDir temporary;
@@ -1499,6 +1844,150 @@ void MainWindowTest::displaysTransferProgressAndMultipleEntries()
     QCOMPARE(bar->format(), QStringLiteral("512 B / 1.0 KiB"));
 }
 
+void MainWindowTest::ordersOperationRowsWithoutDuplicates()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    auto oldTerminal =
+        rfm::core::operationProgress(progress(1001, rfm::core::TransferState::Completed, 10, 10));
+    oldTerminal.finishedAt = QDateTime::fromSecsSinceEpoch(10);
+    panel.updateOperation(oldTerminal);
+    QCOMPARE(operationIds(table), QList<quint64>{1001});
+
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(1002, rfm::core::TransferState::Queued)));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(1003, rfm::core::TransferState::Queued)));
+    QCOMPARE(operationIds(table), (QList<quint64>{1002, 1003, 1001}));
+
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(1003, rfm::core::TransferState::Transferring, 1, 10)));
+    QCOMPARE(operationIds(table), (QList<quint64>{1003, 1002, 1001}));
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(1003, rfm::core::TransferState::Transferring, 5, 10)));
+    QCOMPARE(table->rowCount(), 3);
+    QCOMPARE(operationIds(table), (QList<quint64>{1003, 1002, 1001}));
+
+    auto completed =
+        rfm::core::operationProgress(progress(1003, rfm::core::TransferState::Completed, 10, 10));
+    completed.finishedAt = QDateTime::fromSecsSinceEpoch(30);
+    panel.updateOperation(completed);
+    QCOMPARE(table->rowCount(), 3);
+    QCOMPARE(operationIds(table), (QList<quint64>{1002, 1003, 1001}));
+
+    auto middleTerminal =
+        rfm::core::operationProgress(progress(1004, rfm::core::TransferState::Failed, 4, 10));
+    middleTerminal.finishedAt = QDateTime::fromSecsSinceEpoch(20);
+    panel.updateOperation(middleTerminal);
+    QCOMPARE(operationIds(table), (QList<quint64>{1002, 1003, 1004, 1001}));
+
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(1005, rfm::core::TransferState::Queued)));
+    QCOMPARE(operationIds(table), (QList<quint64>{1002, 1005, 1003, 1004, 1001}));
+
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(1006, rfm::core::TransferState::Cancelled)));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(1007, rfm::core::TransferState::Cancelled)));
+    QVERIFY(rowForId(table, 1007) < rowForId(table, 1006));
+}
+
+void MainWindowTest::preservesOperationPanelContextAcrossReordering()
+{
+    rfm::app::OperationPanel panel;
+    panel.resize(900, 220);
+    panel.show();
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    auto* const remove = panel.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
+    QVERIFY(table != nullptr);
+    QVERIFY(remove != nullptr);
+
+    for (quint64 id = 2000; id < 2030; ++id) {
+        auto terminal =
+            rfm::core::operationProgress(progress(id, rfm::core::TransferState::Completed, 10, 10));
+        terminal.finishedAt = QDateTime::fromSecsSinceEpoch(static_cast<qint64>(id));
+        panel.updateOperation(terminal);
+    }
+    panel.updateOperation(rfm::core::operationProgress(
+        progress(3001, rfm::core::TransferState::Transferring, 1, 10)));
+    QCoreApplication::processEvents();
+
+    table->selectRow(rowForId(table, 2010));
+    table->scrollToItem(table->item(rowForId(table, 2010), 0), QAbstractItemView::PositionAtTop);
+    QCoreApplication::processEvents();
+    const quint64 anchorId = topVisibleOperationId(table);
+    QVERIFY(anchorId != 0);
+    QVERIFY(table->verticalScrollBar()->value() > table->verticalScrollBar()->minimum());
+
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(3002, rfm::core::TransferState::Queued)));
+    QCoreApplication::processEvents();
+    QCOMPARE(topVisibleOperationId(table), anchorId);
+    QCOMPARE(table->item(table->selectionModel()->selectedRows().constFirst().row(), 0)
+                 ->data(Qt::UserRole)
+                 .toULongLong(),
+             quint64{2010});
+    QVERIFY(table->verticalScrollBar()->value() > table->verticalScrollBar()->minimum());
+
+    QSignalSpy pauses(&panel, &rfm::app::OperationPanel::pauseRequested);
+    QSignalSpy resumes(&panel, &rfm::app::OperationPanel::resumeRequested);
+    QSignalSpy cancellations(&panel, &rfm::app::OperationPanel::cancelRequested);
+    QWidget* actions = table->cellWidget(rowForId(table, 3001), 6);
+    QVERIFY(actions != nullptr);
+    auto* pauseResume = actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
+    auto* cancel = actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    QVERIFY(pauseResume != nullptr);
+    QVERIFY(cancel != nullptr);
+    QTest::mouseClick(pauseResume, Qt::LeftButton);
+    QCOMPARE(pauses.size(), 1);
+    QCOMPARE(pauses.constFirst().constFirst().toULongLong(), quint64{3001});
+
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(3001, rfm::core::TransferState::Paused, 1, 10)));
+    actions = table->cellWidget(rowForId(table, 3001), 6);
+    pauseResume = actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
+    cancel = actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    QTest::mouseClick(pauseResume, Qt::LeftButton);
+    QTest::mouseClick(cancel, Qt::LeftButton);
+    QCOMPARE(resumes.size(), 1);
+    QCOMPARE(resumes.constFirst().constFirst().toULongLong(), quint64{3001});
+    QCOMPARE(cancellations.size(), 1);
+    QCOMPARE(cancellations.constFirst().constFirst().toULongLong(), quint64{3001});
+
+    QSignalSpy removals(&panel, &rfm::app::OperationPanel::removeTerminalRequested);
+    table->selectRow(rowForId(table, 2010));
+    QVERIFY(remove->isEnabled());
+    QTest::mouseClick(remove, Qt::LeftButton);
+    QCOMPARE(removals.size(), 1);
+    QCOMPARE(removals.constFirst().constFirst().toULongLong(), quint64{2010});
+}
+
+void MainWindowTest::displaysDirectoryTransferDetails()
+{
+    rfm::app::OperationPanel panel;
+    auto directory = progress(1101, rfm::core::TransferState::Transferring, 512, 2048, 1024);
+    directory.source = QStringLiteral("/tmp/photos");
+    directory.destination = QStringLiteral("/srv/photos");
+    directory.directory = true;
+    directory.completedFiles = 2;
+    directory.totalFiles = 5;
+    directory.currentItem = QStringLiteral("/tmp/photos/album/picture.jpg");
+    panel.updateOperation(rfm::core::operationProgress(directory));
+
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+    const int row = rowForId(table, 1101);
+    QVERIFY(row >= 0);
+    QVERIFY(table->item(row, 1)->text().contains(QStringLiteral("Current: picture.jpg")));
+    QVERIFY(table->item(row, 1)->toolTip().contains(directory.currentItem));
+    auto* const bar = qobject_cast<QProgressBar*>(table->cellWidget(row, 4));
+    QVERIFY(bar != nullptr);
+    QCOMPARE(bar->format(), QStringLiteral("512 B / 2.0 KiB · 2 / 5 files"));
+    QCOMPARE(table->item(row, 5)->text(), QStringLiteral("1.0 KiB/s"));
+}
+
 void MainWindowTest::displaysTransferStatesInEnglish()
 {
     rfm::app::OperationPanel panel;
@@ -1593,13 +2082,13 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
 void MainWindowTest::acceptsRemoteMoveProgressFromWorker()
 {
     rfm::app::MainWindow window;
-    const auto move = rfm::core::beginRemoteOperation(
-        703, rfm::core::OperationKind::RemoteMove,
-        {{QStringLiteral("/source/file.txt"), false}}, QStringLiteral("/archive"));
+    const auto move = rfm::core::beginRemoteOperation(703, rfm::core::OperationKind::RemoteMove,
+                                                      {{QStringLiteral("/source/file.txt"), false}},
+                                                      QStringLiteral("/archive"));
 
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteOperationProgress", Qt::DirectConnection,
-        Q_ARG(rfm::core::OperationProgress, move)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteOperationProgress",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::OperationProgress, move)));
     auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const int row = rowForId(table, 703);
@@ -1731,6 +2220,27 @@ void MainWindowTest::formatsTransferSizesAndSpeeds()
     QCOMPARE(rfm::app::OperationPanel::formatBytes(1536), QStringLiteral("1.5 KiB"));
     QCOMPARE(rfm::app::OperationPanel::formatSpeed(0), QStringLiteral("—"));
     QCOMPARE(rfm::app::OperationPanel::formatSpeed(1024), QStringLiteral("1.0 KiB/s"));
+}
+
+void MainWindowTest::displaysSpeedOnlyForRunningTransfers()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    const auto updateAndVerifySpeed = [&panel, table](quint64 id, rfm::core::TransferState state,
+                                                      const QString& expectedSpeed) {
+        panel.updateOperation(rfm::core::operationProgress(progress(id, state, 512, 1024, 1024)));
+        const int row = rowForId(table, id);
+        QVERIFY(row >= 0);
+        QCOMPARE(table->item(row, 5)->text(), expectedSpeed);
+    };
+
+    updateAndVerifySpeed(501, rfm::core::TransferState::Transferring, QStringLiteral("1.0 KiB/s"));
+    updateAndVerifySpeed(502, rfm::core::TransferState::Queued, QStringLiteral("—"));
+    updateAndVerifySpeed(503, rfm::core::TransferState::Cancelled, QStringLiteral("—"));
+    updateAndVerifySpeed(504, rfm::core::TransferState::Failed, QStringLiteral("—"));
+    updateAndVerifySpeed(505, rfm::core::TransferState::Completed, QStringLiteral("—"));
 }
 
 void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
@@ -2046,12 +2556,17 @@ void MainWindowTest::splitRoutesSerializedListingsPerPane()
 void MainWindowTest::activePaneOwnsNavigationRefreshAndUploadTargets()
 {
     rfm::app::MainWindow window;
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     window.show();
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/one")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
     QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
+    QSignalSpy localStorageRequests(&window, &rfm::app::MainWindow::localVolumesRequested);
+    QSignalSpy remoteStorageRequests(&window, &rfm::app::MainWindow::remoteStorageRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     auto* const secondary = workspace->otherVisiblePane();
@@ -2073,6 +2588,8 @@ void MainWindowTest::activePaneOwnsNavigationRefreshAndUploadTargets()
     window.findChild<QAction*>(QStringLiteral("refreshAction"))->trigger();
     QCOMPARE(listings.size(), 1);
     QCOMPARE(listings.constFirst().at(1).toString(), QStringLiteral("/two/child"));
+    QCOMPARE(localStorageRequests.size(), 1);
+    QCOMPARE(remoteStorageRequests.size(), 1);
     const quint64 refreshId = listings.constFirst().constFirst().toULongLong();
     const QList<rfm::core::RemoteEntry> refreshedEntries{
         {QStringLiteral("selected.txt"), 1, {}, false, false}};
@@ -2901,6 +3418,7 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         failed.error = QStringLiteral("permission denied");
         QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                           Q_ARG(rfm::core::TransferProgress, completed)));
+        QTest::qWait(5);
         QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                           Q_ARG(rfm::core::TransferProgress, failed)));
         auto* const saveTimer =
@@ -2924,6 +3442,7 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         QVERIFY(remove != nullptr);
         QVERIFY(clear != nullptr);
         QCOMPARE(table->rowCount(), 2);
+        QCOMPARE(operationIds(table), (QList<quint64>{902, 901}));
         QCOMPARE(table->item(rowForId(table, 901), 3)->text(), QStringLiteral("Completed"));
         QCOMPARE(table->item(rowForId(table, 902), 3)->text(), QStringLiteral("Failed"));
         QCOMPARE(table->item(rowForId(table, 901), 0)->toolTip(),
@@ -3228,12 +3747,10 @@ void MainWindowTest::volumeOperationSuccessWaitsForSystemRefresh()
         nullptr, {}, {},
         std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::None));
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
     auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
     QVERIFY(navigation != nullptr);
-    QVERIFY(storageRefresh != nullptr);
     QVERIFY(mountButton != nullptr);
-    QTRY_VERIFY(storageRefresh->isEnabled());
+    waitForInitialLocalStorageRefresh(window);
     QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
 
     rfm::core::StorageVolume volume;
@@ -3295,12 +3812,10 @@ void MainWindowTest::volumeOperationErrorsRestoreUi()
     QFETCH(bool, refreshExpected);
     rfm::app::MainWindow window(nullptr, {}, {}, std::make_unique<FixedVolumeService>(error));
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
     auto* const mountButton = window.findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
     QVERIFY(navigation != nullptr);
-    QVERIFY(storageRefresh != nullptr);
     QVERIFY(mountButton != nullptr);
-    QTRY_VERIFY(storageRefresh->isEnabled());
+    waitForInitialLocalStorageRefresh(window);
     QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
 
     rfm::core::StorageVolume volume;
@@ -3330,13 +3845,9 @@ void MainWindowTest::closingWindowCancelsBusyLocalVolumeWorker()
     auto* const window =
         new rfm::app::MainWindow(nullptr, {}, {}, std::make_unique<BlockingVolumeService>(state));
     auto* const navigation = window->findChild<rfm::app::NavigationTree*>();
-    auto* const storageRefresh =
-        window->findChild<QAction*>(QStringLiteral("storageRefreshAction"));
     auto* const mountButton = window->findChild<QPushButton*>(QStringLiteral("mountVolumeButton"));
     QVERIFY(navigation != nullptr);
-    QVERIFY(storageRefresh != nullptr);
     QVERIFY(mountButton != nullptr);
-    QTRY_VERIFY(storageRefresh->isEnabled());
 
     rfm::core::StorageVolume volume;
     volume.displayName = QStringLiteral("Blocking fixture");
@@ -3411,14 +3922,13 @@ void MainWindowTest::successfulUnmountEvacuatesOnlyAffectedPanes()
         std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::None));
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
     auto* const unmountButton =
         window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
     QVERIFY(workspace != nullptr);
     QVERIFY(navigation != nullptr);
-    QVERIFY(storageRefresh != nullptr);
     QVERIFY(unmountButton != nullptr);
-    QTRY_VERIFY(storageRefresh->isEnabled());
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     if (split) {
         workspace->setSplit(true);
     }
@@ -3429,7 +3939,6 @@ void MainWindowTest::successfulUnmountEvacuatesOnlyAffectedPanes()
     }
 
     QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
-    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
     QSignalSpy volumeRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
 
@@ -3480,18 +3989,16 @@ void MainWindowTest::failedUnmountDoesNotEvacuatePane()
         std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::PermissionDenied));
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
     auto* const unmountButton =
         window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
     QVERIFY(workspace != nullptr);
     QVERIFY(navigation != nullptr);
-    QVERIFY(storageRefresh != nullptr);
     QVERIFY(unmountButton != nullptr);
-    QTRY_VERIFY(storageRefresh->isEnabled());
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     const QString currentPath = QStringLiteral("/mnt/disk/Films");
     showPaneLocation(workspace->primaryPane(), rfm::core::FileSource::Local, currentPath);
     QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
-    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
     QSignalSpy volumeRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
 
@@ -3521,14 +4028,13 @@ void MainWindowTest::safetyFallbackPurgesUnmountedPathsFromHistory()
         std::make_unique<FixedVolumeService>(rfm::core::VolumeOperationError::None));
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-    auto* const storageRefresh = window.findChild<QAction*>(QStringLiteral("storageRefreshAction"));
     auto* const unmountButton =
         window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
     QVERIFY(workspace != nullptr);
     QVERIFY(navigation != nullptr);
-    QVERIFY(storageRefresh != nullptr);
     QVERIFY(unmountButton != nullptr);
-    QTRY_VERIFY(storageRefresh->isEnabled());
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     rfm::app::FileBrowserPane* const pane = workspace->primaryPane();
     showPaneLocation(pane, rfm::core::FileSource::Local, QStringLiteral("/mnt/disk/Old"));
     showPaneLocation(pane, rfm::core::FileSource::Local, QStringLiteral("/tmp/safe"),
@@ -3536,7 +4042,6 @@ void MainWindowTest::safetyFallbackPurgesUnmountedPathsFromHistory()
     showPaneLocation(pane, rfm::core::FileSource::Local, QStringLiteral("/mnt/disk/Films"),
                      rfm::app::PaneNavigation::Normal);
     QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
-    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     QSignalSpy directoryRequests(&window, &rfm::app::MainWindow::localDirectoryRequested);
 
     rfm::core::StorageVolume volume;
