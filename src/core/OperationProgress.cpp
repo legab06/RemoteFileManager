@@ -69,9 +69,23 @@ OperationProgress operationProgress(const TransferProgress& transfer)
             0};
 }
 
+OperationProgress operationProgress(const RemoteOperationRequest& request, OperationState state,
+                                    const QString& error)
+{
+    OperationProgress operation =
+        beginRemoteOperation(request.id,
+                             request.kind == RemoteOperationKind::Move ? OperationKind::RemoteMove
+                                                                       : OperationKind::RemoteCopy,
+                             request.sources, request.destinationDirectory);
+    operation.state = state;
+    operation.error = error;
+    operation.cancellationSupported = !isTerminal(state);
+    return operation;
+}
+
 OperationProgress beginRemoteOperation(quint64 id, OperationKind kind,
-                                        const QList<RemoteSelection>& sources,
-                                        const QString& destinationDirectory)
+                                       const QList<RemoteSelection>& sources,
+                                       const QString& destinationDirectory)
 {
     OperationProgress operation;
     operation.id = id;
@@ -88,17 +102,17 @@ OperationProgress beginRemoteOperation(quint64 id, OperationKind kind,
 }
 
 OperationProgress finishRemoteOperation(const RemoteOperationResult& result,
-                                         const OperationProgress& started)
+                                        const OperationProgress& started)
 {
     OperationProgress operation = started;
     operation.id = result.id;
     operation.kind = operationKind(result.kind);
-    operation.state = started.state == OperationState::Cancelled
-                          ? OperationState::Cancelled
-                          : (result.allSucceeded() ? OperationState::Completed
-                                                   : OperationState::Failed);
-    operation.completedItems = static_cast<quint64>(
-        std::ranges::count(result.items, true, &RemoteItemResult::success));
+    operation.state =
+        started.state == OperationState::Cancelled
+            ? OperationState::Cancelled
+            : (result.allSucceeded() ? OperationState::Completed : OperationState::Failed);
+    operation.completedItems =
+        static_cast<quint64>(std::ranges::count(result.items, true, &RemoteItemResult::success));
     operation.totalItems = static_cast<quint64>(result.items.size());
     operation.error.clear();
 

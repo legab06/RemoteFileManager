@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QProcess>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -32,8 +33,9 @@ QByteArray encodeMountInfoPath(const QString& path)
 
 } // namespace
 
-class FakeRemoteBackend final : public rfm::core::RemoteFileBackend {
-public:
+class FakeRemoteBackend final : public rfm::core::RemoteFileBackend
+{
+  public:
     rfm::core::RemoteProbeResult probe(const QString& path) override
     {
         calls.push_back(QStringLiteral("probe:%1").arg(path));
@@ -60,8 +62,8 @@ public:
         return mutate(QStringLiteral("mkdir"), path, true);
     }
 
-    rfm::core::RemoteBackendResult rename(
-        const QString& source, const QString& destination) override
+    rfm::core::RemoteBackendResult rename(const QString& source,
+                                          const QString& destination) override
     {
         calls.push_back(QStringLiteral("rename:%1:%2").arg(source, destination));
         const auto result = forced.value(QStringLiteral("rename:%1").arg(source));
@@ -83,12 +85,12 @@ public:
         return mutate(QStringLiteral("rmdir"), path, false);
     }
 
-    rfm::core::RemoteBackendResult copyOnServer(
-        const QString& source, const QString& destination, bool recursive) override
+    rfm::core::RemoteBackendResult copyOnServer(const QString& source, const QString& destination,
+                                                bool recursive) override
     {
-        calls.push_back(QStringLiteral("copy:%1:%2:%3")
-                            .arg(source, destination, recursive ? QStringLiteral("r")
-                                                               : QStringLiteral("f")));
+        calls.push_back(
+            QStringLiteral("copy:%1:%2:%3")
+                .arg(source, destination, recursive ? QStringLiteral("r") : QStringLiteral("f")));
         const auto result = forced.value(QStringLiteral("copy:%1").arg(source));
         if (result.succeeded()) {
             nodes.insert(destination, recursive);
@@ -96,8 +98,8 @@ public:
         return result;
     }
 
-    rfm::core::RemoteBackendResult mutate(
-        const QString& operation, const QString& path, bool directory)
+    rfm::core::RemoteBackendResult mutate(const QString& operation, const QString& path,
+                                          bool directory)
     {
         calls.push_back(QStringLiteral("%1:%2").arg(operation, path));
         const auto result = forced.value(QStringLiteral("%1:%2").arg(operation, path));
@@ -123,6 +125,12 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     rfm::core::RemoteProbeResult probe(const QString& path) override
     {
         probed.push_back(path);
+        if (!probeResponses.isEmpty()) {
+            return probeResponses.takeFirst();
+        }
+        if (existingPaths.contains(path)) {
+            return {{}, {true, false}};
+        }
         return {{rfm::core::RemoteBackendError::NotFound, {}}, {}};
     }
 
@@ -130,10 +138,16 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
                                           const QString& destination) override
     {
         renamed.push_back(QStringLiteral("%1:%2").arg(source, destination));
-        const rfm::core::RemoteBackendResult result =
-            renamed.size() == 1 ? renameResult : promotionResult;
-        if (renamed.size() == 1 && result.succeeded()) {
+        const bool promotion = source.endsWith(QStringLiteral("/item")) &&
+                               (source.contains(QStringLiteral(".rfm-copy-")) ||
+                                source.contains(QStringLiteral(".rfm-move-")));
+        const rfm::core::RemoteBackendResult result = promotion ? promotionResult : renameResult;
+        if (!promotion && result.succeeded()) {
             sourceRemoved = true;
+        }
+        if (promotion && result.succeeded()) {
+            existingPaths.remove(source);
+            existingPaths.insert(destination);
         }
         return result;
     }
@@ -141,15 +155,16 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     rfm::core::RemoteBackendResult startCopy(const QString& source, const QString& destination,
                                              bool recursive) override
     {
-        started.push_back(QStringLiteral("%1:%2:%3")
-                              .arg(source, destination,
-                                   recursive ? QStringLiteral("recursive")
-                                             : QStringLiteral("file")));
+        started.push_back(
+            QStringLiteral("%1:%2:%3")
+                .arg(source, destination,
+                     recursive ? QStringLiteral("recursive") : QStringLiteral("file")));
         active = true;
+        activeCopyDestination = destination;
         return {};
     }
 
-    rfm::core::RemoteBackendResult reserveMoveStaging(const QString& path) override
+    rfm::core::RemoteBackendResult reserveStaging(const QString& path) override
     {
         reserved.push_back(path);
         if (reserveResult.succeeded()) {
@@ -158,11 +173,25 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
         return reserveResult;
     }
 
+    rfm::core::RemoteBackendResult removeEmptyDirectory(const QString& path) override
+    {
+        emptyDirectoryRemovals.push_back(path);
+        if (stagingContainsUnexpectedEntry) {
+            return {rfm::core::RemoteBackendError::Failure,
+                    QStringLiteral("SFTP rmdir failed: staging directory is not empty")};
+        }
+        if (emptyDirectoryRemoveResult.succeeded()) {
+            stagingExists = false;
+        }
+        return emptyDirectoryRemoveResult;
+    }
+
     rfm::core::RemoteBackendResult startMoveStagingCopy(const QString& source,
                                                         const QString& destination) override
     {
         stagedCopies.push_back(QStringLiteral("%1:%2:archive").arg(source, destination));
         active = moveCopyStartResult.succeeded();
+        activeCopyDestination = destination;
         return moveCopyStartResult;
     }
 
@@ -171,6 +200,9 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
         ++pollCalls;
         if (completeAfterPolls > 0 && pollCalls >= completeAfterPolls) {
             active = false;
+            if (copyCompletionResult.succeeded()) {
+                existingPaths.insert(activeCopyDestination);
+            }
             return copyCompletionResult;
         }
         return std::nullopt;
@@ -180,13 +212,16 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
                                                bool protectMountPoint) override
     {
         activeRemovePath = path;
-        removed.push_back(
-            QStringLiteral("%1:%2:%3")
-                .arg(path, recursive ? QStringLiteral("recursive") : QStringLiteral("file"),
-                     protectMountPoint ? QStringLiteral("protected")
-                                       : QStringLiteral("unprotected")));
+        removed.push_back(QStringLiteral("%1:%2:%3")
+                              .arg(path,
+                                   recursive ? QStringLiteral("recursive") : QStringLiteral("file"),
+                                   protectMountPoint ? QStringLiteral("protected")
+                                                     : QStringLiteral("unprotected")));
         const rfm::core::RemoteBackendResult result =
-            path.contains(QStringLiteral(".rfm-move-")) ? cleanupStartResult : removeStartResult;
+            path.contains(QStringLiteral(".rfm-copy-")) ||
+                    path.contains(QStringLiteral(".rfm-move-"))
+                ? cleanupStartResult
+                : removeStartResult;
         active = result.succeeded();
         return result;
     }
@@ -196,12 +231,14 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
         ++removePollCalls;
         if (removeCompleteAfterPolls > 0 && removePollCalls >= removeCompleteAfterPolls) {
             active = false;
-            const bool staging = activeRemovePath.contains(QStringLiteral(".rfm-move-"));
+            const bool staging = activeRemovePath.contains(QStringLiteral(".rfm-copy-")) ||
+                                 activeRemovePath.contains(QStringLiteral(".rfm-move-"));
             const rfm::core::RemoteBackendResult result =
                 staging ? cleanupCompletionResult : removeCompletionResult;
             if (result.succeeded()) {
                 if (staging) {
                     stagingExists = false;
+                    existingPaths.remove(activeRemovePath + QStringLiteral("/item"));
                 } else {
                     sourceRemoved = true;
                 }
@@ -247,7 +284,11 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     QStringList reserved;
     QStringList stagedCopies;
     QStringList removed;
+    QStringList emptyDirectoryRemovals;
     QString activeRemovePath;
+    QString activeCopyDestination;
+    QSet<QString> existingPaths;
+    QList<rfm::core::RemoteProbeResult> probeResponses;
     int pollCalls{0};
     int cancellationRequestCalls{0};
     int cancellationPollCalls{0};
@@ -258,9 +299,11 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     bool active{false};
     bool sourceRemoved{false};
     bool stagingExists{false};
+    bool stagingContainsUnexpectedEntry{false};
     rfm::core::RemoteBackendResult renameResult;
     rfm::core::RemoteBackendResult promotionResult;
     rfm::core::RemoteBackendResult reserveResult;
+    rfm::core::RemoteBackendResult emptyDirectoryRemoveResult;
     rfm::core::RemoteBackendResult moveCopyStartResult;
     rfm::core::RemoteBackendResult copyCompletionResult;
     rfm::core::RemoteBackendResult cleanupStartResult;
@@ -271,9 +314,11 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     QList<std::optional<rfm::core::RemoteBackendResult>> cancellationPollResponses;
 };
 
-class LocalSymlinkMoveBackend final : public rfm::core::ServerSideCopyBackend
+class LocalSymlinkStagingBackend final : public rfm::core::ServerSideCopyBackend
 {
   public:
+    explicit LocalSymlinkStagingBackend(bool moveFallback) : m_moveFallback(moveFallback) {}
+
     rfm::core::RemoteProbeResult probe(const QString& path) override
     {
         const QFileInfo info(path);
@@ -287,7 +332,7 @@ class LocalSymlinkMoveBackend final : public rfm::core::ServerSideCopyBackend
                                           const QString& destination) override
     {
         ++renameCalls;
-        if (renameCalls == 1) {
+        if (m_moveFallback && renameCalls == 1) {
             return {rfm::core::RemoteBackendError::CrossDevice, {}};
         }
         promotionObserved = QFileInfo(source).isSymLink() && QFile::rename(source, destination);
@@ -297,12 +342,16 @@ class LocalSymlinkMoveBackend final : public rfm::core::ServerSideCopyBackend
                                                     QStringLiteral("Local promotion failed")};
     }
 
-    rfm::core::RemoteBackendResult startCopy(const QString&, const QString&, bool) override
+    rfm::core::RemoteBackendResult startCopy(const QString& source, const QString& destination,
+                                             bool recursive) override
     {
-        return {rfm::core::RemoteBackendError::Unsupported, {}};
+        copyStartedAfterReservation = stagingReserved && QFileInfo(stagingPath).isDir();
+        copiedSourceWasSymlink = QFileInfo(source).isSymLink();
+        return runCopy(rfm::ssh::RemoteCopyCommand::build(source, destination, recursive),
+                       destination, false);
     }
 
-    rfm::core::RemoteBackendResult reserveMoveStaging(const QString& path) override
+    rfm::core::RemoteBackendResult reserveStaging(const QString& path) override
     {
         stagingPath = path;
         const QString parent = rfm::core::RemotePath::parent(path);
@@ -316,15 +365,32 @@ class LocalSymlinkMoveBackend final : public rfm::core::ServerSideCopyBackend
         return {};
     }
 
+    rfm::core::RemoteBackendResult removeEmptyDirectory(const QString& path) override
+    {
+        emptyStagingRemovalUsed = true;
+        const QString parent = rfm::core::RemotePath::parent(path);
+        const QString name = rfm::core::RemotePath::fileName(path);
+        return QDir(parent).rmdir(name)
+                   ? rfm::core::RemoteBackendResult{}
+                   : rfm::core::RemoteBackendResult{
+                         rfm::core::RemoteBackendError::Failure,
+                         QStringLiteral("Local empty staging directory removal failed")};
+    }
+
     rfm::core::RemoteBackendResult startMoveStagingCopy(const QString& source,
                                                         const QString& destination) override
     {
         copyStartedAfterReservation = stagingReserved && QFileInfo(stagingPath).isDir();
         copiedSourceWasSymlink = QFileInfo(source).isSymLink();
+        return runCopy(rfm::ssh::RemoteCopyCommand::buildMoveStaging(source, destination),
+                       destination, true);
+    }
+
+    rfm::core::RemoteBackendResult runCopy(const QString& command, const QString& destination,
+                                           bool reportsMoveStatus)
+    {
         QProcess process;
-        process.start(QStringLiteral("/bin/sh"),
-                      {QStringLiteral("-c"),
-                       rfm::ssh::RemoteCopyCommand::buildMoveStaging(source, destination)});
+        process.start(QStringLiteral("/bin/sh"), {QStringLiteral("-c"), command});
         if (!process.waitForStarted() || !process.waitForFinished()) {
             copyResult = {rfm::core::RemoteBackendError::Failure,
                           QStringLiteral("Unable to run local cp")};
@@ -332,10 +398,14 @@ class LocalSymlinkMoveBackend final : public rfm::core::ServerSideCopyBackend
         }
         const QByteArray standardOutput = process.readAllStandardOutput();
         const QByteArray standardError = process.readAllStandardError();
-        reportedCopyStatus = rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(standardOutput);
+        if (reportsMoveStatus) {
+            reportedCopyStatus =
+                rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(standardOutput);
+        }
         stagedLinkTarget = QFile::symLinkTarget(destination);
         copyResult =
-            process.exitStatus() == QProcess::NormalExit && reportedCopyStatus == 0
+            process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0 &&
+                    (!reportsMoveStatus || reportedCopyStatus == 0)
                 ? rfm::core::RemoteBackendResult{}
                 : rfm::core::RemoteBackendResult{rfm::core::RemoteBackendError::Failure,
                                                  QString::fromUtf8(standardError).trimmed()};
@@ -393,8 +463,12 @@ class LocalSymlinkMoveBackend final : public rfm::core::ServerSideCopyBackend
     bool copyStartedAfterReservation{false};
     bool copiedSourceWasSymlink{false};
     bool promotionObserved{false};
+    bool emptyStagingRemovalUsed{false};
     bool stagingRemovalProtected{false};
     bool sourceRemovalObservedAfterPromotion{false};
+
+  private:
+    bool m_moveFallback{false};
 };
 
 class RemoteFileOperationsTest final : public QObject
@@ -412,12 +486,21 @@ class RemoteFileOperationsTest final : public QObject
     void movesSelectionAndReportsPartialFailure();
     void copiesOnServerOrReportsUnsupported();
     void serverSideCopyPollingPreservesSharedSessionBlockingMode();
+    void serverSideCopyRunsCooperatively_data();
     void serverSideCopyRunsCooperatively();
     void serverSideCopyCancellationWaitsForTermination();
     void serverSideCopyCancellationRetriesAndReportsFailure();
     void serverSideCopyCancellationKeepsShutdownResponsive();
     void serverSideCopyFinalCompletionWinsOverCancellation();
     void serverSideCopyCanCancelWithSourcesRemaining();
+    void serverSideCopyFailureCleansStaging();
+    void serverSideCopyCleanupFailureIsTerminal();
+    void serverSideCopyPostPromotionRmdirFailureIsTerminal();
+    void serverSideCopyNonEmptyPostPromotionStagingFailsClosed();
+    void serverSideCopyLateCollisionPreservesCompetitor();
+    void copiesValidAndBrokenSymlinksThroughReservedStaging_data();
+    void copiesValidAndBrokenSymlinksThroughReservedStaging();
+    void serverSideCopyNoClobberAndRetryAfterCancellation();
     void movesOnSameFileSystemWithRename();
     void fallsBackToCopyThenDeleteAcrossFileSystems();
     void movesValidAndBrokenSymlinksThroughReservedStaging_data();
@@ -576,12 +659,11 @@ void RemoteFileOperationsTest::recursiveRemoveRefusesMountPointTrees()
     QTemporaryDir temporaryDirectory;
     QVERIFY(temporaryDirectory.isValid());
     const QString parent = temporaryDirectory.path() + QStringLiteral("/srv");
-    const bool spacePath = relation == QStringLiteral("escaped-space") ||
-                           relation == QStringLiteral("raw-space");
-    const QString source =
-        parent + (spacePath ? QStringLiteral("/data dir")
-                            : specialPath ? QStringLiteral("/data dir's [tree]")
-                                          : QStringLiteral("/data"));
+    const bool spacePath =
+        relation == QStringLiteral("escaped-space") || relation == QStringLiteral("raw-space");
+    const QString source = parent + (spacePath     ? QStringLiteral("/data dir")
+                                     : specialPath ? QStringLiteral("/data dir's [tree]")
+                                                   : QStringLiteral("/data"));
     QVERIFY(QDir().mkpath(source));
     QFile normalFile(source + QStringLiteral("/file.txt"));
     QVERIFY(normalFile.open(QIODevice::WriteOnly));
@@ -719,26 +801,63 @@ void RemoteFileOperationsTest::serverSideCopyPollingPreservesSharedSessionBlocki
     QVERIFY(implementation.contains("parseMoveStagingStatus(m_standardOutput)"));
 }
 
+void RemoteFileOperationsTest::serverSideCopyRunsCooperatively_data()
+{
+    QTest::addColumn<bool>("directory");
+    QTest::newRow("file") << false;
+    QTest::newRow("directory") << true;
+}
+
 void RemoteFileOperationsTest::serverSideCopyRunsCooperatively()
 {
+    QFETCH(bool, directory);
+
     FakeCopyBackend backend;
     backend.completeAfterPolls = 2;
-    rfm::core::ServerSideCopyJob job(
-        backend, 72, {{QStringLiteral("/source/tree"), true}},
-        QStringLiteral("/destination"));
+    const QString name = directory ? QStringLiteral("tree") : QStringLiteral("file");
+    const QString source = QStringLiteral("/source/%1").arg(name);
+    const QString destination = QStringLiteral("/destination/%1").arg(name);
+    rfm::core::ServerSideCopyJob job(backend, 72, {{source, directory}},
+                                     QStringLiteral("/destination"));
 
-    job.step();
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Preparing);
+    job.step(); // Check the final destination.
     QCOMPARE(job.progress().state, rfm::core::OperationState::Running);
-    job.step();
+    QVERIFY(!backend.existingPaths.contains(destination));
+    job.step(); // Atomically reserve staging beside the final destination.
+    QCOMPARE(backend.reserved.size(), 1);
+    const QString staging = backend.reserved.constFirst();
+    QVERIFY(staging.startsWith(QStringLiteral("/destination/.%1.rfm-copy-").arg(name)));
+    QVERIFY(staging.endsWith(QStringLiteral(".partial")));
+    QVERIFY(backend.stagingExists);
+    QVERIFY(!backend.existingPaths.contains(destination));
+    job.step(); // Start cp into staging/item.
     QCOMPARE(backend.started.size(), 1);
     QCOMPARE(backend.started.constFirst(),
-             QStringLiteral("/source/tree:/destination/tree:recursive"));
-    job.step();
+             QStringLiteral("%1:%2/item:%3")
+                 .arg(source, staging,
+                      directory ? QStringLiteral("recursive") : QStringLiteral("file")));
+    job.step(); // cp still running.
     QVERIFY(!job.isFinished());
-    job.step();
+    QVERIFY(backend.renamed.isEmpty());
+    QVERIFY(!backend.existingPaths.contains(destination));
+    job.step(); // cp succeeded, but promotion has not run yet.
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Finalizing);
+    QVERIFY(!backend.existingPaths.contains(destination));
+    job.step(); // Re-check and promote staging/item.
+    QVERIFY(backend.existingPaths.contains(destination));
+    QVERIFY(!backend.existingPaths.contains(staging + QStringLiteral("/item")));
+    QVERIFY(backend.stagingExists);
+    QVERIFY(!job.isFinished());
+    job.step(); // Remove the now-empty staging directory with SFTP rmdir.
     QVERIFY(job.isFinished());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
     QCOMPARE(job.progress().completedItems, quint64{1});
+    QVERIFY(!backend.stagingExists);
+    QCOMPARE(backend.renamed,
+             QStringList({QStringLiteral("%1/item:%2").arg(staging, destination)}));
+    QCOMPARE(backend.emptyDirectoryRemovals, QStringList({staging}));
+    QVERIFY(backend.removed.isEmpty());
 }
 
 void RemoteFileOperationsTest::serverSideCopyCancellationWaitsForTermination()
@@ -746,11 +865,12 @@ void RemoteFileOperationsTest::serverSideCopyCancellationWaitsForTermination()
     FakeCopyBackend backend;
     backend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{}};
     backend.cancellationPollResponses = {std::nullopt, rfm::core::RemoteBackendResult{}};
-    rfm::core::ServerSideCopyJob job(
-        backend, 73, {{QStringLiteral("/source/link"), false}},
-        QStringLiteral("/destination"));
-    job.step();
-    job.step();
+    rfm::core::ServerSideCopyJob job(backend, 73, {{QStringLiteral("/source/link"), false}},
+                                     QStringLiteral("/destination"));
+    job.step(); // prepare
+    job.step(); // reserve staging
+    job.step(); // start cp
+    const QString staging = backend.reserved.constFirst();
 
     QVERIFY(job.requestCancel());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelling);
@@ -776,52 +896,67 @@ void RemoteFileOperationsTest::serverSideCopyCancellationWaitsForTermination()
     QCOMPARE(backend.cancellationPollCalls, 2);
     QCOMPARE(backend.cleanupCalls, 1);
     QVERIFY(!backend.active);
+    QVERIFY(!job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelling);
+    QVERIFY(backend.stagingExists);
+    QVERIFY(!backend.existingPaths.contains(QStringLiteral("/destination/link")));
+
+    job.step(); // Start protected staging cleanup.
+    QVERIFY(!job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelling);
+    job.step(); // Cleanup becomes terminal.
     QVERIFY(job.isFinished());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelled);
     QCOMPARE(job.result().items.size(), 1);
     QVERIFY(job.result().items.at(0).error.contains(QStringLiteral("cancelled")));
+    QVERIFY(!backend.stagingExists);
+    QVERIFY(!backend.existingPaths.contains(QStringLiteral("/destination/link")));
+    QVERIFY(backend.removed.constFirst().startsWith(staging));
+    QVERIFY(backend.emptyDirectoryRemovals.isEmpty());
 }
 
 void RemoteFileOperationsTest::serverSideCopyCancellationRetriesAndReportsFailure()
 {
     FakeCopyBackend retryingBackend;
-    retryingBackend.cancellationRequestResponses = {
-        std::nullopt, std::nullopt, rfm::core::RemoteBackendResult{}};
+    retryingBackend.cancellationRequestResponses = {std::nullopt, std::nullopt,
+                                                    rfm::core::RemoteBackendResult{}};
     retryingBackend.cancellationPollResponses = {rfm::core::RemoteBackendResult{}};
-    rfm::core::ServerSideCopyJob retrying(
-        retryingBackend, 74, {{QStringLiteral("/source/file"), false}},
-        QStringLiteral("/destination"));
+    rfm::core::ServerSideCopyJob retrying(retryingBackend, 74,
+                                          {{QStringLiteral("/source/file"), false}},
+                                          QStringLiteral("/destination"));
+    retrying.step();
     retrying.step();
     retrying.step();
     QVERIFY(retrying.requestCancel());
-    retrying.step();
-    retrying.step();
-    QVERIFY(!retrying.isFinished());
-    QVERIFY(retryingBackend.active);
-    retrying.step();
-    QVERIFY(!retrying.isFinished());
-    QVERIFY(retryingBackend.active);
-    retrying.step();
+    for (int step = 0; step < 20 && !retrying.isFinished(); ++step) {
+        retrying.step();
+    }
     QCOMPARE(retrying.progress().state, rfm::core::OperationState::Cancelled);
     QCOMPARE(retryingBackend.cancellationRequestCalls, 3);
     QCOMPARE(retryingBackend.cancellationPollCalls, 1);
+    QVERIFY(!retryingBackend.stagingExists);
 
     FakeCopyBackend failingBackend;
-    failingBackend.cancellationRequestResponses = {
-        rfm::core::RemoteBackendResult{rfm::core::RemoteBackendError::Failure,
-                                       QStringLiteral("TERM delivery timed out")}};
-    rfm::core::ServerSideCopyJob failing(
-        failingBackend, 75, {{QStringLiteral("/source/file"), false}},
-        QStringLiteral("/destination"));
+    failingBackend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{
+        rfm::core::RemoteBackendError::Failure, QStringLiteral("TERM delivery timed out")}};
+    rfm::core::ServerSideCopyJob failing(failingBackend, 75,
+                                         {{QStringLiteral("/source/file"), false}},
+                                         QStringLiteral("/destination"));
+    failing.step();
     failing.step();
     failing.step();
     QVERIFY(failing.requestCancel());
-    failing.step();
+    for (int step = 0; step < 20 && !failing.isFinished(); ++step) {
+        failing.step();
+    }
     QVERIFY(failing.isFinished());
     QCOMPARE(failing.progress().state, rfm::core::OperationState::Failed);
     QVERIFY(failing.progress().error.contains(QStringLiteral("TERM delivery timed out")));
-    QVERIFY(failing.result().items.constFirst().error.contains(
-        QStringLiteral("cancellation failed")));
+    QVERIFY(
+        failing.result().items.constFirst().error.contains(QStringLiteral("cancellation failed")));
+    QVERIFY(failing.progress().error.contains(failingBackend.reserved.constFirst()));
+    QVERIFY(failingBackend.stagingExists);
+    QVERIFY(failingBackend.removed.isEmpty());
 }
 
 void RemoteFileOperationsTest::serverSideCopyCancellationKeepsShutdownResponsive()
@@ -832,9 +967,9 @@ void RemoteFileOperationsTest::serverSideCopyCancellationKeepsShutdownResponsive
         std::nullopt, std::nullopt,
         rfm::core::RemoteBackendResult{rfm::core::RemoteBackendError::Failure,
                                        QStringLiteral("Cancellation timed out")}};
-    rfm::core::ServerSideCopyJob job(
-        backend, 76, {{QStringLiteral("/source/file"), false}},
-        QStringLiteral("/destination"));
+    rfm::core::ServerSideCopyJob job(backend, 76, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+    job.step();
     job.step();
     job.step();
 
@@ -852,18 +987,20 @@ void RemoteFileOperationsTest::serverSideCopyCancellationKeepsShutdownResponsive
     job.step();
     QVERIFY(job.isFinished());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(backend.stagingExists);
+    QVERIFY(job.progress().error.contains(backend.reserved.constFirst()));
+    QVERIFY(backend.removed.isEmpty());
 }
 
 void RemoteFileOperationsTest::serverSideCopyFinalCompletionWinsOverCancellation()
 {
     FakeCopyBackend backend;
     backend.completeAfterPolls = 1;
-    rfm::core::ServerSideCopyJob job(
-        backend, 77, {{QStringLiteral("/source/file"), false}},
-        QStringLiteral("/destination"));
-    job.step();
-    job.step();
-    job.step();
+    rfm::core::ServerSideCopyJob job(backend, 77, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+    while (!job.isFinished()) {
+        job.step();
+    }
 
     QVERIFY(job.isFinished());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
@@ -878,12 +1015,11 @@ void RemoteFileOperationsTest::serverSideCopyCanCancelWithSourcesRemaining()
     backend.completeAfterPolls = 1;
     rfm::core::ServerSideCopyJob job(
         backend, 78,
-        {{QStringLiteral("/source/first"), false},
-         {QStringLiteral("/source/second"), false}},
+        {{QStringLiteral("/source/first"), false}, {QStringLiteral("/source/second"), false}},
         QStringLiteral("/destination"));
-    job.step();
-    job.step();
-    job.step();
+    while (job.progress().completedItems == 0) {
+        job.step();
+    }
 
     QVERIFY(!job.isFinished());
     QVERIFY(job.requestCancel());
@@ -891,6 +1027,219 @@ void RemoteFileOperationsTest::serverSideCopyCanCancelWithSourcesRemaining()
     QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelled);
     QCOMPARE(job.progress().completedItems, quint64{1});
     QCOMPARE(job.result().items.size(), 2);
+}
+
+void RemoteFileOperationsTest::serverSideCopyFailureCleansStaging()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.copyCompletionResult = {rfm::core::RemoteBackendError::Failure,
+                                    QStringLiteral("No space left on device")};
+    rfm::core::ServerSideCopyJob job(backend, 90, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().error.contains(QStringLiteral("No space left on device")));
+    QVERIFY(!backend.existingPaths.contains(QStringLiteral("/destination/file")));
+    QVERIFY(!backend.stagingExists);
+    QVERIFY(backend.renamed.isEmpty());
+    QCOMPARE(backend.removed.size(), 1);
+    QVERIFY(backend.removed.constFirst().contains(QStringLiteral(".rfm-copy-")));
+    QVERIFY(backend.emptyDirectoryRemovals.isEmpty());
+}
+
+void RemoteFileOperationsTest::serverSideCopyCleanupFailureIsTerminal()
+{
+    FakeCopyBackend backend;
+    backend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{}};
+    backend.cancellationPollResponses = {rfm::core::RemoteBackendResult{}};
+    backend.cleanupCompletionResult = {rfm::core::RemoteBackendError::PermissionDenied,
+                                       QStringLiteral("Cleanup denied")};
+    rfm::core::ServerSideCopyJob job(backend, 91, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+    job.step();
+    job.step();
+    job.step();
+    const QString staging = backend.reserved.constFirst();
+
+    QVERIFY(job.requestCancel());
+    while (!job.isFinished()) {
+        job.step();
+    }
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().error.contains(QStringLiteral("cleanup failed")));
+    QVERIFY(job.progress().error.contains(staging));
+    QVERIFY(backend.stagingExists);
+    QVERIFY(!backend.existingPaths.contains(QStringLiteral("/destination/file")));
+    QVERIFY(!backend.sourceRemoved);
+    QVERIFY(backend.emptyDirectoryRemovals.isEmpty());
+}
+
+void RemoteFileOperationsTest::serverSideCopyPostPromotionRmdirFailureIsTerminal()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.emptyDirectoryRemoveResult = {rfm::core::RemoteBackendError::PermissionDenied,
+                                          QStringLiteral("SFTP rmdir permission denied")};
+    rfm::core::ServerSideCopyJob job(backend, 97, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+
+    const QString staging = backend.reserved.constFirst();
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().error.contains(QStringLiteral("promoted")));
+    QVERIFY(job.progress().error.contains(QStringLiteral("SFTP rmdir permission denied")));
+    QVERIFY(job.progress().error.contains(staging));
+    QVERIFY(backend.existingPaths.contains(QStringLiteral("/destination/file")));
+    QVERIFY(backend.stagingExists);
+    QCOMPARE(backend.emptyDirectoryRemovals, QStringList({staging}));
+    QVERIFY(backend.removed.isEmpty());
+}
+
+void RemoteFileOperationsTest::serverSideCopyNonEmptyPostPromotionStagingFailsClosed()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.stagingContainsUnexpectedEntry = true;
+    rfm::core::ServerSideCopyJob job(backend, 98, {{QStringLiteral("/source/tree"), true}},
+                                     QStringLiteral("/destination"));
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+
+    const QString staging = backend.reserved.constFirst();
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().error.contains(QStringLiteral("not empty")));
+    QVERIFY(job.progress().error.contains(staging));
+    QVERIFY(backend.existingPaths.contains(QStringLiteral("/destination/tree")));
+    QVERIFY(backend.stagingExists);
+    QCOMPARE(backend.emptyDirectoryRemovals, QStringList({staging}));
+    QVERIFY(backend.removed.isEmpty());
+}
+
+void RemoteFileOperationsTest::serverSideCopyLateCollisionPreservesCompetitor()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    rfm::core::ServerSideCopyJob job(backend, 92, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+    job.step();
+    job.step();
+    job.step();
+    job.step(); // cp succeeded in staging.
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Finalizing);
+    backend.existingPaths.insert(QStringLiteral("/destination/file"));
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().error.contains(QStringLiteral("appeared")));
+    QVERIFY(backend.existingPaths.contains(QStringLiteral("/destination/file")));
+    QVERIFY(backend.renamed.isEmpty());
+    QVERIFY(!backend.stagingExists);
+}
+
+void RemoteFileOperationsTest::copiesValidAndBrokenSymlinksThroughReservedStaging_data()
+{
+    QTest::addColumn<bool>("targetExists");
+    QTest::newRow("valid-symlink") << true;
+    QTest::newRow("broken-symlink") << false;
+}
+
+void RemoteFileOperationsTest::copiesValidAndBrokenSymlinksThroughReservedStaging()
+{
+    QFETCH(bool, targetExists);
+
+    QTemporaryDir temporaryDirectory;
+    QVERIFY(temporaryDirectory.isValid());
+    const QString sourceDirectory = temporaryDirectory.path() + QStringLiteral("/source");
+    const QString destinationDirectory = temporaryDirectory.path() + QStringLiteral("/destination");
+    QVERIFY(QDir().mkpath(sourceDirectory));
+    QVERIFY(QDir().mkpath(destinationDirectory));
+    const QString target = sourceDirectory + QStringLiteral("/target.txt");
+    if (targetExists) {
+        QFile targetFile(target);
+        QVERIFY(targetFile.open(QIODevice::WriteOnly));
+        QCOMPARE(targetFile.write("TARGET\n"), qint64{7});
+    }
+    const QString sourceLink = sourceDirectory + QStringLiteral("/copy-link");
+    QVERIFY(QFile::link(target, sourceLink));
+    QVERIFY(QFileInfo(sourceLink).isSymLink());
+
+    LocalSymlinkStagingBackend backend(false);
+    rfm::core::ServerSideCopyJob job(backend, 93, {{sourceLink, false}}, destinationDirectory);
+    for (int step = 0; step < 20 && !job.isFinished(); ++step) {
+        job.step();
+    }
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(backend.stagingReserved);
+    QVERIFY(backend.copyStartedAfterReservation);
+    QVERIFY(backend.copiedSourceWasSymlink);
+    QVERIFY(backend.promotionObserved);
+    QVERIFY(backend.emptyStagingRemovalUsed);
+    QVERIFY(!backend.stagingRemovalProtected);
+    QVERIFY(QFileInfo(sourceLink).isSymLink());
+    const QString destinationLink = destinationDirectory + QStringLiteral("/copy-link");
+    QVERIFY(QFileInfo(destinationLink).isSymLink());
+    QCOMPARE(QFile::symLinkTarget(destinationLink), target);
+    QVERIFY(!QFileInfo(backend.stagingPath).exists());
+    QCOMPARE(QFileInfo(target).exists(), targetExists);
+}
+
+void RemoteFileOperationsTest::serverSideCopyNoClobberAndRetryAfterCancellation()
+{
+    FakeCopyBackend collisionBackend;
+    collisionBackend.existingPaths.insert(QStringLiteral("/destination/file"));
+    rfm::core::ServerSideCopyJob collision(collisionBackend, 94,
+                                           {{QStringLiteral("/source/file"), false}},
+                                           QStringLiteral("/destination"));
+    while (!collision.isFinished()) {
+        collision.step();
+    }
+    QCOMPARE(collision.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(collisionBackend.reserved.isEmpty());
+    QVERIFY(collisionBackend.started.isEmpty());
+    QVERIFY(collisionBackend.existingPaths.contains(QStringLiteral("/destination/file")));
+
+    FakeCopyBackend backend;
+    backend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{}};
+    backend.cancellationPollResponses = {rfm::core::RemoteBackendResult{}};
+    rfm::core::ServerSideCopyJob cancelled(backend, 95, {{QStringLiteral("/source/file"), false}},
+                                           QStringLiteral("/destination"));
+    cancelled.step();
+    cancelled.step();
+    cancelled.step();
+    QVERIFY(cancelled.requestCancel());
+    while (!cancelled.isFinished()) {
+        cancelled.step();
+    }
+    QCOMPARE(cancelled.progress().state, rfm::core::OperationState::Cancelled);
+    QVERIFY(!backend.existingPaths.contains(QStringLiteral("/destination/file")));
+    QVERIFY(!backend.stagingExists);
+
+    backend.completeAfterPolls = 1;
+    backend.pollCalls = 0;
+    rfm::core::ServerSideCopyJob retry(backend, 96, {{QStringLiteral("/source/file"), false}},
+                                       QStringLiteral("/destination"));
+    while (!retry.isFinished()) {
+        retry.step();
+    }
+    QCOMPARE(retry.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(backend.existingPaths.contains(QStringLiteral("/destination/file")));
+    QVERIFY(!backend.stagingExists);
 }
 
 void RemoteFileOperationsTest::movesOnSameFileSystemWithRename()
@@ -936,6 +1285,7 @@ void RemoteFileOperationsTest::fallsBackToCopyThenDeleteAcrossFileSystems()
              temporaryPath + QStringLiteral("/item:/destination/tree"));
     QCOMPARE(backend.removed, QStringList({temporaryPath + QStringLiteral(":recursive:protected"),
                                            QStringLiteral("/source/tree:recursive:protected")}));
+    QVERIFY(backend.emptyDirectoryRemovals.isEmpty());
     QVERIFY(backend.sourceRemoved);
     QVERIFY(!backend.stagingExists);
 }
@@ -970,7 +1320,7 @@ void RemoteFileOperationsTest::movesValidAndBrokenSymlinksThroughReservedStaging
     QVERIFY(QFile::link(target, sourceLink));
     QVERIFY(QFileInfo(sourceLink).isSymLink());
 
-    LocalSymlinkMoveBackend backend;
+    LocalSymlinkStagingBackend backend(true);
     rfm::core::ServerSideCopyJob job(backend, 88, {{sourceLink, false}}, destinationDirectory,
                                      rfm::core::RemoteOperationKind::Move);
     for (int step = 0; step < 20 && !job.isFinished(); ++step) {
@@ -1055,8 +1405,7 @@ void RemoteFileOperationsTest::reportsFailedStagingCleanupWithoutMaskingCopyErro
     backend.copyCompletionResult = {rfm::core::RemoteBackendError::Failure,
                                     QStringLiteral("No space left on device")};
     backend.cleanupCompletionResult = {rfm::core::RemoteBackendError::PermissionDenied, {}};
-    rfm::core::ServerSideCopyJob job(backend, 86,
-                                     {{QStringLiteral("/source/tree"), true}},
+    rfm::core::ServerSideCopyJob job(backend, 86, {{QStringLiteral("/source/tree"), true}},
                                      QStringLiteral("/destination"),
                                      rfm::core::RemoteOperationKind::Move);
 
@@ -1079,8 +1428,7 @@ void RemoteFileOperationsTest::cancellationCleansMoveStagingAndPreservesSource()
     backend.renameResult = {rfm::core::RemoteBackendError::CrossDevice, {}};
     backend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{}};
     backend.cancellationPollResponses = {rfm::core::RemoteBackendResult{}};
-    rfm::core::ServerSideCopyJob job(backend, 87,
-                                     {{QStringLiteral("/source/tree"), true}},
+    rfm::core::ServerSideCopyJob job(backend, 87, {{QStringLiteral("/source/tree"), true}},
                                      QStringLiteral("/destination"),
                                      rfm::core::RemoteOperationKind::Move);
 
@@ -1118,7 +1466,8 @@ void RemoteFileOperationsTest::keepsSourceWhenFallbackPromotionFails()
     }
 
     QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
-    QVERIFY(job.result().items.constFirst().error.contains(QStringLiteral("temporary destination")));
+    QVERIFY(
+        job.result().items.constFirst().error.contains(QStringLiteral("temporary destination")));
     QVERIFY(job.result().items.constFirst().error.contains(QStringLiteral("source was preserved")));
     QCOMPARE(backend.removed.size(), 1);
     QVERIFY(backend.removed.constFirst().contains(QStringLiteral(".rfm-move-")));
@@ -1201,15 +1550,15 @@ void RemoteFileOperationsTest::createsDirectoryAndReportsCollisionOrPermission()
     QVERIFY(created.allSucceeded());
     QVERIFY(backend.nodes.contains(QStringLiteral("./new")));
 
-    const auto collision = operations.createDirectory(
-        2, QStringLiteral("."), QStringLiteral("new"));
+    const auto collision =
+        operations.createDirectory(2, QStringLiteral("."), QStringLiteral("new"));
     QVERIFY(!collision.allSucceeded());
     QVERIFY(collision.items.constFirst().error.contains(QStringLiteral("exists")));
 
     backend.forced.insert(QStringLiteral("mkdir:./private"),
                           {rfm::core::RemoteBackendError::PermissionDenied, {}});
-    const auto denied = operations.createDirectory(
-        3, QStringLiteral("."), QStringLiteral("private"));
+    const auto denied =
+        operations.createDirectory(3, QStringLiteral("."), QStringLiteral("private"));
     QVERIFY(!denied.allSucceeded());
     QVERIFY(denied.items.constFirst().error.contains(QStringLiteral("Permission")));
 }
@@ -1219,14 +1568,14 @@ void RemoteFileOperationsTest::renamesWithoutOverwriting()
     FakeRemoteBackend backend;
     backend.nodes.insert(QStringLiteral("docs/a.txt"), false);
     rfm::core::RemoteFileOperations operations(backend);
-    const auto renamed = operations.rename(
-        4, QStringLiteral("docs/a.txt"), QStringLiteral("b.txt"));
+    const auto renamed =
+        operations.rename(4, QStringLiteral("docs/a.txt"), QStringLiteral("b.txt"));
     QVERIFY(renamed.allSucceeded());
     QVERIFY(backend.calls.contains(QStringLiteral("rename:docs/a.txt:docs/b.txt")));
 
     backend.nodes.insert(QStringLiteral("docs/taken.txt"), false);
-    const auto collision = operations.rename(
-        5, QStringLiteral("docs/b.txt"), QStringLiteral("taken.txt"));
+    const auto collision =
+        operations.rename(5, QStringLiteral("docs/b.txt"), QStringLiteral("taken.txt"));
     QVERIFY(!collision.allSucceeded());
     QVERIFY(!backend.calls.contains(QStringLiteral("rename:docs/b.txt:docs/taken.txt")));
 }
@@ -1238,8 +1587,7 @@ void RemoteFileOperationsTest::movesSelectionAndReportsPartialFailure()
                           {rfm::core::RemoteBackendError::PermissionDenied, {}});
     rfm::core::RemoteFileOperations operations(backend);
     const auto result = operations.move(
-        6,
-        {{QStringLiteral("src/a.txt"), false}, {QStringLiteral("src/b.txt"), false}},
+        6, {{QStringLiteral("src/a.txt"), false}, {QStringLiteral("src/b.txt"), false}},
         QStringLiteral("archive"));
     QCOMPARE(result.items.size(), 2);
     QVERIFY(result.items.at(0).success);
@@ -1254,8 +1602,7 @@ void RemoteFileOperationsTest::copiesOnServerOrReportsUnsupported()
                           {rfm::core::RemoteBackendError::Unsupported, {}});
     rfm::core::RemoteFileOperations operations(backend);
     const auto result = operations.copy(
-        7,
-        {{QStringLiteral("src/a.txt"), false}, {QStringLiteral("src/folder"), true}},
+        7, {{QStringLiteral("src/a.txt"), false}, {QStringLiteral("src/folder"), true}},
         QStringLiteral("backup"));
     QVERIFY(result.items.at(0).success);
     QVERIFY(!result.items.at(1).success);
@@ -1264,8 +1611,8 @@ void RemoteFileOperationsTest::copiesOnServerOrReportsUnsupported()
     QVERIFY(backend.calls.contains(QStringLiteral("copy:src/folder:backup/folder:r")));
 
     const qsizetype beforeCollision = backend.calls.size();
-    const auto collision = operations.copy(
-        71, {{QStringLiteral("src/a.txt"), false}}, QStringLiteral("backup"));
+    const auto collision =
+        operations.copy(71, {{QStringLiteral("src/a.txt"), false}}, QStringLiteral("backup"));
     QVERIFY(!collision.allSucceeded());
     QVERIFY(collision.items.constFirst().error.contains(QStringLiteral("exists")));
     QCOMPARE(backend.calls.size(), beforeCollision + 1);
@@ -1273,42 +1620,40 @@ void RemoteFileOperationsTest::copiesOnServerOrReportsUnsupported()
 
     backend.forced.remove(QStringLiteral("copy:src/folder"));
     const qsizetype callCount = backend.calls.size();
-    const auto insideItself = operations.copy(
-        8, {{QStringLiteral("src/folder"), true}}, QStringLiteral("src/folder/child"));
+    const auto insideItself = operations.copy(8, {{QStringLiteral("src/folder"), true}},
+                                              QStringLiteral("src/folder/child"));
     QVERIFY(!insideItself.allSucceeded());
     QCOMPARE(backend.calls.size(), callCount);
 
-    const auto childToParent = operations.copy(
-        9, {{QStringLiteral("tree/child/folder"), true}}, QStringLiteral("tree/./"));
+    const auto childToParent = operations.copy(9, {{QStringLiteral("tree/child/folder"), true}},
+                                               QStringLiteral("tree/./"));
     QVERIFY(childToParent.allSucceeded());
     QCOMPARE(childToParent.items.constFirst().destination, QStringLiteral("tree/folder"));
     QVERIFY(backend.calls.contains(QStringLiteral("copy:tree/child/folder:tree/folder:r")));
 
-    const auto parentToChild = operations.move(
-        10, {{QStringLiteral("/home/gabriel/tree/file.txt"), false}},
-        QStringLiteral("/home/gabriel/tree/child/"));
+    const auto parentToChild =
+        operations.move(10, {{QStringLiteral("/home/gabriel/tree/file.txt"), false}},
+                        QStringLiteral("/home/gabriel/tree/child/"));
     QVERIFY(parentToChild.allSucceeded());
     QCOMPARE(parentToChild.items.constFirst().destination,
              QStringLiteral("/home/gabriel/tree/child/file.txt"));
-    QVERIFY(backend.calls.contains(QStringLiteral(
-        "rename:/home/gabriel/tree/file.txt:/home/gabriel/tree/child/file.txt")));
+    QVERIFY(backend.calls.contains(
+        QStringLiteral("rename:/home/gabriel/tree/file.txt:/home/gabriel/tree/child/file.txt")));
 }
 
 void RemoteFileOperationsTest::removesFileAndRecursiveTreeWithGuards()
 {
     FakeRemoteBackend backend;
     backend.nodes.insert(QStringLiteral("trash/file.txt"), false);
-    backend.listings.insert(QStringLiteral("trash/folder"),
-                            {{QStringLiteral("nested.txt"), false},
-                             {QStringLiteral("child"), true}});
+    backend.listings.insert(QStringLiteral("trash/folder"), {{QStringLiteral("nested.txt"), false},
+                                                             {QStringLiteral("child"), true}});
     backend.listings.insert(QStringLiteral("trash/folder/child"), {});
     rfm::core::RemoteFileOperations operations(backend);
-    const auto removedFile = operations.remove(
-        8, {{QStringLiteral("trash/file.txt"), false}}, false);
+    const auto removedFile =
+        operations.remove(8, {{QStringLiteral("trash/file.txt"), false}}, false);
     QVERIFY(removedFile.allSucceeded());
 
-    const auto removedTree = operations.remove(
-        9, {{QStringLiteral("trash/folder"), true}}, true);
+    const auto removedTree = operations.remove(9, {{QStringLiteral("trash/folder"), true}}, true);
     QVERIFY(removedTree.allSucceeded());
     const qsizetype nested =
         backend.calls.indexOf(QStringLiteral("unlink:trash/folder/nested.txt"));
@@ -1325,9 +1670,7 @@ void RemoteFileOperationsTest::removesFileAndRecursiveTreeWithGuards()
     backend.forced.insert(QStringLiteral("unlink:trash/denied.txt"),
                           {rfm::core::RemoteBackendError::PermissionDenied, {}});
     const auto partial = operations.remove(
-        11,
-        {{QStringLiteral("trash/ok.txt"), false},
-         {QStringLiteral("trash/denied.txt"), false}},
+        11, {{QStringLiteral("trash/ok.txt"), false}, {QStringLiteral("trash/denied.txt"), false}},
         false);
     QVERIFY(partial.items.at(0).success);
     QVERIFY(!partial.items.at(1).success);

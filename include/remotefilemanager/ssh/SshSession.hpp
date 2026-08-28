@@ -45,10 +45,7 @@ class SshSession final : public QObject
     void cancelVolumeAuthentication(quint64 operationId, quint64 authenticationToken);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
-    void moveEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
-                     QString destinationDirectory);
-    void copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
-                     QString destinationDirectory);
+    void startRemoteOperation(rfm::core::RemoteOperationRequest request);
     void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
     void startTransfer(rfm::core::TransferRequest request);
     void pauseTransfer(quint64 id);
@@ -70,10 +67,12 @@ class SshSession final : public QObject
     void storageVolumeListingFailed(quint64 requestId, QString error);
     void volumeOperationFinished(rfm::core::VolumeOperationResult result);
     void operationFinished(rfm::core::RemoteOperationResult result);
-    void operationUpdated(rfm::core::OperationProgress progress);
+    void remoteOperationFinished(rfm::core::RemoteOperationResult result);
+    void remoteOperationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
     void transferRejected(quint64 id, QString error);
     void transferExecutorFailed(QString error);
+    void remoteOperationExecutorFailed(QString error);
     void transfersShutdown();
     void failed(QString message);
     void disconnected();

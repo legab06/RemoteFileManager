@@ -12,6 +12,7 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/ServerProfileStore.hpp"
+#include "remotefilemanager/core/TransferCoordinator.hpp"
 
 #include <QAbstractButton>
 #include <QAction>
@@ -166,6 +167,17 @@ int rowForId(QTableWidget* table, quint64 id)
     return -1;
 }
 
+rfm::core::TransferCoordinator* detachRemoteOperationExecutor(rfm::app::MainWindow& window)
+{
+    auto* const coordinator = window.findChild<rfm::core::TransferCoordinator*>();
+    if (coordinator != nullptr) {
+        QObject::disconnect(coordinator,
+                            &rfm::core::TransferCoordinator::startRemoteOperationRequested, nullptr,
+                            nullptr);
+    }
+    return coordinator;
+}
+
 QList<quint64> operationIds(QTableWidget* table)
 {
     QList<quint64> ids;
@@ -240,6 +252,15 @@ void acceptNextQuestion()
         QAbstractButton* const yesButton = messageBox->button(QMessageBox::Yes);
         QVERIFY(yesButton != nullptr);
         yesButton->click();
+    });
+}
+
+void dismissNextMessageBox()
+{
+    QTimer::singleShot(0, [] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        QVERIFY(messageBox != nullptr);
+        messageBox->accept();
     });
 }
 
@@ -370,6 +391,8 @@ class MainWindowTest final : public QObject
     void splitListingErrorLeavesOtherPaneUntouched();
     void historyActionsFollowActivePaneAndIgnoreFailedOrObsoleteListings();
     void copiesAndMovesSelectionToOtherPane();
+    void queuesRemoteCopiesWithoutBlockingTheWindow();
+    void remoteExecutorFailureShowsOnlyConnectionDialog();
     void contextMenuUsesSharedInterPaneActions();
     void contextMenuUsesClipboardAndKeepsExplicitDestinationActions();
     void buildsCanonicalInterPanePathsThroughTheRealUiChain();
@@ -2795,6 +2818,8 @@ void MainWindowTest::historyActionsFollowActivePaneAndIgnoreFailedOrObsoleteList
 void MainWindowTest::copiesAndMovesSelectionToOtherPane()
 {
     rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
     window.show();
     const QList<rfm::core::RemoteEntry> sourceEntries{
         {QStringLiteral("file.txt"), 1, {}, false, false}};
@@ -2850,7 +2875,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     const int copyRow = rowForId(operationTable, copyId);
     QVERIFY(copyRow >= 0);
     QCOMPARE(operationTable->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
-    QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Running"));
+    QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Queued"));
     QVERIFY(operationTable->cellWidget(copyRow, 4) != nullptr);
     auto* const copyActions = operationTable->cellWidget(copyRow, 6);
     QVERIFY(copyActions != nullptr);
@@ -2867,8 +2892,7 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
         copyId,
         rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    remoteCoordinator->handleRemoteExecutorResult(copyResult);
     QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Completed"));
 
     auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
@@ -2891,14 +2915,13 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     const int moveRow = rowForId(operationTable, moveId);
     QVERIFY(moveRow >= 0);
     QCOMPARE(operationTable->item(moveRow, 0)->text(), QStringLiteral("Remote Move"));
-    QCOMPARE(operationTable->item(moveRow, 3)->text(), QStringLiteral("Running"));
+    QCOMPARE(operationTable->item(moveRow, 3)->text(), QStringLiteral("Queued"));
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
     const rfm::core::RemoteOperationResult moveResult{
         moveId,
         rfm::core::RemoteOperationKind::Move,
         {{QStringLiteral("/destination/back.txt"), QStringLiteral("/source/back.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+    remoteCoordinator->handleRemoteExecutorResult(moveResult);
     QCOMPARE(operationTable->item(moveRow, 3)->text(), QStringLiteral("Completed"));
     const int operationCount = operationTable->rowCount();
     const rfm::core::RemoteOperationResult createDirectoryResult{
@@ -2910,6 +2933,112 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
                                   Q_ARG(rfm::core::RemoteOperationResult, createDirectoryResult)));
     QCOMPARE(operationTable->rowCount(), operationCount);
     QVERIFY(!workspace->isSplit());
+}
+
+void MainWindowTest::queuesRemoteCopiesWithoutBlockingTheWindow()
+{
+    rfm::app::MainWindow window;
+    auto* const coordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(coordinator != nullptr);
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("file.txt"), 1, {}, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
+    QSignalSpy copies(&window, &rfm::app::MainWindow::copyRequested);
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const copyOther = window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"));
+    auto* const disconnect = window.findChild<QAction*>(QStringLiteral("disconnectAction"));
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(workspace != nullptr);
+    QVERIFY(copyOther != nullptr);
+    QVERIFY(disconnect != nullptr);
+    QVERIFY(table != nullptr);
+
+    window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
+    const quint64 listingId = listings.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    auto* const sourcePane = workspace->primaryPane();
+    sourcePane->fileTable()->selectRow(0);
+    acceptNextQuestion();
+    copyOther->trigger();
+    QCOMPARE(copies.size(), 1);
+    const quint64 firstId = copies.constFirst().constFirst().toULongLong();
+    auto firstProgress = rfm::core::beginRemoteOperation(
+        firstId, rfm::core::OperationKind::RemoteCopy,
+        {{QStringLiteral("/source/file.txt"), false}}, QStringLiteral("/destination"));
+    firstProgress.state = rfm::core::OperationState::Preparing;
+    coordinator->handleRemoteExecutorProgress(firstProgress);
+
+    QVERIFY(sourcePane->fileTable()->isEnabled());
+    QVERIFY(copyOther->isEnabled());
+    QVERIFY(!disconnect->isEnabled());
+    acceptNextQuestion();
+    copyOther->trigger();
+    QCOMPARE(copies.size(), 2);
+    const quint64 secondId = copies.at(1).constFirst().toULongLong();
+    QCOMPARE(table->item(rowForId(table, firstId), 3)->text(), QStringLiteral("Preparing"));
+    QCOMPARE(table->item(rowForId(table, secondId), 3)->text(), QStringLiteral("Queued"));
+    QVERIFY(rowForId(table, firstId) < rowForId(table, secondId));
+
+    QWidget* const queuedActions = table->cellWidget(rowForId(table, secondId), 6);
+    QVERIFY(queuedActions != nullptr);
+    auto* const cancelQueued =
+        queuedActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    QVERIFY(cancelQueued != nullptr);
+    dismissNextMessageBox();
+    cancelQueued->click();
+    QCOMPARE(table->item(rowForId(table, secondId), 3)->text(), QStringLiteral("Cancelled"));
+    QVERIFY(!disconnect->isEnabled());
+
+    const rfm::core::RemoteOperationResult completed{
+        firstId,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
+    coordinator->handleRemoteExecutorResult(completed);
+    QCOMPARE(table->item(rowForId(table, firstId), 3)->text(), QStringLiteral("Completed"));
+    QVERIFY(disconnect->isEnabled());
+}
+
+void MainWindowTest::remoteExecutorFailureShowsOnlyConnectionDialog()
+{
+    rfm::app::MainWindow window;
+    auto* const coordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(coordinator != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    coordinator->enqueueRemoteOperation({901,
+                                         rfm::core::RemoteOperationKind::Copy,
+                                         {{QStringLiteral("/source/a.txt"), false}},
+                                         QStringLiteral("/destination")});
+    coordinator->enqueueRemoteOperation({902,
+                                         rfm::core::RemoteOperationKind::Move,
+                                         {{QStringLiteral("/source/b.txt"), false}},
+                                         QStringLiteral("/destination")});
+
+    coordinator->handleRemoteExecutorFailure(QStringLiteral("connection lost"));
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+    QCOMPARE(table->item(rowForId(table, 901), 3)->text(), QStringLiteral("Failed"));
+    QCOMPARE(table->item(rowForId(table, 902), 3)->text(), QStringLiteral("Failed"));
+
+    int connectionDialogs = 0;
+    QTimer::singleShot(0, [&connectionDialogs] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        QVERIFY(messageBox != nullptr);
+        QCOMPARE(messageBox->windowTitle(), QStringLiteral("SSH connection error"));
+        ++connectionDialogs;
+        messageBox->accept();
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "showConnectionError", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("connection lost"))));
+    QCOMPARE(connectionDialogs, 1);
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
 }
 
 void MainWindowTest::rejectsOtherPaneOperationsForSameDirectory()
@@ -2957,6 +3086,8 @@ void MainWindowTest::rejectsOtherPaneOperationsForSameDirectory()
 void MainWindowTest::contextMenuUsesSharedInterPaneActions()
 {
     rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
     window.show();
     const QList<rfm::core::RemoteEntry> entries{
         {QStringLiteral("deplacement.txt"), 1, {}, false, false}};
@@ -3074,8 +3205,7 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
           QStringLiteral("rfm-sprint4/dossier-test/deplacement.txt"),
           true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    remoteCoordinator->handleRemoteExecutorResult(copyResult);
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     sourcePane->fileTable()->selectRow(0);
@@ -3089,6 +3219,8 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
 void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions()
 {
     rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
     window.show();
     const QList<rfm::core::RemoteEntry> sourceEntries{
         {QStringLiteral("first.txt"), 1, {}, false, false},
@@ -3168,8 +3300,7 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
           QStringLiteral("/destination/second.txt"),
           true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, firstPasteResult)));
+    remoteCoordinator->handleRemoteExecutorResult(firstPasteResult);
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     const QPoint folderRow = destinationPane->fileTable()
@@ -3188,8 +3319,7 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
           QStringLiteral("/destination/second.txt"),
           true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, secondPasteResult)));
+    remoteCoordinator->handleRemoteExecutorResult(secondPasteResult);
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
@@ -3212,8 +3342,7 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
           QStringLiteral("/manual-copy/first.txt"),
           true,
           {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, manualCopyResult)));
+    remoteCoordinator->handleRemoteExecutorResult(manualCopyResult);
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     sourcePane->fileTable()->selectRow(0);
@@ -3226,6 +3355,8 @@ void MainWindowTest::contextMenuUsesClipboardAndKeepsExplicitDestinationActions(
 void MainWindowTest::buildsCanonicalInterPanePathsThroughTheRealUiChain()
 {
     rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
     window.show();
     const QList<rfm::core::RemoteEntry> fileEntry{
         {QStringLiteral("fichier.txt"), 1, {}, false, false}};
@@ -3279,8 +3410,7 @@ void MainWindowTest::buildsCanonicalInterPanePathsThroughTheRealUiChain()
     const rfm::core::RemoteOperationResult completedCopy{
         copies.constFirst().constFirst().toULongLong(), rfm::core::RemoteOperationKind::Copy,
         relativeResult.items};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, completedCopy)));
+    remoteCoordinator->handleRemoteExecutorResult(completedCopy);
     window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"))->stop();
 
     primary->showDirectory(
@@ -3479,6 +3609,8 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
 void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
 {
     rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
     window.show();
     const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("file.txt"), 1, {}, false, false},
                                                 {QStringLiteral("folder"), 0, {}, true, false}};
@@ -3522,8 +3654,7 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
         copyId,
         rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    remoteCoordinator->handleRemoteExecutorResult(copyResult);
     QVERIFY(pasteAction->isEnabled());
 
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
@@ -3540,8 +3671,7 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
         moveId,
         rfm::core::RemoteOperationKind::Move,
         {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+    remoteCoordinator->handleRemoteExecutorResult(moveResult);
     QVERIFY(!pasteAction->isEnabled());
     QVERIFY(!sourcePane->fileTable()->item(0, 0)->font().italic());
 
@@ -3564,6 +3694,8 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
 void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds()
 {
     rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
     window.show();
     const QList<rfm::core::RemoteEntry> sourceEntries{
         {QStringLiteral("a.txt"), 1, {}, false, false},
@@ -3614,8 +3746,7 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
         rfm::core::RemoteOperationKind::Copy,
         {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
          {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    remoteCoordinator->handleRemoteExecutorResult(copyResult);
 
     choose(QStringLiteral("dropMoveButton"));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
@@ -3629,8 +3760,7 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
         rfm::core::RemoteOperationKind::Move,
         {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
          {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::RemoteOperationResult, moveResult)));
+    remoteCoordinator->handleRemoteExecutorResult(moveResult);
 
     choose(QStringLiteral("dropCancelButton"));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,

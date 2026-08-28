@@ -47,14 +47,24 @@ struct OperationProgress {
     quint16 serverPort{0};
 };
 
+struct RemoteOperationRequest {
+    quint64 id{0};
+    RemoteOperationKind kind{RemoteOperationKind::Copy};
+    QList<RemoteSelection> sources;
+    QString destinationDirectory;
+};
+
 [[nodiscard]] bool isTerminal(OperationState state);
 [[nodiscard]] OperationProgress operationProgress(const TransferProgress& transfer);
-[[nodiscard]] OperationProgress beginRemoteOperation(
-    quint64 id, OperationKind kind, const QList<RemoteSelection>& sources,
-    const QString& destinationDirectory);
-[[nodiscard]] OperationProgress finishRemoteOperation(
-    const RemoteOperationResult& result, const OperationProgress& started = {});
+[[nodiscard]] OperationProgress operationProgress(const RemoteOperationRequest& request,
+                                                  OperationState state, const QString& error = {});
+[[nodiscard]] OperationProgress beginRemoteOperation(quint64 id, OperationKind kind,
+                                                     const QList<RemoteSelection>& sources,
+                                                     const QString& destinationDirectory);
+[[nodiscard]] OperationProgress finishRemoteOperation(const RemoteOperationResult& result,
+                                                      const OperationProgress& started = {});
 
 } // namespace rfm::core
 
 Q_DECLARE_METATYPE(rfm::core::OperationProgress)
+Q_DECLARE_METATYPE(rfm::core::RemoteOperationRequest)
