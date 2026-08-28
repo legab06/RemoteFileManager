@@ -355,6 +355,7 @@ class MainWindowTest final : public QObject
     void exposesPauseResumeAndCancelIntentions();
     void displaysTerminalTransferStatesAndErrors();
     void formatsTransferSizesAndSpeeds();
+    void displaysSpeedOnlyForRunningTransfers();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void refreshesAfterCompletedUpload();
     void appliesOnlyExpectedDirectoryResult();
@@ -2219,6 +2220,27 @@ void MainWindowTest::formatsTransferSizesAndSpeeds()
     QCOMPARE(rfm::app::OperationPanel::formatBytes(1536), QStringLiteral("1.5 KiB"));
     QCOMPARE(rfm::app::OperationPanel::formatSpeed(0), QStringLiteral("—"));
     QCOMPARE(rfm::app::OperationPanel::formatSpeed(1024), QStringLiteral("1.0 KiB/s"));
+}
+
+void MainWindowTest::displaysSpeedOnlyForRunningTransfers()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    const auto updateAndVerifySpeed = [&panel, table](quint64 id, rfm::core::TransferState state,
+                                                      const QString& expectedSpeed) {
+        panel.updateOperation(rfm::core::operationProgress(progress(id, state, 512, 1024, 1024)));
+        const int row = rowForId(table, id);
+        QVERIFY(row >= 0);
+        QCOMPARE(table->item(row, 5)->text(), expectedSpeed);
+    };
+
+    updateAndVerifySpeed(501, rfm::core::TransferState::Transferring, QStringLiteral("1.0 KiB/s"));
+    updateAndVerifySpeed(502, rfm::core::TransferState::Queued, QStringLiteral("—"));
+    updateAndVerifySpeed(503, rfm::core::TransferState::Cancelled, QStringLiteral("—"));
+    updateAndVerifySpeed(504, rfm::core::TransferState::Failed, QStringLiteral("—"));
+    updateAndVerifySpeed(505, rfm::core::TransferState::Completed, QStringLiteral("—"));
 }
 
 void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()

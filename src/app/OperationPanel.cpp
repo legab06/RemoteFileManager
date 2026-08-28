@@ -345,9 +345,10 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
     destinationItem->setText(progress.destination);
     destinationItem->setToolTip(progress.destination);
     m_table->item(row, StateColumn)->setText(stateText(progress.state));
+    const bool isRunning = progress.state == rfm::core::OperationState::Running;
     m_table->item(row, SpeedColumn)
-        ->setText(progress.byteProgressAvailable ? formatSpeed(progress.bytesPerSecond)
-                                                 : QStringLiteral("—"));
+        ->setText(isRunning && progress.byteProgressAvailable ? formatSpeed(progress.bytesPerSecond)
+                                                              : QStringLiteral("—"));
     QTableWidgetItem* const errorItem = m_table->item(row, ErrorColumn);
     errorItem->setText(progress.error);
     errorItem->setToolTip(progress.error);
