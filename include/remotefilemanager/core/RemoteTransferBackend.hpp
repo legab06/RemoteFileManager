@@ -63,6 +63,7 @@ class RemoteTransferBackend
 {
   public:
     virtual ~RemoteTransferBackend() = default;
+    [[nodiscard]] virtual bool connectionAlive() const { return true; }
     [[nodiscard]] virtual TransferStatResult stat(const QString& path) = 0;
     [[nodiscard]] virtual TransferBackendResult openRead(const QString& path, quint64& handle) = 0;
     [[nodiscard]] virtual TransferBackendResult openWriteExclusive(const QString& path,

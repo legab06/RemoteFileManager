@@ -330,6 +330,7 @@ class TransferFileJobTest final : public QObject
     void cancelsActiveTransferAndCleansTemporary();
     void cancelsWhilePaused();
     void queueIsFifoAndRejectsDuplicateIds();
+    void takeAllQueuedTransfersPreservesFifo();
     void queueContinuesAfterSuccessAndFailure();
     void queuedCancellationPreservesOrderAndPerformsNoIo();
     void eventLoopRunsOneStepPerCallback();
@@ -558,6 +559,23 @@ void TransferFileJobTest::queueIsFifoAndRejectsDuplicateIds()
     QCOMPARE(thirdQueued->id, quint64{13});
     QVERIFY(thirdQueued->directory);
     QVERIFY(queue.isEmpty());
+}
+
+void TransferFileJobTest::takeAllQueuedTransfersPreservesFifo()
+{
+    rfm::core::TransferQueue queue;
+    QVERIFY(queue.enqueue({14, rfm::core::TransferDirection::Upload, "a", "A"}));
+    QVERIFY(queue.enqueue({15, rfm::core::TransferDirection::Download, "b", "B", true}));
+    QVERIFY(queue.enqueue({16, rfm::core::TransferDirection::Upload, "c", "C"}));
+
+    const QList<rfm::core::TransferRequest> requests = queue.takeAll();
+    QCOMPARE(requests.size(), 3);
+    QCOMPARE(requests.at(0).id, quint64{14});
+    QCOMPARE(requests.at(1).id, quint64{15});
+    QCOMPARE(requests.at(2).id, quint64{16});
+    QVERIFY(requests.at(1).directory);
+    QVERIFY(queue.isEmpty());
+    QVERIFY(queue.takeAll().isEmpty());
 }
 
 void TransferFileJobTest::queueContinuesAfterSuccessAndFailure()

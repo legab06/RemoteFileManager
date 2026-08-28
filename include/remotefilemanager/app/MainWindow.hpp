@@ -362,6 +362,7 @@ class MainWindow final : public QMainWindow
     QList<rfm::core::StorageVolume> m_localStorageVolumes;
     QList<rfm::core::StorageVolume> m_remoteStorageVolumes;
     bool m_connected{false};
+    bool m_connectionErrorNotificationActive{false};
     bool m_busy{false};
     bool m_localStorageRefreshPending{false};
     bool m_localStorageRefreshAfterCurrent{false};

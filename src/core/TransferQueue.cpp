@@ -42,10 +42,18 @@ std::optional<TransferRequest> TransferQueue::takeNext()
     return m_requests.dequeue();
 }
 
+QList<TransferRequest> TransferQueue::takeAll()
+{
+    QList<TransferRequest> requests;
+    requests.reserve(m_requests.size());
+    while (!m_requests.isEmpty()) {
+        requests.push_back(m_requests.dequeue());
+    }
+    return requests;
+}
+
 bool TransferQueue::isEmpty() const { return m_requests.isEmpty(); }
 
 qsizetype TransferQueue::size() const { return m_requests.size(); }
-
-void TransferQueue::clear() { m_requests.clear(); }
 
 } // namespace rfm::core

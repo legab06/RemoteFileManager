@@ -338,6 +338,8 @@ class MainWindowTest final : public QObject
     void addsEditsAndRemovesSavedServers();
     void savesManualServerOnlyAfterSuccessAndAvoidsDuplicates();
     void disconnectActionFollowsSessionLifecycle();
+    void coalescesConnectionErrorsFromOneDisconnect();
+    void terminalTransferReleasesDisconnectProtection();
     void enablesMultipleRemoteSelection();
     void buildsPortableTransferRequests();
     void queuesFilesAndFoldersAsSeparateUploads();
@@ -1615,6 +1617,76 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     QVERIFY(stack->currentWidget() != workspace);
     QCOMPARE(store.load(&error).size(), 1);
     QVERIFY(error.isEmpty());
+}
+
+void MainWindowTest::coalescesConnectionErrorsFromOneDisconnect()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    rfm::app::MainWindow window(nullptr, directory.path());
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+
+    int simultaneousMessages = 0;
+    QTimer::singleShot(0, &window, [&window, &simultaneousMessages] {
+        QTimer::singleShot(0, &window, [&simultaneousMessages] {
+            for (QWidget* const widget : QApplication::topLevelWidgets()) {
+                if (auto* const messageBox = qobject_cast<QMessageBox*>(widget);
+                    messageBox != nullptr && messageBox->isVisible()) {
+                    ++simultaneousMessages;
+                    messageBox->accept();
+                }
+            }
+        });
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "showConnectionError", Qt::DirectConnection,
+            Q_ARG(QString, QStringLiteral("No active SFTP connection."))));
+    });
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showConnectionError", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral("The SSH/SFTP connection was lost during a transfer."))));
+    QCOMPARE(simultaneousMessages, 1);
+
+    QCoreApplication::processEvents();
+    bool laterErrorShown = false;
+    QTimer::singleShot(0, &window, [&laterErrorShown] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        laterErrorShown = messageBox != nullptr && messageBox->isVisible() &&
+                          messageBox->text() == QStringLiteral("No active SFTP connection.");
+        if (messageBox != nullptr) {
+            messageBox->accept();
+        }
+    });
+    QVERIFY(
+        QMetaObject::invokeMethod(&window, "showConnectionError", Qt::DirectConnection,
+                                  Q_ARG(QString, QStringLiteral("No active SFTP connection."))));
+    QVERIFY(laterErrorShown);
+}
+
+void MainWindowTest::terminalTransferReleasesDisconnectProtection()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    rfm::app::MainWindow window(nullptr, directory.path());
+    auto* const disconnect = window.findChild<QAction*>(QStringLiteral("disconnectAction"));
+    QVERIFY(disconnect != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QVERIFY(disconnect->isEnabled());
+
+    const auto running = progress(61, rfm::core::TransferState::Transferring, 1, 10);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, running)));
+    QVERIFY(!disconnect->isEnabled());
+
+    auto failed = running;
+    failed.state = rfm::core::TransferState::Failed;
+    failed.error = QStringLiteral("connection lost");
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, failed)));
+    QVERIFY(disconnect->isEnabled());
 }
 
 void MainWindowTest::buildsPortableTransferRequests()
@@ -3324,6 +3396,7 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         failed.error = QStringLiteral("permission denied");
         QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                           Q_ARG(rfm::core::TransferProgress, completed)));
+        QTest::qWait(5);
         QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                           Q_ARG(rfm::core::TransferProgress, failed)));
         auto* const saveTimer =

@@ -14,8 +14,9 @@ namespace rfm::ssh
 class SftpTransferBackend final : public rfm::core::RemoteTransferBackend
 {
   public:
-    explicit SftpTransferBackend(sftp_session_struct* session);
+    SftpTransferBackend(ssh_session_struct* sshSession, sftp_session_struct* sftpSession);
     ~SftpTransferBackend() override;
+    [[nodiscard]] bool connectionAlive() const override;
     rfm::core::TransferStatResult stat(const QString& path) override;
     rfm::core::TransferBackendResult openRead(const QString& path, quint64& handle) override;
     rfm::core::TransferBackendResult openWriteExclusive(const QString& path,
@@ -35,7 +36,9 @@ class SftpTransferBackend final : public rfm::core::RemoteTransferBackend
 
   private:
     rfm::core::TransferBackendResult result() const;
-    sftp_session_struct* m_session;
+    ssh_session_struct* m_sshSession;
+    sftp_session_struct* m_sftpSession;
+    mutable bool m_transportFatal{false};
     QHash<quint64, sftp_file_struct*> m_handles;
     QHash<quint64, sftp_dir_struct*> m_directoryHandles;
     quint64 m_nextHandle{1};

@@ -1343,6 +1343,9 @@ void MainWindow::handleDirectoryListingError(quint64 requestId, const QString& p
 
 void MainWindow::showConnectionError(const QString& message)
 {
+    if (m_connectionErrorNotificationActive) {
+        return;
+    }
     const bool initialConnectionAttempt =
         m_connectionDialog != nullptr &&
         m_connectionDialog->state() == ConnectionDialog::State::Connecting;
@@ -1355,7 +1358,9 @@ void MainWindow::showConnectionError(const QString& message)
     if (initialConnectionAttempt && m_connectionDialog != nullptr) {
         m_connectionDialog->showConnectionError(message);
     } else {
+        m_connectionErrorNotificationActive = true;
         QMessageBox::critical(this, tr("SSH connection error"), message);
+        QTimer::singleShot(0, this, [this] { m_connectionErrorNotificationActive = false; });
     }
 }
 

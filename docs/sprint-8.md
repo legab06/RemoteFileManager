@@ -26,7 +26,17 @@ La release v0.8.1 complète le pipeline de stockage sans modifier ses frontière
   trois champs qui le suivent ; une ligne tronquée, un device ou un chemin invalide bloque tout le
   nettoyage. Le code de retour du `cp -a` de staging est transmis explicitement avant EOF afin
   qu'une notification SSH `exit-status` tardive ne transforme pas une copie courte réussie —
-  notamment celle d'un lien symbolique — en faux échec.
+  notamment celle d'un lien symbolique — en faux échec ;
+- chaque Upload/Download accepté publie désormais exactement un état terminal. Le shutdown et la
+  déconnexion extraient les requêtes encore queued dans leur ordre FIFO et les annulent sans les
+  démarrer, tandis qu'une perte SSH/SFTP marque l'actif et tous les queued en échec avant de purger
+  la session. Un échec de transfert ordinaire conserve la connexion et laisse toujours démarrer le
+  suivant. Après une erreur de lecture ou d'écriture, la décision combine le statut SFTP avec
+  `ssh_get_error_code`, `ssh_get_status` et `ssh_is_connected` avant de détruire le backend actif.
+  Une erreur SFTP ordinaire ne tue donc pas la session ; une interruption réseau transitoire peut
+  continuer si libssh ne l'a pas déclarée fatale. Les erreurs secondaires déjà queued qui constatent
+  ensuite l'absence de SFTP ne créent pas une seconde boîte de dialogue pendant la notification de
+  cette même perte de connexion ; une erreur demandée ultérieurement reste signalée normalement.
 
 Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend. Ils couvrent
 notamment fichiers, dossiers et liens symboliques, montages sources ou descendants, bind mounts,

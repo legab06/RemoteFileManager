@@ -11,10 +11,18 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <functional>
 #include <memory>
+
+namespace rfm::core
+{
+class RemoteTransferBackend;
+}
 
 namespace rfm::ssh
 {
+
+class SshSessionTransferTest;
 
 class SshSession final : public QObject
 {
@@ -73,8 +81,15 @@ class SshSession final : public QObject
     bool event(QEvent* event) override;
 
   private:
+    using TransferBackendFactory =
+        std::function<std::unique_ptr<rfm::core::RemoteTransferBackend>()>;
+
     class Impl;
     std::unique_ptr<Impl> m_impl;
+    friend class SshSessionTransferTest;
+
+    SshSession(TransferBackendFactory transferBackendFactory,
+               std::function<bool()> transferConnectionAvailable, QObject* parent);
 
     void authenticateAndOpen();
     void processTransferStep();
@@ -94,6 +109,9 @@ class SshSession final : public QObject
     void startRemoteStorageScanner(quint64 requestId);
     void startPendingRemoteWork();
     void completeShutdownIfReady();
+    void publishTransferProgress(const rfm::core::TransferProgress& progress);
+    void terminalizeQueuedTransfers(rfm::core::TransferState state, const QString& error);
+    void terminalizeTransfers(rfm::core::TransferState state, const QString& error);
     void fail(const QString& message);
 };
 
