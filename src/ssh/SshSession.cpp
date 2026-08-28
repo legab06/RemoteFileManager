@@ -8,7 +8,6 @@
 #include "remotefilemanager/core/TransferDirectoryJob.hpp"
 #include "remotefilemanager/core/TransferFileJob.hpp"
 #include "remotefilemanager/core/TransferJob.hpp"
-#include "remotefilemanager/core/TransferQueue.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/RemoteStorageScanner.hpp"
 #include "remotefilemanager/ssh/RemoteVolumeService.hpp"
@@ -1314,7 +1313,6 @@ class SshSession::Impl final
         copyBackend.reset();
         activeTransferJob.reset();
         transferBackend.reset();
-        static_cast<void>(transferQueue.takeAll());
         terminalTransferIds.clear();
         transferStepScheduled = false;
         copyStepScheduled = false;
@@ -1361,7 +1359,6 @@ class SshSession::Impl final
     QByteArray storageProbeData;
     quint64 storageProbeRequestId{0};
     quint64 pendingStorageRequestId{0};
-    rfm::core::TransferQueue transferQueue;
     QSet<quint64> terminalTransferIds;
     TransferBackendFactory transferBackendFactory;
     std::function<bool()> transferConnectionAvailable;
@@ -1384,8 +1381,8 @@ SshSession::SshSession(TransferBackendFactory transferBackendFactory,
 
 SshSession::~SshSession()
 {
-    terminalizeTransfers(rfm::core::TransferState::Cancelled,
-                         tr("Transfer cancelled because the SSH session is closing."));
+    terminalizeTransfer(rfm::core::TransferState::Cancelled,
+                        tr("Transfer cancelled because the SSH session is closing."));
 }
 
 void SshSession::postVolumeAuthentication(quint64 operationId, quint64 authenticationToken,
@@ -1408,8 +1405,8 @@ bool SshSession::event(QEvent* event)
 
 void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString password)
 {
-    terminalizeTransfers(rfm::core::TransferState::Cancelled,
-                         tr("Transfer cancelled because the SSH session was replaced."));
+    terminalizeTransfer(rfm::core::TransferState::Cancelled,
+                        tr("Transfer cancelled because the SSH session was replaced."));
     m_impl->reset();
     if (!profile.isValid()) {
         fail(tr("Invalid connection settings."));
@@ -2175,35 +2172,57 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
     emit operationFinished(operations.remove(id, sources, recursive));
 }
 
-void SshSession::enqueueTransfer(rfm::core::TransferRequest request)
+void SshSession::startTransfer(rfm::core::TransferRequest request)
 {
+    m_impl->terminalTransferIds.remove(request.id);
     if (!m_impl->transfersAvailable() || m_impl->shuttingDown || m_impl->disconnecting ||
         request.id == 0 || request.source.isEmpty() || request.destination.isEmpty() ||
         request.source.contains(QChar{'\0'}) || request.destination.contains(QChar{'\0'})) {
-        emit transferRejected(request.id,
-                              tr("Invalid transfer request or no active SFTP connection."));
+        const QString error = tr("Invalid transfer request or no active SFTP connection.");
+        emit transferExecutorFailed(error);
+        publishTransferProgress({request.id,
+                                 rfm::core::TransferState::Failed,
+                                 request.source,
+                                 request.destination,
+                                 0,
+                                 0,
+                                 0,
+                                 error,
+                                 0,
+                                 0,
+                                 {},
+                                 request.direction,
+                                 request.directory});
         return;
     }
-    if ((m_impl->activeTransferJob != nullptr &&
-         m_impl->activeTransferJob->progress().id == request.id) ||
-        !m_impl->transferQueue.enqueue(request)) {
-        emit transferRejected(request.id, tr("A transfer with this identifier already exists."));
+    if (m_impl->activeTransferJob != nullptr) {
+        emit transferRejected(request.id, tr("Another transfer is already active."));
         return;
     }
-    m_impl->terminalTransferIds.remove(request.id);
-    publishTransferProgress({request.id,
-                             rfm::core::TransferState::Queued,
-                             request.source,
-                             request.destination,
-                             0,
-                             0,
-                             0,
-                             {},
-                             0,
-                             0,
-                             {},
-                             request.direction,
-                             request.directory});
+    m_impl->transferBackend = m_impl->makeTransferBackend();
+    if (m_impl->transferBackend == nullptr) {
+        publishTransferProgress({request.id,
+                                 rfm::core::TransferState::Failed,
+                                 request.source,
+                                 request.destination,
+                                 0,
+                                 0,
+                                 0,
+                                 tr("Unable to initialize the transfer backend."),
+                                 0,
+                                 0,
+                                 {},
+                                 request.direction,
+                                 request.directory});
+        return;
+    }
+    if (request.directory) {
+        m_impl->activeTransferJob =
+            std::make_unique<rfm::core::TransferDirectoryJob>(*m_impl->transferBackend, request);
+    } else {
+        m_impl->activeTransferJob =
+            std::make_unique<rfm::core::TransferFileJob>(*m_impl->transferBackend, request);
+    }
     scheduleTransferStep();
 }
 
@@ -2238,24 +2257,7 @@ void SshSession::cancelTransfer(quint64 id)
         return;
     }
 
-    rfm::core::TransferRequest cancelled;
-    if (m_impl->transferQueue.cancel(id, cancelled)) {
-        publishTransferProgress({cancelled.id,
-                                 rfm::core::TransferState::Cancelled,
-                                 cancelled.source,
-                                 cancelled.destination,
-                                 0,
-                                 0,
-                                 0,
-                                 {},
-                                 0,
-                                 0,
-                                 {},
-                                 cancelled.direction,
-                                 cancelled.directory});
-        return;
-    }
-    emit transferRejected(id, tr("The transfer was not found or is already terminal."));
+    emit transferRejected(id, tr("Only the active transfer can be cancelled by this executor."));
 }
 
 void SshSession::cancelRemoteOperation(quint64 id)
@@ -2273,8 +2275,6 @@ void SshSession::shutdownTransfers()
     cancelStorageProbe();
     cancelStorageScan();
     m_impl->shuttingDown = true;
-    terminalizeQueuedTransfers(rfm::core::TransferState::Cancelled,
-                               tr("Transfer cancelled because the application is closing."));
     if (m_impl->activeTransferJob != nullptr) {
         if (!m_impl->activeTransferJob->isFinished()) {
             static_cast<void>(m_impl->activeTransferJob->requestCancel());
@@ -2307,64 +2307,23 @@ void SshSession::processTransferStep()
         }
         m_impl->activeTransferJob->step();
         const bool connectionLost = !m_impl->transferBackend->connectionAlive();
-        publishTransferProgress(m_impl->activeTransferJob->progress());
         if (connectionLost && !m_impl->shuttingDown && !m_impl->disconnecting) {
             fail(tr("The SSH/SFTP connection was lost during a transfer."));
             return;
         }
         if (m_impl->activeTransferJob->isFinished()) {
+            const rfm::core::TransferProgress progress = m_impl->activeTransferJob->progress();
             m_impl->activeTransferJob.reset();
             m_impl->transferBackend.reset();
-            const bool shuttingDown = m_impl->shuttingDown;
+            publishTransferProgress(progress);
             completeShutdownIfReady();
-            if (shuttingDown) {
-                return;
-            }
-            if (!m_impl->transferQueue.isEmpty()) {
-                scheduleTransferStep();
-            }
         } else {
+            publishTransferProgress(m_impl->activeTransferJob->progress());
             scheduleTransferStep();
         }
         return;
     }
-    if (m_impl->shuttingDown || m_impl->disconnecting) {
-        completeShutdownIfReady();
-        return;
-    }
-    const std::optional<rfm::core::TransferRequest> next = m_impl->transferQueue.takeNext();
-    if (!next.has_value()) {
-        return;
-    }
-
-    m_impl->transferBackend = m_impl->makeTransferBackend();
-    if (m_impl->transferBackend == nullptr) {
-        publishTransferProgress({next->id,
-                                 rfm::core::TransferState::Failed,
-                                 next->source,
-                                 next->destination,
-                                 0,
-                                 0,
-                                 0,
-                                 tr("Unable to initialize the transfer backend."),
-                                 0,
-                                 0,
-                                 {},
-                                 next->direction,
-                                 next->directory});
-        if (!m_impl->transferQueue.isEmpty()) {
-            scheduleTransferStep();
-        }
-        return;
-    }
-    if (next->directory) {
-        m_impl->activeTransferJob =
-            std::make_unique<rfm::core::TransferDirectoryJob>(*m_impl->transferBackend, *next);
-    } else {
-        m_impl->activeTransferJob =
-            std::make_unique<rfm::core::TransferFileJob>(*m_impl->transferBackend, *next);
-    }
-    scheduleTransferStep();
+    completeShutdownIfReady();
 }
 
 void SshSession::scheduleCopyStep()
@@ -2419,8 +2378,6 @@ void SshSession::disconnectFromHost()
     cancelStorageProbe();
     cancelStorageScan();
     m_impl->disconnecting = true;
-    terminalizeQueuedTransfers(rfm::core::TransferState::Cancelled,
-                               tr("Transfer cancelled because the SSH session is disconnecting."));
     if (m_impl->activeTransferJob != nullptr && !m_impl->activeTransferJob->isFinished()) {
         static_cast<void>(m_impl->activeTransferJob->requestCancel());
         scheduleTransferStep();
@@ -2443,44 +2400,30 @@ void SshSession::publishTransferProgress(const rfm::core::TransferProgress& prog
     emit transferUpdated(progress);
 }
 
-void SshSession::terminalizeQueuedTransfers(rfm::core::TransferState state, const QString& error)
+void SshSession::terminalizeTransfer(rfm::core::TransferState state, const QString& error)
 {
-    const QList<rfm::core::TransferRequest> requests = m_impl->transferQueue.takeAll();
-    for (const rfm::core::TransferRequest& request : requests) {
-        publishTransferProgress({request.id,
-                                 state,
-                                 request.source,
-                                 request.destination,
-                                 0,
-                                 0,
-                                 0,
-                                 error,
-                                 0,
-                                 0,
-                                 {},
-                                 request.direction,
-                                 request.directory});
-    }
-}
-
-void SshSession::terminalizeTransfers(rfm::core::TransferState state, const QString& error)
-{
+    std::optional<rfm::core::TransferProgress> terminalProgress;
     if (m_impl->activeTransferJob != nullptr) {
         rfm::core::TransferProgress progress = m_impl->activeTransferJob->progress();
         if (!isTerminalTransferState(progress.state)) {
             progress.state = state;
             progress.error = error;
         }
-        publishTransferProgress(progress);
+        terminalProgress = std::move(progress);
     }
     m_impl->activeTransferJob.reset();
     m_impl->transferBackend.reset();
-    terminalizeQueuedTransfers(state, error);
+    if (terminalProgress.has_value()) {
+        publishTransferProgress(*terminalProgress);
+    }
 }
 
 void SshSession::fail(const QString& message)
 {
-    terminalizeTransfers(rfm::core::TransferState::Failed, message);
+    if (m_impl->activeTransferJob != nullptr) {
+        emit transferExecutorFailed(message);
+    }
+    terminalizeTransfer(rfm::core::TransferState::Failed, message);
     m_impl->reset();
     emit failed(message);
 }

@@ -31,6 +31,16 @@ worker avec une file de tâches. Les transferts et copies serveur longues avance
 réordonnancées dans la boucle d'événements afin que le worker puisse traiter navigation, annulation
 et arrêt propre entre deux étapes.
 
+L'admission des Upload/Download est séparée de leur exécution. `TransferCoordinator`, dans le thread
+graphique mais sans aucune I/O, possède l'unique `TransferQueue`, publie `Queued`, conserve au plus
+une requête active et route pause, reprise et annulation vers son exécuteur. `SshSession` ne choisit
+jamais le transfert suivant : elle exécute uniquement le job actif et publie les états à partir de
+`Preparing`. Après un terminal, le coordinateur libère son slot puis décide seul du dispatch suivant.
+Une indisponibilité fatale de l'exécuteur est signalée avant le terminal actif ; le coordinateur peut
+ainsi échouer les requêtes encore queued sans connaître libssh ni démarrer un nouveau job. Le shutdown
+et la déconnexion extraient également cette queue avant de demander le nettoyage coopératif du job
+actif au worker.
+
 La découverte des volumes utilise la même discipline : `LocalFileSystemWorker` lit
 la machine cliente et `SshSession` lit le serveur connecté. Les deux collecteurs
 produisent les mêmes preuves topologiques et délèguent la décision métier à
@@ -56,6 +66,9 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
 
 ## Opérations distantes
 
+- Remote Copy/Move conserve temporairement son scheduler propre dans `SshSession`; son admission dans
+  l'autorité commune est reportée au lot suivant. Le coordinateur n'est toutefois couplé ni à SSH ni
+  à un thread d'exécution particulier, afin de pouvoir accueillir ensuite un exécuteur local.
 - SFTP sert à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
 - Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.

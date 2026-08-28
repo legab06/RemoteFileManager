@@ -41,6 +41,7 @@ class OperationHistoryStore;
 class ServerProfileStore;
 class LocalFileSystemWorker;
 class LocalFileOperationWorker;
+class TransferCoordinator;
 } // namespace rfm::core
 
 namespace rfm::app
@@ -283,6 +284,7 @@ class MainWindow final : public QMainWindow
     QThread* m_localOperationThread{nullptr};
     QThread* m_volumeThread{nullptr};
     rfm::ssh::SshSession* m_sshSession{nullptr};
+    rfm::core::TransferCoordinator* m_transferCoordinator{nullptr};
     rfm::core::LocalFileSystemWorker* m_localFileSystem{nullptr};
     rfm::core::LocalFileOperationWorker* m_localFileOperationWorker{nullptr};
     rfm::core::VolumeOperationWorker* m_volumeOperationWorker{nullptr};

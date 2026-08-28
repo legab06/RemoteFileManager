@@ -1,4 +1,5 @@
 #include "remotefilemanager/core/RemoteTransferBackend.hpp"
+#include "remotefilemanager/core/TransferCoordinator.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
 #include <QFile>
@@ -210,6 +211,8 @@ class SshSessionTransferTest final : public QObject
 
   private:
     [[nodiscard]] std::unique_ptr<SshSession> makeSession();
+    [[nodiscard]] std::unique_ptr<rfm::core::TransferCoordinator>
+    makeCoordinator(SshSession& session);
     [[nodiscard]] QString makeEmptySource(QTemporaryDir& directory, const QString& name);
     void startFirstTransfer(SshSession& session);
 
@@ -237,6 +240,34 @@ std::unique_ptr<SshSession> SshSessionTransferTest::makeSession()
         [] { return true; }, nullptr));
 }
 
+std::unique_ptr<rfm::core::TransferCoordinator>
+SshSessionTransferTest::makeCoordinator(SshSession& session)
+{
+    auto coordinator = std::make_unique<rfm::core::TransferCoordinator>();
+    connect(coordinator.get(), &rfm::core::TransferCoordinator::startTransferRequested, &session,
+            &SshSession::startTransfer);
+    connect(coordinator.get(), &rfm::core::TransferCoordinator::pauseActiveRequested, &session,
+            &SshSession::pauseTransfer);
+    connect(coordinator.get(), &rfm::core::TransferCoordinator::resumeActiveRequested, &session,
+            &SshSession::resumeTransfer);
+    connect(coordinator.get(), &rfm::core::TransferCoordinator::cancelActiveRequested, &session,
+            &SshSession::cancelTransfer);
+    connect(coordinator.get(), &rfm::core::TransferCoordinator::shutdownExecutorRequested, &session,
+            &SshSession::shutdownTransfers);
+    connect(coordinator.get(), &rfm::core::TransferCoordinator::disconnectExecutorRequested,
+            &session, &SshSession::disconnectFromHost);
+    connect(&session, &SshSession::transferUpdated, coordinator.get(),
+            &rfm::core::TransferCoordinator::handleExecutorProgress);
+    connect(&session, &SshSession::transferExecutorFailed, coordinator.get(),
+            &rfm::core::TransferCoordinator::handleExecutorFailure);
+    connect(&session, &SshSession::transferRejected, coordinator.get(),
+            &rfm::core::TransferCoordinator::handleExecutorRejection);
+    connect(&session, &SshSession::transfersShutdown, coordinator.get(),
+            &rfm::core::TransferCoordinator::handleExecutorShutdown);
+    coordinator->executorConnected();
+    return coordinator;
+}
+
 QString SshSessionTransferTest::makeEmptySource(QTemporaryDir& directory, const QString& name)
 {
     const QString path = directory.filePath(name);
@@ -261,16 +292,17 @@ void SshSessionTransferTest::shutdownCancelsActiveAndQueuedExactlyOnce()
     const QString source = makeEmptySource(directory, QStringLiteral("source"));
     QVERIFY(!source.isEmpty());
     auto session = makeSession();
-    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
-    QSignalSpy shutdown(session.get(), &SshSession::transfersShutdown);
+    auto coordinator = makeCoordinator(*session);
+    QSignalSpy updates(coordinator.get(), &rfm::core::TransferCoordinator::transferUpdated);
+    QSignalSpy shutdown(coordinator.get(), &rfm::core::TransferCoordinator::transfersShutdown);
 
-    session->enqueueTransfer(upload(1, source));
-    session->enqueueTransfer(upload(2, source));
-    session->enqueueTransfer(upload(3, source));
+    coordinator->enqueueTransfer(upload(1, source));
+    coordinator->enqueueTransfer(upload(2, source));
+    coordinator->enqueueTransfer(upload(3, source));
     startFirstTransfer(*session);
     QCOMPARE(m_createdBackends, 1);
 
-    session->shutdownTransfers();
+    coordinator->shutdownTransfers();
     QTRY_COMPARE(shutdown.size(), 1);
     QCOMPARE(terminalCount(updates, 1), 1);
     QCOMPARE(terminalCount(updates, 2), 1);
@@ -288,13 +320,14 @@ void SshSessionTransferTest::forcedDisconnectCancelsActiveAndQueuedExactlyOnce()
     const QString source = makeEmptySource(directory, QStringLiteral("source"));
     QVERIFY(!source.isEmpty());
     auto session = makeSession();
-    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+    auto coordinator = makeCoordinator(*session);
+    QSignalSpy updates(coordinator.get(), &rfm::core::TransferCoordinator::transferUpdated);
     QSignalSpy disconnected(session.get(), &SshSession::disconnected);
 
-    session->enqueueTransfer(upload(11, source));
-    session->enqueueTransfer(upload(12, source));
+    coordinator->enqueueTransfer(upload(11, source));
+    coordinator->enqueueTransfer(upload(12, source));
     startFirstTransfer(*session);
-    session->disconnectFromHost();
+    coordinator->disconnectExecutor();
 
     QTRY_COMPARE(disconnected.size(), 1);
     QCOMPARE(terminalCount(updates, 11), 1);
@@ -310,14 +343,17 @@ void SshSessionTransferTest::connectionLossFailsActiveAndQueuedExactlyOnce()
     QVERIFY(directory.isValid());
     m_modes = {BackendMode::TransportIoFailure};
     auto session = makeSession();
-    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+    auto coordinator = makeCoordinator(*session);
+    QSignalSpy updates(coordinator.get(), &rfm::core::TransferCoordinator::transferUpdated);
     QSignalSpy failures(session.get(), &SshSession::failed);
+    QSignalSpy executorFailures(session.get(), &SshSession::transferExecutorFailed);
 
-    session->enqueueTransfer(download(21, directory));
-    session->enqueueTransfer(download(22, directory));
-    session->enqueueTransfer(download(23, directory));
+    coordinator->enqueueTransfer(download(21, directory));
+    coordinator->enqueueTransfer(download(22, directory));
+    coordinator->enqueueTransfer(download(23, directory));
 
     QTRY_COMPARE(failures.size(), 1);
+    QCOMPARE(executorFailures.size(), 1);
     QCOMPARE(terminalCount(updates, 21), 1);
     QCOMPARE(terminalCount(updates, 22), 1);
     QCOMPARE(terminalCount(updates, 23), 1);
@@ -347,11 +383,13 @@ void SshSessionTransferTest::normalFailureStartsNextTransfer()
     QVERIFY(directory.isValid());
     m_modes = {BackendMode::FileIoFailure, BackendMode::Success};
     auto session = makeSession();
-    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+    auto coordinator = makeCoordinator(*session);
+    QSignalSpy updates(coordinator.get(), &rfm::core::TransferCoordinator::transferUpdated);
     QSignalSpy failures(session.get(), &SshSession::failed);
+    QSignalSpy executorFailures(session.get(), &SshSession::transferExecutorFailed);
 
-    session->enqueueTransfer(download(31, directory));
-    session->enqueueTransfer(download(32, directory));
+    coordinator->enqueueTransfer(download(31, directory));
+    coordinator->enqueueTransfer(download(32, directory));
 
     QTRY_COMPARE(terminalCount(updates, 32), 1);
     QCOMPARE(terminalCount(updates, 31), 1);
@@ -362,6 +400,7 @@ void SshSessionTransferTest::normalFailureStartsNextTransfer()
     QVERIFY(eventIndex(updates, 31, rfm::core::TransferState::Failed) <
             eventIndex(updates, 32, rfm::core::TransferState::Preparing));
     QCOMPARE(failures.size(), 0);
+    QCOMPARE(executorFailures.size(), 0);
     QCOMPARE(m_createdBackends, 2);
 }
 
@@ -372,19 +411,20 @@ void SshSessionTransferTest::cancellingQueuedTransferDoesNotCreateBackend()
     const QString source = makeEmptySource(directory, QStringLiteral("source"));
     QVERIFY(!source.isEmpty());
     auto session = makeSession();
-    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
-    QSignalSpy shutdown(session.get(), &SshSession::transfersShutdown);
+    auto coordinator = makeCoordinator(*session);
+    QSignalSpy updates(coordinator.get(), &rfm::core::TransferCoordinator::transferUpdated);
+    QSignalSpy shutdown(coordinator.get(), &rfm::core::TransferCoordinator::transfersShutdown);
 
-    session->enqueueTransfer(upload(41, source));
-    session->enqueueTransfer(upload(42, source));
+    coordinator->enqueueTransfer(upload(41, source));
+    coordinator->enqueueTransfer(upload(42, source));
     startFirstTransfer(*session);
-    session->cancelTransfer(42);
+    coordinator->cancelTransfer(42);
 
     QCOMPARE(terminalCount(updates, 42), 1);
     QCOMPARE(terminalState(updates, 42), rfm::core::TransferState::Cancelled);
     QCOMPARE(m_createdBackends, 1);
 
-    session->shutdownTransfers();
+    coordinator->shutdownTransfers();
     QTRY_COMPARE(shutdown.size(), 1);
     QCOMPARE(terminalCount(updates, 41), 1);
     QCOMPARE(terminalCount(updates, 42), 1);

@@ -36,7 +36,12 @@ La release v0.8.1 complète le pipeline de stockage sans modifier ses frontière
   Une erreur SFTP ordinaire ne tue donc pas la session ; une interruption réseau transitoire peut
   continuer si libssh ne l'a pas déclarée fatale. Les erreurs secondaires déjà queued qui constatent
   ensuite l'absence de SFTP ne créent pas une seconde boîte de dialogue pendant la notification de
-  cette même perte de connexion ; une erreur demandée ultérieurement reste signalée normalement.
+  cette même perte de connexion ; une erreur demandée ultérieurement reste signalée normalement ;
+- l'admission FIFO des Upload/Download appartient désormais au `TransferCoordinator` Core. Lui seul
+  publie `Queued`, annule les requêtes encore en attente et choisit le prochain actif. `SshSession`
+  est limitée à zéro ou un job de transfert, ne contient plus de `TransferQueue` et signale
+  sémantiquement la perte de son exécuteur avant le terminal actif. Remote Copy/Move reste sur son
+  scheduler historique jusqu'au prochain lot.
 
 Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend. Ils couvrent
 notamment fichiers, dossiers et liens symboliques, montages sources ou descendants, bind mounts,

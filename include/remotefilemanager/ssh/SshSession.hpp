@@ -50,7 +50,7 @@ class SshSession final : public QObject
     void copyEntries(quint64 id, QList<rfm::core::RemoteSelection> sources,
                      QString destinationDirectory);
     void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
-    void enqueueTransfer(rfm::core::TransferRequest request);
+    void startTransfer(rfm::core::TransferRequest request);
     void pauseTransfer(quint64 id);
     void resumeTransfer(quint64 id);
     void cancelTransfer(quint64 id);
@@ -73,6 +73,7 @@ class SshSession final : public QObject
     void operationUpdated(rfm::core::OperationProgress progress);
     void transferUpdated(rfm::core::TransferProgress progress);
     void transferRejected(quint64 id, QString error);
+    void transferExecutorFailed(QString error);
     void transfersShutdown();
     void failed(QString message);
     void disconnected();
@@ -110,8 +111,7 @@ class SshSession final : public QObject
     void startPendingRemoteWork();
     void completeShutdownIfReady();
     void publishTransferProgress(const rfm::core::TransferProgress& progress);
-    void terminalizeQueuedTransfers(rfm::core::TransferState state, const QString& error);
-    void terminalizeTransfers(rfm::core::TransferState state, const QString& error);
+    void terminalizeTransfer(rfm::core::TransferState state, const QString& error);
     void fail(const QString& message);
 };
 

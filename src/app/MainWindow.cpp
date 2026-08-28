@@ -13,6 +13,7 @@
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/core/ServerProfileStore.hpp"
+#include "remotefilemanager/core/TransferCoordinator.hpp"
 #include "remotefilemanager/ssh/LibsshRuntime.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
@@ -265,6 +266,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
 
     m_sshThread = new QThread(this);
     m_sshSession = new rfm::ssh::SshSession;
+    m_transferCoordinator = new rfm::core::TransferCoordinator(this);
     m_sshSession->moveToThread(m_sshThread);
     connect(m_sshThread, &QThread::finished, m_sshSession, &QObject::deleteLater);
     connect(this, &MainWindow::connectionRequested, m_sshSession,
@@ -287,20 +289,32 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     connect(this, &MainWindow::moveRequested, m_sshSession, &rfm::ssh::SshSession::moveEntries);
     connect(this, &MainWindow::copyRequested, m_sshSession, &rfm::ssh::SshSession::copyEntries);
     connect(this, &MainWindow::removeRequested, m_sshSession, &rfm::ssh::SshSession::removeEntries);
-    connect(this, &MainWindow::transferRequested, m_sshSession,
-            &rfm::ssh::SshSession::enqueueTransfer);
-    connect(this, &MainWindow::pauseTransferRequested, m_sshSession,
-            &rfm::ssh::SshSession::pauseTransfer);
-    connect(this, &MainWindow::resumeTransferRequested, m_sshSession,
-            &rfm::ssh::SshSession::resumeTransfer);
-    connect(this, &MainWindow::cancelTransferRequested, m_sshSession,
-            &rfm::ssh::SshSession::cancelTransfer);
+    connect(this, &MainWindow::transferRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::enqueueTransfer);
+    connect(this, &MainWindow::pauseTransferRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::pauseTransfer);
+    connect(this, &MainWindow::resumeTransferRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::resumeTransfer);
+    connect(this, &MainWindow::cancelTransferRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::cancelTransfer);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::startTransferRequested,
+            m_sshSession, &rfm::ssh::SshSession::startTransfer);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::pauseActiveRequested,
+            m_sshSession, &rfm::ssh::SshSession::pauseTransfer);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::resumeActiveRequested,
+            m_sshSession, &rfm::ssh::SshSession::resumeTransfer);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::cancelActiveRequested,
+            m_sshSession, &rfm::ssh::SshSession::cancelTransfer);
     connect(this, &MainWindow::cancelRemoteOperationRequested, m_sshSession,
             &rfm::ssh::SshSession::cancelRemoteOperation);
-    connect(this, &MainWindow::shutdownRequested, m_sshSession,
-            &rfm::ssh::SshSession::shutdownTransfers);
-    connect(this, &MainWindow::disconnectionRequested, m_sshSession,
-            &rfm::ssh::SshSession::disconnectFromHost);
+    connect(this, &MainWindow::shutdownRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::shutdownTransfers);
+    connect(this, &MainWindow::disconnectionRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::disconnectExecutor);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::shutdownExecutorRequested,
+            m_sshSession, &rfm::ssh::SshSession::shutdownTransfers);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::disconnectExecutorRequested,
+            m_sshSession, &rfm::ssh::SshSession::disconnectFromHost);
     connect(m_sshSession, &rfm::ssh::SshSession::hostKeyConfirmationRequired, this,
             &MainWindow::showHostKeyConfirmation);
     connect(m_sshSession, &rfm::ssh::SshSession::connected, this, &MainWindow::handleConnected);
@@ -325,9 +339,15 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleOperationResult);
     connect(m_sshSession, &rfm::ssh::SshSession::operationUpdated, this,
             &MainWindow::handleRemoteOperationProgress);
-    connect(m_sshSession, &rfm::ssh::SshSession::transferUpdated, this,
+    connect(m_sshSession, &rfm::ssh::SshSession::transferUpdated, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::handleExecutorProgress);
+    connect(m_sshSession, &rfm::ssh::SshSession::transferExecutorFailed, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::handleExecutorFailure);
+    connect(m_sshSession, &rfm::ssh::SshSession::transferRejected, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::handleExecutorRejection);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::transferUpdated, this,
             &MainWindow::handleTransferProgress);
-    connect(m_sshSession, &rfm::ssh::SshSession::transferRejected, this,
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::transferRejected, this,
             [this](quint64 id, const QString& error) {
                 if (m_pendingTransferRequests.remove(id) > 0) {
                     m_nonTerminalTransfers.remove(id);
@@ -336,6 +356,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
                 updateConnectionAction();
                 statusBar()->showMessage(error, 8000);
             });
+    connect(m_sshSession, &rfm::ssh::SshSession::transfersShutdown, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::handleExecutorShutdown);
     connect(m_sshSession, &rfm::ssh::SshSession::disconnected, this,
             &MainWindow::handleDisconnected);
     m_sshThread->start();
@@ -362,8 +384,8 @@ MainWindow::~MainWindow()
     }
     if (m_sshThread != nullptr && m_sshThread->isRunning()) {
         QEventLoop shutdownLoop;
-        connect(m_sshSession, &rfm::ssh::SshSession::transfersShutdown, &shutdownLoop,
-                &QEventLoop::quit, Qt::QueuedConnection);
+        connect(m_transferCoordinator, &rfm::core::TransferCoordinator::transfersShutdown,
+                &shutdownLoop, &QEventLoop::quit, Qt::QueuedConnection);
         emit shutdownRequested();
         shutdownLoop.exec(QEventLoop::ExcludeUserInputEvents);
         m_sshThread->quit();
@@ -1245,6 +1267,7 @@ void MainWindow::showRemoteDirectory(const QString& path,
                                      const QList<rfm::core::RemoteEntry>& entries)
 {
     m_connected = true;
+    m_transferCoordinator->executorConnected();
     if (m_activeRemoteMachineId.isEmpty()) {
         m_activeRemoteMachineId = QStringLiteral("ssh:%1@%2:%3")
                                       .arg(m_activeProfile.username, m_activeProfile.host,
@@ -1369,6 +1392,7 @@ void MainWindow::handleDisconnected() { resetDisconnectedUi(); }
 void MainWindow::resetDisconnectedUi()
 {
     m_connected = false;
+    m_transferCoordinator->executorDisconnected();
     m_remoteStorageRefreshPending = false;
     m_remoteStorageRefreshAfterCurrent = false;
     m_remoteStorageRequestId = 0;
