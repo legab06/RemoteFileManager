@@ -52,13 +52,14 @@ struct StorageVolume {
                   QByteArray fileSystemTypeValue, quint64 bytesTotalValue, StorageKind kindValue,
                   bool removableValue, bool ejectableValue, bool readOnlyValue,
                   QString fileSystemLabelValue = {}, QString deviceModelValue = {},
-                  bool mountedValue = true)
+                  bool mountedValue = true, QString deviceNumberValue = {})
         : displayName(std::move(displayNameValue)), rootPath(std::move(rootPathValue)),
           device(std::move(deviceValue)), fileSystemType(std::move(fileSystemTypeValue)),
           bytesTotal(bytesTotalValue), kind(kindValue), removable(removableValue),
           ejectable(ejectableValue), readOnly(readOnlyValue),
           fileSystemLabel(std::move(fileSystemLabelValue)),
-          deviceModel(std::move(deviceModelValue)), mounted(mountedValue)
+          deviceModel(std::move(deviceModelValue)), mounted(mountedValue),
+          deviceNumber(std::move(deviceNumberValue))
     {}
 
     // Presentation only. Navigation must always use rootPath.
@@ -77,11 +78,27 @@ struct StorageVolume {
     QString deviceModel;
     // Explicit availability state. rootPath is a path only and is not used as this flag.
     bool mounted{true};
+    // Stable Linux block identity (major:minor). The device path remains the operation target.
+    QString deviceNumber;
 };
 
 // Common representation of one lsblk JSON object. Acquisition is platform/backend-specific;
 // parsing and conversion to StorageVolume are shared by local and SSH discovery.
 struct LinuxBlockDevice {
+    LinuxBlockDevice() = default;
+    LinuxBlockDevice(QString deviceValue, QString parentDeviceValue, QString objectTypeValue,
+                     QByteArray fileSystemTypeValue, QString fileSystemLabelValue,
+                     QString mountPointValue, QString transportValue, QString deviceModelValue,
+                     quint64 bytesTotalValue, bool removableValue, bool readOnlyValue,
+                     QString deviceNumberValue = {})
+        : device(std::move(deviceValue)), parentDevice(std::move(parentDeviceValue)),
+          objectType(std::move(objectTypeValue)), fileSystemType(std::move(fileSystemTypeValue)),
+          fileSystemLabel(std::move(fileSystemLabelValue)), mountPoint(std::move(mountPointValue)),
+          transport(std::move(transportValue)), deviceModel(std::move(deviceModelValue)),
+          bytesTotal(bytesTotalValue), removable(removableValue), readOnly(readOnlyValue),
+          deviceNumber(std::move(deviceNumberValue))
+    {}
+
     QString device;
     QString parentDevice;
     QString objectType;
@@ -93,6 +110,7 @@ struct LinuxBlockDevice {
     quint64 bytesTotal{0};
     bool removable{false};
     bool readOnly{false};
+    QString deviceNumber;
 };
 
 struct LinuxMountInfo {

@@ -476,6 +476,10 @@ void MainWindow::createActions()
     m_removeAction->setObjectName(QStringLiteral("removeAction"));
     m_removeAction->setShortcut(QKeySequence::Delete);
     connect(m_removeAction, &QAction::triggered, this, &MainWindow::removeSelectedEntries);
+    m_filePropertiesAction = new QAction(tr("Properties"), this);
+    m_filePropertiesAction->setObjectName(QStringLiteral("filePropertiesAction"));
+    connect(m_filePropertiesAction, &QAction::triggered, this,
+            &MainWindow::showContextEntryProperties);
 
     m_clipboardCopyAction = new QAction(tr("Copy"), this);
     m_clipboardCopyAction->setObjectName(QStringLiteral("clipboardCopyAction"));
@@ -699,10 +703,6 @@ void MainWindow::createPlacesDock()
     m_serverProfileErrorLabel->setVisible(false);
     layout->addWidget(m_serverProfileErrorLabel);
 
-    auto* const storageLabel = new QLabel(tr("Storage"), container);
-    storageLabel->setObjectName(QStringLiteral("storageHeaderLabel"));
-    layout->addWidget(storageLabel);
-
     m_navigationTree = new NavigationTree(container);
     layout->addWidget(m_navigationTree);
 
@@ -746,7 +746,7 @@ void MainWindow::createPlacesDock()
                 }
             });
     connect(m_navigationTree->tree(), &QWidget::customContextMenuRequested, this,
-            &MainWindow::showServerProfileContextMenu);
+            &MainWindow::showPlacesContextMenu);
     connect(m_navigationTree, &NavigationTree::localLocationActivated, this,
             &MainWindow::openLocalLocation);
     connect(m_navigationTree, &NavigationTree::localVolumeMountRequested, this,
@@ -1113,21 +1113,66 @@ void MainWindow::connectToServerProfile(const QString& id)
     }
 }
 
-void MainWindow::showServerProfileContextMenu(const QPoint& position)
+void MainWindow::showPlacesContextMenu(const QPoint& position)
 {
-    const QString id = m_navigationTree->profileIdAt(position);
-    if (id.isEmpty()) {
+    const QList<NavigationTree::ContextAction> actions =
+        m_navigationTree->contextActionsAt(position);
+    if (actions.isEmpty()) {
         return;
     }
-    const auto profile = std::ranges::find_if(
-        m_serverProfiles, [&id](const auto& candidate) { return candidate.id == id; });
-    if (profile == m_serverProfiles.cend() || !m_connected ||
-        !profilesHaveSameConnectionSettings(*profile, m_activeProfile)) {
-        return;
-    }
+    m_navigationTree->selectItemAt(position);
+    const bool serverContext = actions.contains(NavigationTree::ContextAction::Connect) ||
+                               actions.contains(NavigationTree::ContextAction::Disconnect);
     QMenu menu(m_navigationTree->tree());
-    menu.addAction(m_disconnectAction);
+    for (const NavigationTree::ContextAction action : actions) {
+        switch (action) {
+        case NavigationTree::ContextAction::Connect:
+            menu.addAction(tr("Connect"), this, &MainWindow::connectToSelectedServerProfile)
+                ->setEnabled(m_connectServerProfileButton->isEnabled());
+            break;
+        case NavigationTree::ContextAction::Disconnect:
+            menu.addAction(m_disconnectAction);
+            break;
+        case NavigationTree::ContextAction::Open:
+            menu.addAction(tr("Open"), m_navigationTree, &NavigationTree::activateSelectedItem);
+            break;
+        case NavigationTree::ContextAction::Mount:
+            menu.addAction(tr("Mount"), m_navigationTree, &NavigationTree::mountSelectedVolume);
+            break;
+        case NavigationTree::ContextAction::Unmount:
+            menu.addAction(tr("Unmount"), m_navigationTree, &NavigationTree::unmountSelectedVolume);
+            break;
+        case NavigationTree::ContextAction::Properties:
+            if (serverContext) {
+                menu.addAction(tr("Properties"), this, &MainWindow::editSelectedServerProfile);
+            } else {
+                menu.addAction(tr("Properties"), this, &MainWindow::showSelectedPlaceProperties);
+            }
+            break;
+        }
+    }
     menu.exec(m_navigationTree->tree()->viewport()->mapToGlobal(position));
+}
+
+void MainWindow::showSelectedPlaceProperties()
+{
+    showPropertiesDialog(m_navigationTree->selectedPropertiesTitle(),
+                         m_navigationTree->selectedPropertiesText());
+}
+
+void MainWindow::showContextEntryProperties()
+{
+    const auto properties = m_paneWorkspace->activePane()->contextEntryProperties();
+    if (properties.has_value()) {
+        showPropertiesDialog(properties->title, properties->text);
+    }
+}
+
+void MainWindow::showPropertiesDialog(const QString& title, const QString& text)
+{
+    if (!title.isEmpty() && !text.isEmpty()) {
+        QMessageBox::information(this, tr("Properties — %1").arg(title), text);
+    }
 }
 
 void MainWindow::requestDisconnection()
@@ -1508,6 +1553,10 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
         menu.addSeparator();
     }
     menu.addAction(m_createDirectoryAction);
+    if (m_paneWorkspace->activePane()->contextEntryProperties().has_value()) {
+        menu.addSeparator();
+        menu.addAction(m_filePropertiesAction);
+    }
     menu.exec(globalPosition);
 }
 

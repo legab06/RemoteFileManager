@@ -11,6 +11,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <optional>
+
 class QLineEdit;
 class QTableWidget;
 
@@ -18,6 +20,11 @@ namespace rfm::app
 {
 
 enum class PaneNavigation { Initial, Normal, Back, Forward, Refresh, SafetyFallback };
+
+struct FileEntryProperties {
+    QString title;
+    QString text;
+};
 
 class FileBrowserPane final : public QWidget
 {
@@ -36,6 +43,7 @@ class FileBrowserPane final : public QWidget
     [[nodiscard]] bool canGoBack() const;
     [[nodiscard]] bool canGoForward() const;
     [[nodiscard]] QByteArray createInternalDragData() const;
+    [[nodiscard]] std::optional<FileEntryProperties> contextEntryProperties() const;
 
     void showDirectory(const QString& path, const QString& displayPath,
                        const QList<rfm::core::RemoteEntry>& entries,
@@ -98,6 +106,7 @@ class FileBrowserPane final : public QWidget
     quint64 m_paneId{0};
     QSet<QString> m_cutPaths;
     int m_dropHighlightRow{-1};
+    int m_contextMenuRow{-1};
     bool m_restoreTableFocus{false};
 };
 

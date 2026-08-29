@@ -126,7 +126,10 @@ class MainWindow final : public QMainWindow
     void removeSelectedServerProfile();
     void connectToSelectedServerProfile();
     void connectToServerProfile(const QString& id);
-    void showServerProfileContextMenu(const QPoint& position);
+    void showPlacesContextMenu(const QPoint& position);
+    void showSelectedPlaceProperties();
+    void showContextEntryProperties();
+    void showPropertiesDialog(const QString& title, const QString& text);
     void requestDisconnection();
     [[nodiscard]] rfm::core::ConnectionProfile selectedServerProfile() const;
     Q_INVOKABLE void handleDisconnected();
@@ -255,6 +258,7 @@ class MainWindow final : public QMainWindow
     QAction* m_moveToOtherPaneAction{nullptr};
     QAction* m_copyToOtherPaneAction{nullptr};
     QAction* m_removeAction{nullptr};
+    QAction* m_filePropertiesAction{nullptr};
     QAction* m_uploadAction{nullptr};
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};

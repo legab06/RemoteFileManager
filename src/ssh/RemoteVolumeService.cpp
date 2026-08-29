@@ -47,8 +47,9 @@ RemoteLinuxVolumeService::parseCapabilities(const QByteArray& standardOutput)
 
 QString RemoteLinuxVolumeService::blockDeviceDiscoveryCommand()
 {
-    return QStringLiteral("LC_ALL=C lsblk --json --bytes --paths --output "
-                          "PATH,NAME,PKNAME,TYPE,FSTYPE,LABEL,SIZE,MOUNTPOINTS,RO,RM,TRAN,MODEL");
+    return QStringLiteral(
+        "LC_ALL=C lsblk --json --bytes --paths --output "
+        "PATH,NAME,PKNAME,TYPE,FSTYPE,LABEL,SIZE,MOUNTPOINTS,RO,RM,TRAN,MODEL,MAJ:MIN");
 }
 
 std::optional<QString>

@@ -41,6 +41,39 @@ QString rootIdentity(const QString& rootPath)
     return identity;
 }
 
+QString localDeviceNumber(const QString& device)
+{
+#ifdef Q_OS_LINUX
+    const QByteArray nativeDevice = QFile::encodeName(device);
+    struct stat deviceStatus{};
+    if (device.isEmpty() || ::stat(nativeDevice.constData(), &deviceStatus) != 0 ||
+        !S_ISBLK(deviceStatus.st_mode)) {
+        return {};
+    }
+    return QStringLiteral("%1:%2").arg(
+        QString::number(static_cast<qulonglong>(major(deviceStatus.st_rdev))),
+        QString::number(static_cast<qulonglong>(minor(deviceStatus.st_rdev))));
+#else
+    Q_UNUSED(device)
+    return {};
+#endif
+}
+
+QString localBlockIdentity(const StorageVolume& volume)
+{
+    const QString deviceNumber = volume.deviceNumber.trimmed();
+    if (!deviceNumber.isEmpty()) {
+        return QStringLiteral("number\n%1").arg(deviceNumber);
+    }
+    const QString device = QDir::cleanPath(volume.device.trimmed());
+    if (!device.startsWith(QStringLiteral("/dev/"))) {
+        return {};
+    }
+    const QString canonicalDevice = QFileInfo(device).canonicalFilePath();
+    return QStringLiteral("device\n%1")
+        .arg(canonicalDevice.isEmpty() ? device : QDir::cleanPath(canonicalDevice));
+}
+
 QList<LocalStorageMount> mountedStorageSnapshot()
 {
     QList<LocalStorageMount> snapshot;
@@ -49,7 +82,8 @@ QList<LocalStorageMount> mountedStorageSnapshot()
     for (const QStorageInfo& storage : mountedVolumes) {
         snapshot.push_back({storage.rootPath(), QFile::decodeName(storage.device()),
                             storage.fileSystemType(), storage.name(), storage.bytesTotal(),
-                            storage.isReadOnly(), storage.isValid(), storage.isReady()});
+                            storage.isReadOnly(), storage.isValid(), storage.isReady(),
+                            localDeviceNumber(QFile::decodeName(storage.device()))});
     }
     return snapshot;
 }
@@ -76,17 +110,17 @@ bool preferStorageRepresentative(const StorageVolume& candidate, const StorageVo
 QList<StorageVolume> deduplicateMountedBlockVolumes(QList<StorageVolume> volumes)
 {
     QList<StorageVolume> uniqueVolumes;
-    QHash<QString, qsizetype> indexesByDevice;
+    QHash<QString, qsizetype> indexesByIdentity;
     uniqueVolumes.reserve(volumes.size());
     for (StorageVolume& volume : volumes) {
-        const QString device = volume.device.trimmed();
-        if (!volume.mounted || !device.startsWith(QStringLiteral("/dev/"))) {
+        const QString identity = localBlockIdentity(volume);
+        if (!volume.mounted || identity.isEmpty()) {
             uniqueVolumes.push_back(std::move(volume));
             continue;
         }
-        const auto existing = indexesByDevice.constFind(device);
-        if (existing == indexesByDevice.cend()) {
-            indexesByDevice.insert(device, uniqueVolumes.size());
+        const auto existing = indexesByIdentity.constFind(identity);
+        if (existing == indexesByIdentity.cend()) {
+            indexesByIdentity.insert(identity, uniqueVolumes.size());
             uniqueVolumes.push_back(std::move(volume));
         } else if (preferStorageRepresentative(volume, uniqueVolumes.at(existing.value()))) {
             uniqueVolumes[existing.value()] = std::move(volume);
@@ -126,7 +160,8 @@ QList<LocalBlockDevice> linuxBlockDeviceSnapshot()
     process.setArguments(
         {QStringLiteral("--json"), QStringLiteral("--bytes"), QStringLiteral("--paths"),
          QStringLiteral("--output"),
-         QStringLiteral("PATH,NAME,PKNAME,TYPE,FSTYPE,LABEL,SIZE,MOUNTPOINTS,RO,RM,TRAN,MODEL")});
+         QStringLiteral(
+             "PATH,NAME,PKNAME,TYPE,FSTYPE,LABEL,SIZE,MOUNTPOINTS,RO,RM,TRAN,MODEL,MAJ:MIN")});
     process.start(QIODevice::ReadOnly);
     if (!process.waitForStarted(2'000)) {
         return {};
@@ -653,6 +688,7 @@ LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot,
         volume.fileSystemLabel = storage.fileSystemLabel.trimmed();
         volume.deviceModel = platformDetails.deviceModel;
         volume.mounted = true;
+        volume.deviceNumber = storage.deviceNumber.trimmed();
         volume.displayName = storageDisplayName(volume.fileSystemLabel, volume.deviceModel,
                                                 volume.device, volume.rootPath);
         volumes.push_back(std::move(volume));

@@ -78,6 +78,7 @@ class LocalFileSystemTest final : public QObject
     void filtersTechnicalMountsAndDeduplicatesMountedDevices();
     void discoversUnmountedUsbPartitionWithoutTechnicalDuplicates();
     void keepsMountedVolumeWhenBlockDiscoveryReportsItToo();
+    void deduplicatesBlockAliasesByDeviceNumber();
     void matchesLocalPathsOnComponentBoundaries();
 };
 
@@ -739,6 +740,40 @@ void LocalFileSystemTest::keepsMountedVolumeWhenBlockDiscoveryReportsItToo()
     QCOMPARE(snapshot.volumes.constFirst().device, QStringLiteral("/dev/sde1"));
     QCOMPARE(snapshot.volumes.constFirst().rootPath, mountPoint.path());
     QVERIFY(snapshot.volumes.constFirst().mounted);
+}
+
+void LocalFileSystemTest::deduplicatesBlockAliasesByDeviceNumber()
+{
+    QTemporaryDir mountPoint;
+    QVERIFY(mountPoint.isValid());
+    const QList<rfm::core::LocalStorageMount> mounts{
+        {mountPoint.path(), QStringLiteral("/dev/mapper/archive"), QByteArrayLiteral("ext4"),
+         QStringLiteral("ARCHIVE"), 120000, false, true, true, QStringLiteral("253:3")}};
+    const QByteArray blockFixture = R"json({"blockdevices": [
+        {"path": "/dev/dm-3", "type": "dm", "fstype": "ext4", "label": "ARCHIVE",
+         "size": 120000, "mountpoints": [], "ro": false, "rm": false, "maj:min": "253:3"},
+        {"path": "/dev/dm-4", "type": "dm", "fstype": "ext4", "label": "DISTINCT",
+         "size": 240000, "mountpoints": [], "ro": false, "rm": false, "maj:min": "253:4"}
+    ]})json";
+    const QList<rfm::core::LocalBlockDevice> devices =
+        rfm::core::LocalFileSystem::parseLinuxBlockDevices(blockFixture);
+    QCOMPARE(devices.size(), 2);
+
+    const rfm::core::LocalStorageSnapshot snapshot =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(mounts, devices);
+
+    QCOMPARE(snapshot.volumes.size(), 2);
+    QCOMPARE(std::ranges::count_if(snapshot.volumes,
+                                   [](const rfm::core::StorageVolume& volume) {
+                                       return volume.deviceNumber == QStringLiteral("253:3");
+                                   }),
+             1);
+    QVERIFY(std::ranges::any_of(snapshot.volumes, [](const rfm::core::StorageVolume& volume) {
+        return volume.device == QStringLiteral("/dev/mapper/archive") && volume.mounted;
+    }));
+    QVERIFY(std::ranges::any_of(snapshot.volumes, [](const rfm::core::StorageVolume& volume) {
+        return volume.deviceNumber == QStringLiteral("253:4") && !volume.mounted;
+    }));
 }
 
 void LocalFileSystemTest::matchesLocalPathsOnComponentBoundaries()

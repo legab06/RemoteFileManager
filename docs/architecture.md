@@ -66,6 +66,21 @@ le chemin de déconnexion existant.
 Le même modèle porte également le label, le modèle matériel, le périphérique et le
 point de montage. Le choix du nom humain est centralisé ; l'arbre utilise toujours le
 point de montage stocké pour naviguer et ne déduit jamais un chemin du texte affiché.
+Pour un périphérique bloc Linux, `StorageVolume` transporte aussi son identité noyau
+`major:minor`. La fusion rapproche ainsi les alias d'un même device (par exemple un
+chemin device-mapper et son chemin noyau) sans confondre deux partitions distinctes ;
+le chemin `/dev` observé reste la cible des opérations de montage.
+
+Le menu contextuel de Places est calculé à partir de la ligne située sous le clic, et
+non de la sélection précédente. Il ne publie que les intentions compatibles avec le
+type de nœud ; l'ouverture et les opérations de volume réutilisent les signaux de
+`NavigationTree`, tandis que les propriétés d'un serveur enregistré réutilisent son
+dialogue de profil.
+Le navigateur principal conserve aussi le `RemoteEntry` déjà reçu sur chaque ligne :
+son action `Properties` présente cet instantané sans nouveau parcours local récursif
+ni requête SFTP. Le type utilisateur d'un fichier est déduit uniquement de son nom
+avec la base MIME Qt en mode extension ; un type absent ou technique retombe sur
+`File`.
 
 ## Opérations distantes
 
