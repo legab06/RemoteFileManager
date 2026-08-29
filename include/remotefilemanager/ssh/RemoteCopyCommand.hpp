@@ -17,8 +17,7 @@ class RemoteCopyCommand final
                                        bool recursive);
     [[nodiscard]] static QString buildMoveStaging(const QString& source,
                                                   const QString& destination);
-    [[nodiscard]] static std::optional<quint32>
-    parseMoveStagingStatus(const QByteArray& standardOutput);
+    [[nodiscard]] static std::optional<quint32> parseCopyStatus(const QByteArray& standardOutput);
     [[nodiscard]] static QString
     buildRemove(const QString& path, bool recursive, bool protectMountPoint = false,
                 const QString& mountPointIdentity = {},

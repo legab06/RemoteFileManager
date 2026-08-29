@@ -340,7 +340,7 @@ class MainWindow final : public QMainWindow
     QHash<quint64, rfm::core::OperationProgress> m_operations;
     QHash<quint64, quint64> m_transferPanes;
     rfm::core::InternalClipboard m_internalClipboard;
-    QSet<quint64> m_clipboardMoveOperations;
+    QHash<quint64, quint64> m_clipboardMoveOperations;
     std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
     std::unique_ptr<rfm::core::ServerProfileStore> m_serverProfileStore;
     QList<rfm::core::ConnectionProfile> m_serverProfiles;

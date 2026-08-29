@@ -712,38 +712,37 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
             return std::nullopt;
         }
 
-        const std::optional<quint32> moveStagingStatus =
-            m_commandKind == CommandKind::MoveStagingCopy
-                ? rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(m_standardOutput)
-                : std::optional<quint32>{};
-        const bool completionReceived = m_commandKind == CommandKind::MoveStagingCopy
-                                            ? moveStagingStatus.has_value()
-                                            : m_exitStateReceived;
+        const bool copyCommand =
+            m_commandKind == CommandKind::Copy || m_commandKind == CommandKind::MoveStagingCopy;
+        const std::optional<quint32> copyStatus =
+            copyCommand ? rfm::ssh::RemoteCopyCommand::parseCopyStatus(m_standardOutput)
+                        : std::optional<quint32>{};
+        const bool completionReceived = copyCommand ? copyStatus.has_value() : m_exitStateReceived;
         if (!completionReceived && ++m_exitStatePolls < 100) {
             return std::nullopt;
         }
         const QString detail = QString::fromUtf8(m_errorOutput).trimmed();
         const bool exitStateReceived = m_exitStateReceived;
         const CommandKind commandKind = m_commandKind;
-        const uint32_t exitCode = moveStagingStatus.value_or(m_exitCode);
+        const uint32_t exitCode = copyStatus.value_or(m_exitCode);
         const bool inconsistentStatus =
-            moveStagingStatus.has_value() && exitStateReceived && *moveStagingStatus != m_exitCode;
+            copyStatus.has_value() && exitStateReceived && *copyStatus != m_exitCode;
         closeChannel();
         if (inconsistentStatus) {
             return rfm::core::RemoteBackendResult{
                 rfm::core::RemoteBackendError::Failure,
                 QCoreApplication::translate(
                     "SshServerSideCopyBackend",
-                    "The remote move copy reported inconsistent completion status.")};
+                    "The remote copy reported inconsistent completion status.")};
         }
-        if (commandKind == CommandKind::MoveStagingCopy && !moveStagingStatus.has_value()) {
+        if ((commandKind == CommandKind::Copy || commandKind == CommandKind::MoveStagingCopy) &&
+            !copyStatus.has_value()) {
             return rfm::core::RemoteBackendResult{
                 rfm::core::RemoteBackendError::Failure,
-                QCoreApplication::translate(
-                    "SshServerSideCopyBackend",
-                    "Unable to verify completion of the remote move copy.")};
+                QCoreApplication::translate("SshServerSideCopyBackend",
+                                            "Unable to verify completion of the remote copy.")};
         }
-        if ((commandKind == CommandKind::MoveStagingCopy || exitStateReceived) && exitCode == 0) {
+        if ((copyCommand || exitStateReceived) && exitCode == 0) {
             return rfm::core::RemoteBackendResult{};
         }
         if (exitCode == 126 || exitCode == 127) {
@@ -1586,6 +1585,11 @@ void SshSession::listDirectory(quint64 requestId, QString path)
         fail(tr("No active SFTP connection."));
         return;
     }
+    if (m_impl->activeCopyJob != nullptr && m_impl->activeCopyJob->ownsInternalPath(path)) {
+        emit directoryListingFailed(requestId, path,
+                                    tr("This path is internal to an active remote operation."));
+        return;
+    }
     const QByteArray encodedPath = path.toUtf8();
     sftp_dir directory = sftp_opendir(m_impl->sftp, encodedPath.constData());
     if (directory == nullptr) {
@@ -1601,7 +1605,9 @@ void SshSession::listDirectory(quint64 requestId, QString path)
     QList<rfm::core::RemoteEntry> entries;
     while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
         const QString name = QString::fromUtf8(attributes->name);
-        if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
+        if (name != QStringLiteral(".") && name != QStringLiteral("..") &&
+            (m_impl->activeCopyJob == nullptr ||
+             !m_impl->activeCopyJob->hidesListingEntry(path, name))) {
             entries.push_back({name, attributes->size,
                                QDateTime::fromSecsSinceEpoch(attributes->mtime),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
@@ -2107,6 +2113,14 @@ void SshSession::createDirectory(quint64 id, QString parent, QString name)
         emit failed(tr("Aucune connexion SFTP active."));
         return;
     }
+    const QString destination = rfm::core::RemotePath::join(parent, name);
+    if (m_impl->activeCopyJob != nullptr && m_impl->activeCopyJob->ownsInternalPath(destination)) {
+        emit operationFinished({id,
+                                rfm::core::RemoteOperationKind::CreateDirectory,
+                                {{destination, destination, false,
+                                  tr("This path is internal to an active remote operation.")}}});
+        return;
+    }
     SftpBackend backend(m_impl->sftp);
     rfm::core::RemoteFileOperations operations(backend);
     emit operationFinished(operations.createDirectory(id, parent, name));
@@ -2116,6 +2130,17 @@ void SshSession::renameEntry(quint64 id, QString source, QString newName)
 {
     if (m_impl->sftp == nullptr) {
         emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    const QString destination =
+        rfm::core::RemotePath::join(rfm::core::RemotePath::parent(source), newName);
+    if (m_impl->activeCopyJob != nullptr &&
+        (m_impl->activeCopyJob->ownsInternalPath(source) ||
+         m_impl->activeCopyJob->ownsInternalPath(destination))) {
+        emit operationFinished({id,
+                                rfm::core::RemoteOperationKind::Rename,
+                                {{source, destination, false,
+                                  tr("This path is internal to an active remote operation.")}}});
         return;
     }
     SftpBackend backend(m_impl->sftp);
@@ -2146,6 +2171,22 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
 {
     if (m_impl->sftp == nullptr) {
         emit failed(tr("Aucune connexion SFTP active."));
+        return;
+    }
+    if (m_impl->activeCopyJob != nullptr &&
+        std::ranges::any_of(sources, [this](const rfm::core::RemoteSelection& source) {
+            return m_impl->activeCopyJob->ownsInternalPath(source.path);
+        })) {
+        rfm::core::RemoteOperationResult rejected{id, rfm::core::RemoteOperationKind::Remove, {}};
+        rejected.items.reserve(sources.size());
+        for (const rfm::core::RemoteSelection& source : std::as_const(sources)) {
+            rejected.items.push_back(
+                {source.path,
+                 {},
+                 false,
+                 tr("The request targets a path internal to an active remote operation.")});
+        }
+        emit operationFinished(rejected);
         return;
     }
     SftpBackend backend(m_impl->sftp);
@@ -2406,11 +2447,18 @@ void SshSession::terminalizeTransfer(rfm::core::TransferState state, const QStri
 
 void SshSession::fail(const QString& message)
 {
+    std::optional<rfm::core::RemoteOperationResult> remoteResult;
     if (m_impl->activeTransferJob != nullptr) {
         emit transferExecutorFailed(message);
     }
     if (m_impl->activeCopyJob != nullptr) {
+        m_impl->activeCopyJob->failTransport(message);
+        emit remoteOperationUpdated(m_impl->activeCopyJob->progress());
+        remoteResult = m_impl->activeCopyJob->result();
         emit remoteOperationExecutorFailed(message);
+        emit remoteOperationFinished(*remoteResult);
+        m_impl->activeCopyJob.reset();
+        m_impl->copyBackend.reset();
     }
     terminalizeTransfer(rfm::core::TransferState::Failed, message);
     m_impl->reset();

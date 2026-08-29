@@ -188,11 +188,6 @@ void TransferCoordinator::handleExecutorFailure(QString error)
     if (!m_active.has_value()) {
         terminalizeQueued(TransferState::Failed, m_executorFailure);
     }
-    if (m_activeRemoteOperation.has_value()) {
-        const RemoteOperationRequest active = *m_activeRemoteOperation;
-        m_activeRemoteOperation.reset();
-        terminalizeRemoteOperation(active, OperationState::Failed, m_executorFailure, true);
-    }
     terminalizeQueuedRemoteOperations(OperationState::Failed, m_executorFailure, true);
 }
 
@@ -200,6 +195,9 @@ void TransferCoordinator::handleRemoteExecutorFailure(QString error)
 {
     handleExecutorFailure(error.isEmpty() ? tr("The remote operation executor became unavailable.")
                                           : std::move(error));
+    if (m_activeRemoteOperation.has_value()) {
+        emit remoteOperationResultSilent(m_activeRemoteOperation->id);
+    }
 }
 
 void TransferCoordinator::handleExecutorRejection(quint64 id, QString error)

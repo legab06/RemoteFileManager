@@ -3021,6 +3021,18 @@ void MainWindowTest::remoteExecutorFailureShowsOnlyConnectionDialog()
                                          QStringLiteral("/destination")});
 
     coordinator->handleRemoteExecutorFailure(QStringLiteral("connection lost"));
+    auto failedProgress = rfm::core::operationProgress(
+        {901,
+         rfm::core::RemoteOperationKind::Copy,
+         {{QStringLiteral("/source/a.txt"), false}},
+         QStringLiteral("/destination")},
+        rfm::core::OperationState::Failed, QStringLiteral("connection lost"));
+    coordinator->handleRemoteExecutorProgress(failedProgress);
+    coordinator->handleRemoteExecutorResult(
+        {901,
+         rfm::core::RemoteOperationKind::Copy,
+         {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), false,
+           QStringLiteral("connection lost")}}});
     QVERIFY(QApplication::activeModalWidget() == nullptr);
     auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
@@ -3675,14 +3687,51 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
     QVERIFY(!pasteAction->isEnabled());
     QVERIFY(!sourcePane->fileTable()->item(0, 0)->font().italic());
 
+    // A completed Move must not clear clipboard content that was replaced while it was running.
     QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
     sourcePane->fileTable()->selectRow(0);
     cutAction->trigger();
+    QTest::mouseClick(destinationPane->fileTable()->viewport(), Qt::LeftButton);
+    pasteAction->trigger();
+    QCOMPARE(moves.size(), 2);
+    const quint64 olderMoveId = moves.at(1).constFirst().toULongLong();
+    QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
+    sourcePane->fileTable()->selectRow(1);
+    copyAction->trigger();
+    QTest::mouseClick(destinationPane->fileTable()->viewport(), Qt::LeftButton);
+    QVERIFY(pasteAction->isEnabled());
+    remoteCoordinator->handleRemoteExecutorResult({olderMoveId,
+                                                   rfm::core::RemoteOperationKind::Move,
+                                                   {{QStringLiteral("/source/file.txt"),
+                                                     QStringLiteral("/destination/file.txt"),
+                                                     true,
+                                                     {}}}});
+    QVERIFY(pasteAction->isEnabled());
+    QVERIFY(!sourcePane->fileTable()->item(1, 0)->font().italic());
+
+    // A failed Move keeps the matching Cut available.
+    QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
+    sourcePane->fileTable()->selectRow(0);
+    cutAction->trigger();
+    QTest::mouseClick(destinationPane->fileTable()->viewport(), Qt::LeftButton);
+    pasteAction->trigger();
+    QCOMPARE(moves.size(), 3);
+    const quint64 failedMoveId = moves.at(2).constFirst().toULongLong();
+    dismissNextMessageBox();
+    remoteCoordinator->handleRemoteExecutorResult(
+        {failedMoveId,
+         rfm::core::RemoteOperationKind::Move,
+         {{QStringLiteral("/source/file.txt"), QStringLiteral("/destination/file.txt"), false,
+           QStringLiteral("Move failed")}}});
+    QVERIFY(pasteAction->isEnabled());
+    QVERIFY(sourcePane->fileTable()->item(0, 0)->font().italic());
     QVERIFY(cancelCut->isEnabled());
     cancelCut->trigger();
     QVERIFY(!pasteAction->isEnabled());
     QVERIFY(!sourcePane->fileTable()->item(0, 0)->font().italic());
 
+    QTest::mouseClick(sourcePane->fileTable()->viewport(), Qt::LeftButton);
+    sourcePane->fileTable()->selectRow(0);
     cutAction->trigger();
     QVERIFY(cancelCut->isEnabled());
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));

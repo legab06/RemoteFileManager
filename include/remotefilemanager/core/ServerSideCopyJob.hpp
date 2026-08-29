@@ -38,8 +38,12 @@ class ServerSideCopyJob final
                       RemoteOperationKind operationKind = RemoteOperationKind::Copy);
 
     void step();
+    void failTransport(QString error);
     [[nodiscard]] bool requestCancel();
     [[nodiscard]] bool isFinished() const;
+    [[nodiscard]] std::optional<QString> ownedStagingPath() const;
+    [[nodiscard]] bool ownsInternalPath(const QString& path) const;
+    [[nodiscard]] bool hidesListingEntry(const QString& parentPath, const QString& entryName) const;
     [[nodiscard]] const OperationProgress& progress() const;
     [[nodiscard]] const RemoteOperationResult& result() const;
 

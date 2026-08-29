@@ -84,8 +84,12 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
 - Les opérations de fichiers dépendent de `RemoteFileBackend`, dont l’implémentation libssh reste privée au transport. Les tests utilisent un double sans connexion réseau.
 - La copie distante utilise `cp -P -n` via un canal SSH non bloquant, faute de primitive de copie
   serveur exposée par SFTP/libssh. Pour chaque élément, elle réserve atomiquement dans le dossier
-  destination un répertoire `.<nom>.rfm-copy-<uuid>.partial`, donc sur le même filesystem, puis
-  copie vers son enfant `item`. Le nom final reste absent pendant la copie. Après le succès réel de
+  destination un répertoire court `.rfm-copy-<uuid>.partial`, donc sur le même filesystem et
+  indépendamment de la longueur du nom final, puis copie vers son enfant `item`. Le fallback Move
+  utilise de même `.rfm-move-<uuid>.partial`. Tant qu'un job possède ce chemin exact, les listings le
+  masquent et les opérations UI le refusent comme source ou cible. Un staging abandonné par un job
+  terminal ou une ancienne session redevient visible : aucun motif de nom n'est filtré globalement.
+  Le nom final reste absent pendant la copie. Après le succès réel de
   `cp`, sa disponibilité est revérifiée et `item` est promu par rename SFTP. Le staging alors attendu
   vide est supprimé uniquement par `sftp_rmdir`, sans shell, suppression récursive ni lecture de
   `mountinfo`. Un échec de ce `rmdir`, y compris parce que le répertoire n'est pas vide, conserve le
@@ -96,6 +100,12 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
   staging éventuellement restant.
   Les arguments restent échappés séparément et la sémantique Copy demeure distincte du fallback
   Move : `-P`, `-R` seulement pour un dossier et `-n`, sans remplacement implicite par `cp -a`.
+  Copy et le fallback Move exécutent cependant `cp` sous un wrapper commun qui publie son statut
+  in-band. Le wrapper intercepte `TERM`, le transmet au PID de `cp` et attend sa terminaison avant de
+  fermer le canal ; EOF ou un callback SSH tardif ne peut donc ni fabriquer un succès ni contredire
+  un statut vérifié. Une perte de transport terminalise le job avant sa destruction : les éléments
+  déjà promus et nettoyés restent réussis, l'élément actif indique son staging potentiellement
+  restant et les éléments non démarrés sont distingués dans le résultat métier réel.
 - Un déplacement tente d'abord le rename SFTP. Comme SFTP v3 réduit `EXDEV` à une erreur
   générique, le transport ne qualifie le fallback qu'après comparaison par `statvfs` des
   répertoires qui contiennent les entrées source et destination. Il vérifie aussi que l'entrée
@@ -107,8 +117,8 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
   sur le filesystem cible. La copie de déplacement utilise `cp -a` dans ce répertoire : elle
   préserve liens, modes, dates, propriétaires lorsque les droits le permettent, ACL, attributs
   étendus, capabilities et liens physiques dans l'arbre copié. La copie distante ordinaire
-  reste en `cp -P -n` et conserve donc sa sémantique existante. Le wrapper du seul `cp -a`
-  publie aussi son code de retour dans stdout avant EOF : le worker peut ainsi valider une copie
+  reste en `cp -P -n` et conserve donc sa sémantique existante. Le wrapper commun
+  publie le code de retour dans stdout avant EOF : le worker peut ainsi valider une copie
   courte même si la notification SSH `exit-status` arrive tardivement, tout en refusant une
   incohérence entre les deux statuts lorsqu'ils sont tous deux disponibles.
 - Après la copie, le worker promeut l'enfant temporaire par rename SFTP, nettoie le répertoire

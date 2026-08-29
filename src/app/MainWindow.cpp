@@ -2002,7 +2002,17 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
         }
     }
     const bool suppressDialog = m_silentRemoteOperationResults.remove(result.id) > 0;
-    if (m_clipboardMoveOperations.remove(result.id) > 0 && result.allSucceeded()) {
+    const auto clipboardMove = m_clipboardMoveOperations.find(result.id);
+    const std::optional<quint64> clipboardGeneration =
+        clipboardMove == m_clipboardMoveOperations.end()
+            ? std::nullopt
+            : std::optional<quint64>{clipboardMove.value()};
+    if (clipboardMove != m_clipboardMoveOperations.end()) {
+        m_clipboardMoveOperations.erase(clipboardMove);
+    }
+    if (clipboardGeneration.has_value() && result.allSucceeded() &&
+        m_internalClipboard.hasContent() &&
+        m_internalClipboard.generation() == *clipboardGeneration) {
         clearInternalClipboard();
     }
     QStringList failures;
@@ -2230,7 +2240,7 @@ bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
     m_operationContexts.insert(
         id, {payload.sourcePaneId, destinationPaneId, sourceDirectory, destinationDirectory});
     if (clipboardMove) {
-        m_clipboardMoveOperations.insert(id);
+        m_clipboardMoveOperations.insert(id, m_internalClipboard.generation());
     }
     emit remoteOperationRequested(
         {id, move ? rfm::core::RemoteOperationKind::Move : rfm::core::RemoteOperationKind::Copy,

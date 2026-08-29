@@ -528,13 +528,29 @@ void TransferCoordinatorTest::remoteExecutorFailureFailsActiveAndQueueExactlyOnc
     coordinator.enqueueRemoteOperation(remoteRequest(183));
 
     coordinator.handleRemoteExecutorFailure(QStringLiteral("connection lost"));
+    QCOMPARE(dispatched.size(), 1);
+    QCOMPARE(results.size(), 2);
     coordinator.handleRemoteExecutorProgress(
         remoteProgress(181, rfm::core::OperationState::Failed));
-    coordinator.handleRemoteExecutorResult(remoteResult(181, false));
+    const rfm::core::RemoteOperationResult partialResult{
+        181,
+        rfm::core::RemoteOperationKind::Copy,
+        {{QStringLiteral("/source/A"), QStringLiteral("/destination/A"), true, {}},
+         {QStringLiteral("/source/B"), QStringLiteral("/destination/B"), false,
+          QStringLiteral("connection lost; staging may remain")},
+         {QStringLiteral("/source/C"), QStringLiteral("/destination/C"), false,
+          QStringLiteral("not started")}}};
+    coordinator.handleRemoteExecutorResult(partialResult);
 
     QCOMPARE(dispatched.size(), 1);
     QCOMPARE(results.size(), 3);
     QCOMPARE(silentResults.size(), 3);
+    const auto publishedActive =
+        qvariant_cast<rfm::core::RemoteOperationResult>(results.constLast().constFirst());
+    QCOMPARE(publishedActive.items.size(), 3);
+    QVERIFY(publishedActive.items.at(0).success);
+    QVERIFY(!publishedActive.items.at(1).success);
+    QVERIFY(!publishedActive.items.at(2).success);
     for (const quint64 id : {quint64{181}, quint64{182}, quint64{183}}) {
         const QList<rfm::core::OperationState> states = remoteStatesFor(updates, id);
         QCOMPARE(states.constFirst(), rfm::core::OperationState::Queued);

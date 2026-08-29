@@ -56,21 +56,27 @@ void InternalTransferTest::clipboardReplacesAndClearsIntentions()
 {
     rfm::core::InternalClipboard clipboard;
     QVERIFY(!clipboard.hasContent());
+    const quint64 emptyGeneration = clipboard.generation();
 
     clipboard.set(rfm::core::InternalTransferAction::Move, payload());
     QVERIFY(clipboard.hasContent());
     QVERIFY(clipboard.isCut());
+    const quint64 moveGeneration = clipboard.generation();
+    QVERIFY(moveGeneration != emptyGeneration);
 
     auto replacement = payload();
     replacement.sources = {{QStringLiteral("/srv/replacement.txt"), false}};
     clipboard.set(rfm::core::InternalTransferAction::Copy, replacement);
     QVERIFY(clipboard.hasContent());
     QVERIFY(!clipboard.isCut());
+    QVERIFY(clipboard.generation() != moveGeneration);
+    const quint64 replacementGeneration = clipboard.generation();
     QCOMPARE(clipboard.content()->payload.sources.constFirst().path,
              QStringLiteral("/srv/replacement.txt"));
 
     clipboard.clear();
     QVERIFY(!clipboard.hasContent());
+    QVERIFY(clipboard.generation() != replacementGeneration);
 }
 
 void InternalTransferTest::validatesSessionAndRemoteDestinations()

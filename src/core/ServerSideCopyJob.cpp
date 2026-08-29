@@ -55,10 +55,62 @@ QString ServerSideCopyJob::stagingDirectory(const QString& destination) const
 {
     const QString operation = m_operationKind == RemoteOperationKind::Move ? QStringLiteral("move")
                                                                            : QStringLiteral("copy");
-    const QString temporaryName = QStringLiteral(".%1.rfm-%2-%3.partial")
-                                      .arg(RemotePath::fileName(destination), operation,
-                                           QUuid::createUuid().toString(QUuid::WithoutBraces));
+    const QString temporaryName =
+        QStringLiteral(".rfm-%1-%2.partial")
+            .arg(operation, QUuid::createUuid().toString(QUuid::WithoutBraces));
     return RemotePath::join(RemotePath::parent(destination), temporaryName);
+}
+
+void ServerSideCopyJob::failTransport(QString error)
+{
+    if (isFinished()) {
+        return;
+    }
+    if (error.isEmpty()) {
+        error = QStringLiteral("The SSH/SFTP transport was lost during the remote operation.");
+    }
+
+    if (m_sourceIndex < m_sources.size()) {
+        const QString source = RemotePath::normalize(m_sources.at(m_sourceIndex).path);
+        const QString destination =
+            RemotePath::join(m_destinationDirectory, RemotePath::fileName(source));
+        if (m_result.items.size() == m_sourceIndex) {
+            m_result.items.push_back({source, destination, false, {}});
+        }
+        RemoteItemResult& current = m_result.items[m_sourceIndex];
+        if (!current.success) {
+            current.error = error;
+            if (m_stagingOwned && !m_stagingDirectory.isEmpty()) {
+                current.error +=
+                    QStringLiteral(" Temporary %1 staging may remain at %2; its contents are "
+                                   "indeterminate because cleanup was not attempted after the "
+                                   "transport loss.")
+                        .arg(m_operationKind == RemoteOperationKind::Move ? QStringLiteral("move")
+                                                                          : QStringLiteral("copy"),
+                             m_stagingDirectory);
+            }
+        }
+        for (qsizetype index = m_sourceIndex + 1; index < m_sources.size(); ++index) {
+            const QString remainingSource = RemotePath::normalize(m_sources.at(index).path);
+            m_result.items.push_back(
+                {remainingSource,
+                 RemotePath::join(m_destinationDirectory, RemotePath::fileName(remainingSource)),
+                 false, QStringLiteral("%1 The item was not started.").arg(error)});
+        }
+    }
+
+    m_copyActive = false;
+    m_progress.currentItem.clear();
+    m_progress.cancellationSupported = false;
+    m_progress.state = OperationState::Failed;
+    QStringList failures;
+    for (const RemoteItemResult& item : std::as_const(m_result.items)) {
+        if (!item.success) {
+            failures.push_back(QStringLiteral("%1: %2").arg(item.source, item.error));
+        }
+    }
+    m_progress.error = failures.join(QChar{'\n'});
+    m_phase = Phase::Finished;
 }
 
 void ServerSideCopyJob::prepareItem()
@@ -517,6 +569,29 @@ void ServerSideCopyJob::finishCancellation(const RemoteBackendResult& result)
 }
 
 bool ServerSideCopyJob::isFinished() const { return m_phase == Phase::Finished; }
+
+std::optional<QString> ServerSideCopyJob::ownedStagingPath() const
+{
+    return !isFinished() && m_stagingOwned && !m_stagingDirectory.isEmpty()
+               ? std::optional<QString>{m_stagingDirectory}
+               : std::nullopt;
+}
+
+bool ServerSideCopyJob::ownsInternalPath(const QString& path) const
+{
+    const std::optional<QString> staging = ownedStagingPath();
+    if (!staging.has_value()) {
+        return false;
+    }
+    const QString normalized = RemotePath::normalize(path);
+    return normalized == *staging || normalized.startsWith(*staging + QChar{'/'});
+}
+
+bool ServerSideCopyJob::hidesListingEntry(const QString& parentPath, const QString& entryName) const
+{
+    const std::optional<QString> staging = ownedStagingPath();
+    return staging.has_value() && RemotePath::join(parentPath, entryName) == *staging;
+}
 
 const OperationProgress& ServerSideCopyJob::progress() const { return m_progress; }
 

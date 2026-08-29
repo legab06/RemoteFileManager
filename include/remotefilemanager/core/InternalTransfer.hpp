@@ -48,10 +48,12 @@ class InternalClipboard final
 
     [[nodiscard]] bool hasContent() const;
     [[nodiscard]] bool isCut() const;
+    [[nodiscard]] quint64 generation() const;
     [[nodiscard]] const std::optional<ClipboardEntry>& content() const;
 
   private:
     std::optional<ClipboardEntry> m_content;
+    quint64 m_generation{0};
 };
 
 enum class InternalTransferValidationError {
@@ -84,4 +86,3 @@ decodeInternalTransfer(const QByteArray& data);
 } // namespace rfm::core
 
 Q_DECLARE_METATYPE(rfm::core::InternalTransferPayload)
-

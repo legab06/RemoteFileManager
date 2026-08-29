@@ -18,6 +18,10 @@
 #include <optional>
 #include <utility>
 
+#ifdef Q_OS_UNIX
+#include <sys/stat.h>
+#endif
+
 namespace
 {
 
@@ -399,8 +403,7 @@ class LocalSymlinkStagingBackend final : public rfm::core::ServerSideCopyBackend
         const QByteArray standardOutput = process.readAllStandardOutput();
         const QByteArray standardError = process.readAllStandardError();
         if (reportsMoveStatus) {
-            reportedCopyStatus =
-                rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(standardOutput);
+            reportedCopyStatus = rfm::ssh::RemoteCopyCommand::parseCopyStatus(standardOutput);
         }
         stagedLinkTarget = QFile::symLinkTarget(destination);
         copyResult =
@@ -486,6 +489,13 @@ class RemoteFileOperationsTest final : public QObject
     void movesSelectionAndReportsPartialFailure();
     void copiesOnServerOrReportsUnsupported();
     void serverSideCopyPollingPreservesSharedSessionBlockingMode();
+    void copyStatusProtocolIsDeterministic();
+    void copyStatusWrapperForwardsTermination();
+    void activeStagingOwnershipIsExactAndTemporary();
+    void stagingNameIsIndependentOfFinalBasename_data();
+    void stagingNameIsIndependentOfFinalBasename();
+    void transportFailurePreservesCompletedItems();
+    void transportFailureBeforeFirstSuccess();
     void serverSideCopyRunsCooperatively_data();
     void serverSideCopyRunsCooperatively();
     void serverSideCopyCancellationWaitsForTermination();
@@ -545,36 +555,42 @@ void RemoteFileOperationsTest::validatesAndNormalizesRemotePaths()
 
 void RemoteFileOperationsTest::quotesCopyCommandWithoutInjection()
 {
-    QCOMPARE(rfm::ssh::RemoteCopyCommand::build(QStringLiteral("./a'; touch /tmp/pwned; '"),
-                                                QStringLiteral("./target/file"), false),
-             QStringLiteral("cp -P -n -- './a'\\''; touch /tmp/pwned; '\\''' './target/file'"));
-    QCOMPARE(rfm::ssh::RemoteCopyCommand::build(QStringLiteral("./folder"),
-                                                QStringLiteral("/backup/folder"), true),
-             QStringLiteral("cp -P -R -n -- './folder' '/backup/folder'"));
+    const QString copy = rfm::ssh::RemoteCopyCommand::build(
+        QStringLiteral("./a'; touch /tmp/pwned; '"), QStringLiteral("./target/file"), false);
+    QVERIFY(copy.contains(
+        QStringLiteral("cp -P -n -- './a'\\''; touch /tmp/pwned; '\\''' './target/file'")));
+    const QString recursiveCopy = rfm::ssh::RemoteCopyCommand::build(
+        QStringLiteral("./folder"), QStringLiteral("/backup/folder"), true);
+    QVERIFY(recursiveCopy.contains(QStringLiteral("cp -P -R -n -- './folder' '/backup/folder'")));
+    for (const QString& command : {copy, recursiveCopy}) {
+        QVERIFY(command.contains(QStringLiteral("trap 'rfm_forward_term' TERM HUP INT")));
+        QVERIFY(command.contains(QStringLiteral("kill -TERM \"$rfm_copy_pid\"")));
+        QVERIFY(command.contains(QStringLiteral("wait \"$rfm_copy_pid\"")));
+        QVERIFY(command.contains(QStringLiteral("RFM_COPY_STATUS:%s")));
+    }
     QCOMPARE(
         rfm::ssh::RemoteCopyCommand::buildRemove(QStringLiteral("./a'; touch /tmp/pwned; '"), true),
         QStringLiteral("rm -R -f -- './a'\\''; touch /tmp/pwned; '\\'''"));
-    QCOMPARE(rfm::ssh::RemoteCopyCommand::buildMoveStaging(
-                 QStringLiteral("./a'; touch /tmp/pwned; '"), QStringLiteral("./stage/item")),
-             QStringLiteral("cp -a -- './a'\\''; touch /tmp/pwned; '\\''' './stage/item'; "
-                            "rfm_copy_status=$?; "
-                            "printf '\\nRFM_MOVE_COPY_STATUS:%s\\n' \"$rfm_copy_status\"; "
-                            "exit \"$rfm_copy_status\""));
-    QCOMPARE(rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(
-                 QByteArrayLiteral("\nRFM_MOVE_COPY_STATUS:0\n")),
-             std::optional<quint32>{0});
-    QCOMPARE(rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(
-                 QByteArrayLiteral("diagnostic\nRFM_MOVE_COPY_STATUS:23\n")),
+    const QString moveCopy = rfm::ssh::RemoteCopyCommand::buildMoveStaging(
+        QStringLiteral("./a'; touch /tmp/pwned; '"), QStringLiteral("./stage/item"));
+    QVERIFY(moveCopy.contains(
+        QStringLiteral("cp -a -- './a'\\''; touch /tmp/pwned; '\\''' './stage/item'")));
+    QVERIFY(moveCopy.contains(QStringLiteral("trap 'rfm_forward_term' TERM HUP INT")));
+    QVERIFY(moveCopy.contains(QStringLiteral("RFM_COPY_STATUS:%s")));
+    QCOMPARE(
+        rfm::ssh::RemoteCopyCommand::parseCopyStatus(QByteArrayLiteral("\nRFM_COPY_STATUS:0\n")),
+        std::optional<quint32>{0});
+    QCOMPARE(rfm::ssh::RemoteCopyCommand::parseCopyStatus(
+                 QByteArrayLiteral("diagnostic\nRFM_COPY_STATUS:23\n")),
              std::optional<quint32>{23});
-    QVERIFY(!rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(
-                 QByteArrayLiteral("RFM_MOVE_COPY_STATUS:0"))
+    QVERIFY(!rfm::ssh::RemoteCopyCommand::parseCopyStatus(QByteArrayLiteral("RFM_COPY_STATUS:0"))
                  .has_value());
-    QVERIFY(!rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(
-                 QByteArrayLiteral("spoof-RFM_MOVE_COPY_STATUS:0\n"))
+    QVERIFY(!rfm::ssh::RemoteCopyCommand::parseCopyStatus(
+                 QByteArrayLiteral("spoof-RFM_COPY_STATUS:0\n"))
                  .has_value());
-    QVERIFY(!rfm::ssh::RemoteCopyCommand::parseMoveStagingStatus(
-                 QByteArrayLiteral("RFM_MOVE_COPY_STATUS:256\n"))
-                 .has_value());
+    QVERIFY(
+        !rfm::ssh::RemoteCopyCommand::parseCopyStatus(QByteArrayLiteral("RFM_COPY_STATUS:256\n"))
+             .has_value());
     const QString guardedRemove = rfm::ssh::RemoteCopyCommand::buildRemove(
         QStringLiteral("/mnt/My Disk's"), true, true, QStringLiteral("/mnt/My Disk's"));
     QVERIFY(guardedRemove.contains(QStringLiteral("/proc/self/mountinfo")));
@@ -798,7 +814,197 @@ void RemoteFileOperationsTest::serverSideCopyPollingPreservesSharedSessionBlocki
     QVERIFY(implementation.count("ssh_channel_read_nonblocking") >= 2);
     QVERIFY(implementation.contains("ssh_set_channel_callbacks"));
     QVERIFY(implementation.contains("CommandKind::MoveStagingCopy"));
-    QVERIFY(implementation.contains("parseMoveStagingStatus(m_standardOutput)"));
+    QVERIFY(implementation.contains("parseCopyStatus(m_standardOutput)"));
+}
+
+void RemoteFileOperationsTest::copyStatusProtocolIsDeterministic()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString sourcePath = directory.path() + QStringLiteral("/source.txt");
+    const QString destinationPath = directory.path() + QStringLiteral("/destination.txt");
+    QFile source(sourcePath);
+    QVERIFY(source.open(QIODevice::WriteOnly));
+    QCOMPARE(source.write("verified copy\n"), qint64{14});
+    source.close();
+
+    QProcess successful;
+    successful.start(QStringLiteral("/bin/sh"),
+                     {QStringLiteral("-c"),
+                      rfm::ssh::RemoteCopyCommand::build(sourcePath, destinationPath, false)});
+    QVERIFY(successful.waitForStarted());
+    QVERIFY(successful.waitForFinished());
+    const std::optional<quint32> successfulStatus =
+        rfm::ssh::RemoteCopyCommand::parseCopyStatus(successful.readAllStandardOutput());
+    QCOMPARE(successfulStatus, std::optional<quint32>{0});
+    QCOMPARE(successful.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(successful.exitCode(), 0);
+    QCOMPARE(QFileInfo(destinationPath).size(), QFileInfo(sourcePath).size());
+
+    QProcess failing;
+    failing.start(QStringLiteral("/bin/sh"),
+                  {QStringLiteral("-c"), rfm::ssh::RemoteCopyCommand::build(
+                                             directory.path() + QStringLiteral("/missing"),
+                                             directory.path() + QStringLiteral("/failed"), false)});
+    QVERIFY(failing.waitForStarted());
+    QVERIFY(failing.waitForFinished());
+    const std::optional<quint32> failingStatus =
+        rfm::ssh::RemoteCopyCommand::parseCopyStatus(failing.readAllStandardOutput());
+    QVERIFY(failingStatus.has_value());
+    QVERIFY(*failingStatus != 0);
+    QCOMPARE(static_cast<int>(*failingStatus), failing.exitCode());
+}
+
+void RemoteFileOperationsTest::copyStatusWrapperForwardsTermination()
+{
+#ifdef Q_OS_UNIX
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString sourcePath = directory.path() + QStringLiteral("/blocking-source");
+    const QString destinationPath = directory.path() + QStringLiteral("/partial-destination");
+    QCOMPARE(::mkfifo(QFile::encodeName(sourcePath).constData(), 0600), 0);
+
+    QProcess process;
+    process.start(QStringLiteral("/bin/sh"),
+                  {QStringLiteral("-c"),
+                   rfm::ssh::RemoteCopyCommand::build(sourcePath, destinationPath, false)});
+    QVERIFY(process.waitForStarted());
+    QTest::qWait(50);
+    QVERIFY(process.state() == QProcess::Running);
+    process.terminate();
+    QVERIFY(process.waitForFinished(3000));
+    QCOMPARE(process.exitStatus(), QProcess::NormalExit);
+    QCOMPARE(process.exitCode(), 143);
+    QVERIFY(
+        !rfm::ssh::RemoteCopyCommand::parseCopyStatus(process.readAllStandardOutput()).has_value());
+    const qint64 sizeAfterTermination = QFileInfo(destinationPath).size();
+    QTest::qWait(50);
+    QCOMPARE(QFileInfo(destinationPath).size(), sizeAfterTermination);
+#else
+    QSKIP("Signal forwarding is exercised on POSIX platforms.");
+#endif
+}
+
+void RemoteFileOperationsTest::activeStagingOwnershipIsExactAndTemporary()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.emptyDirectoryRemoveResult = {rfm::core::RemoteBackendError::PermissionDenied,
+                                          QStringLiteral("rmdir denied")};
+    rfm::core::ServerSideCopyJob job(backend, 99, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+    job.step();
+    job.step();
+
+    const QString staging = backend.reserved.constFirst();
+    QVERIFY(job.ownedStagingPath().has_value());
+    QCOMPARE(*job.ownedStagingPath(), staging);
+    QVERIFY(job.ownsInternalPath(staging));
+    QVERIFY(job.ownsInternalPath(staging + QStringLiteral("/item")));
+    QVERIFY(job.hidesListingEntry(QStringLiteral("/destination"),
+                                  rfm::core::RemotePath::fileName(staging)));
+    QVERIFY(!job.hidesListingEntry(QStringLiteral("/destination"),
+                                   QStringLiteral(".rfm-copy-abandoned.partial")));
+    QVERIFY(!job.ownsInternalPath(QStringLiteral("/destination/.rfm-copy-abandoned.partial")));
+    QVERIFY(!job.ownsInternalPath(QStringLiteral("/destination/ordinary.txt")));
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(backend.stagingExists);
+    QVERIFY(!job.ownedStagingPath().has_value());
+    QVERIFY(!job.ownsInternalPath(staging));
+    QVERIFY(!job.hidesListingEntry(QStringLiteral("/destination"),
+                                   rfm::core::RemotePath::fileName(staging)));
+    QVERIFY(!job.ownsInternalPath(QStringLiteral("/destination/.rfm-copy-abandoned.partial")));
+}
+
+void RemoteFileOperationsTest::stagingNameIsIndependentOfFinalBasename_data()
+{
+    QTest::addColumn<QString>("basename");
+    QTest::newRow("near-name-max") << QString(250, QChar{'a'});
+    QTest::newRow("long-multibyte-utf8") << QString(110, QChar{0x00e9});
+}
+
+void RemoteFileOperationsTest::stagingNameIsIndependentOfFinalBasename()
+{
+    QFETCH(QString, basename);
+
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    const QString source = QStringLiteral("/source/") + basename;
+    const QString destination = QStringLiteral("/destination/") + basename;
+    rfm::core::ServerSideCopyJob job(backend, 100, {{source, false}},
+                                     QStringLiteral("/destination"));
+    job.step();
+    job.step();
+
+    const QString staging = backend.reserved.constFirst();
+    const QString stagingName = rfm::core::RemotePath::fileName(staging);
+    QVERIFY(stagingName.startsWith(QStringLiteral(".rfm-copy-")));
+    QVERIFY(stagingName.endsWith(QStringLiteral(".partial")));
+    QVERIFY(stagingName.toUtf8().size() < 80);
+    QVERIFY(!stagingName.contains(basename));
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QCOMPARE(job.result().items.constFirst().destination, destination);
+    QVERIFY(backend.existingPaths.contains(destination));
+}
+
+void RemoteFileOperationsTest::transportFailurePreservesCompletedItems()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    rfm::core::ServerSideCopyJob job(backend, 101,
+                                     {{QStringLiteral("/source/A"), false},
+                                      {QStringLiteral("/source/B"), false},
+                                      {QStringLiteral("/source/C"), false}},
+                                     QStringLiteral("/destination"));
+    while (job.progress().completedItems == 0) {
+        job.step();
+    }
+    job.step(); // Prepare B.
+    job.step(); // Reserve B staging.
+    job.step(); // Start B copy.
+    const QString staging = backend.reserved.constLast();
+
+    job.failTransport(QStringLiteral("SSH connection lost"));
+    job.failTransport(QStringLiteral("must be idempotent"));
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QCOMPARE(job.result().items.size(), 3);
+    QVERIFY(job.result().items.at(0).success);
+    QVERIFY(!job.result().items.at(1).success);
+    QVERIFY(job.result().items.at(1).error.contains(QStringLiteral("SSH connection lost")));
+    QVERIFY(job.result().items.at(1).error.contains(staging));
+    QVERIFY(!job.result().items.at(2).success);
+    QVERIFY(job.result().items.at(2).error.contains(QStringLiteral("not started")));
+    QCOMPARE(job.progress().completedItems, quint64{1});
+}
+
+void RemoteFileOperationsTest::transportFailureBeforeFirstSuccess()
+{
+    FakeCopyBackend backend;
+    rfm::core::ServerSideCopyJob job(
+        backend, 102, {{QStringLiteral("/source/A"), false}, {QStringLiteral("/source/B"), false}},
+        QStringLiteral("/destination"));
+    job.step();
+    job.step();
+    const QString staging = backend.reserved.constFirst();
+
+    job.failTransport(QStringLiteral("SSH connection lost"));
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QCOMPARE(job.result().items.size(), 2);
+    QVERIFY(!job.result().items.at(0).success);
+    QVERIFY(job.result().items.at(0).error.contains(staging));
+    QVERIFY(!job.result().items.at(1).success);
+    QCOMPARE(job.progress().completedItems, quint64{0});
 }
 
 void RemoteFileOperationsTest::serverSideCopyRunsCooperatively_data()
@@ -827,7 +1033,7 @@ void RemoteFileOperationsTest::serverSideCopyRunsCooperatively()
     job.step(); // Atomically reserve staging beside the final destination.
     QCOMPARE(backend.reserved.size(), 1);
     const QString staging = backend.reserved.constFirst();
-    QVERIFY(staging.startsWith(QStringLiteral("/destination/.%1.rfm-copy-").arg(name)));
+    QVERIFY(staging.startsWith(QStringLiteral("/destination/.rfm-copy-")));
     QVERIFY(staging.endsWith(QStringLiteral(".partial")));
     QVERIFY(backend.stagingExists);
     QVERIFY(!backend.existingPaths.contains(destination));
@@ -1276,7 +1482,7 @@ void RemoteFileOperationsTest::fallsBackToCopyThenDeleteAcrossFileSystems()
     QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
     QCOMPARE(backend.reserved.size(), 1);
     const QString temporaryPath = backend.reserved.constFirst();
-    QVERIFY(temporaryPath.startsWith(QStringLiteral("/destination/.tree.rfm-move-")));
+    QVERIFY(temporaryPath.startsWith(QStringLiteral("/destination/.rfm-move-")));
     QVERIFY(temporaryPath.endsWith(QStringLiteral(".partial")));
     QCOMPARE(backend.stagedCopies,
              QStringList({QStringLiteral("/source/tree:%1/item:archive").arg(temporaryPath)}));
