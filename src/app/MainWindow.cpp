@@ -1171,7 +1171,10 @@ void MainWindow::showContextEntryProperties()
 void MainWindow::showPropertiesDialog(const QString& title, const QString& text)
 {
     if (!title.isEmpty() && !text.isEmpty()) {
-        QMessageBox::information(this, tr("Properties — %1").arg(title), text);
+        QMessageBox dialog(QMessageBox::Information, tr("Properties — %1").arg(title), text,
+                            QMessageBox::Ok, this);
+        dialog.setTextFormat(Qt::PlainText);
+        dialog.exec();
     }
 }
 

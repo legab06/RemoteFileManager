@@ -16,6 +16,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
+
 class FileBrowserPaneTest final : public QObject
 {
     Q_OBJECT
@@ -237,7 +239,9 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
         {QStringLiteral("Avatar.hevc.mkv"), 2048, modified, false, false},
         {QStringLiteral("document.pdf"), 4096, modified, false, false},
         {QStringLiteral("README"), 128, modified, false, false},
-        {QStringLiteral("unknown.rfm_unknown_extension_987"), 64, modified, false, false}};
+        {QStringLiteral("unknown.rfm_unknown_extension_987"), 64, modified, false, false},
+        {QStringLiteral("movie.mkv"), 512, modified, false, true},
+        {QStringLiteral("link"), 512, modified, false, true}};
     rfm::app::FileBrowserPane pane;
     pane.resize(640, 320);
     pane.show();
@@ -294,6 +298,16 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
         QCOMPARE(displayedType(*clicked), QStringLiteral("File"));
     }
 
+    for (const int row : {6, 7}) {
+        clicked = clickRow(row);
+        QVERIFY(clicked.has_value());
+        QCOMPARE(displayedType(*clicked), QStringLiteral("Symbolic link"));
+    }
+    QVERIFY(!clicked->text.contains(QStringLiteral("Extension: mkv")));
+    clicked = clickRow(6);
+    QVERIFY(clicked.has_value());
+    QVERIFY(clicked->text.contains(QStringLiteral("Extension: mkv")));
+
     clicked = clickRow(0);
     QVERIFY(clicked.has_value());
     properties = *clicked;
@@ -316,6 +330,27 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     properties = *clicked;
     QCOMPARE(properties.title, QStringLiteral("folder"));
     QVERIFY(properties.text.contains(QStringLiteral("Path: /srv/folder")));
+
+    const QString unsafeName = QStringLiteral("report\nType: forged.mkv");
+    pane.showDirectory({rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                        QStringLiteral("/srv\nPath: forged")},
+                       QStringLiteral("sftp://host/srv"),
+                       {{unsafeName, 1, modified, false, false}});
+    clicked = clickRow(0);
+    QVERIFY(clicked.has_value());
+    QCOMPARE(clicked->title, QStringLiteral("report Type: forged.mkv"));
+    QVERIFY(!clicked->title.contains(QChar{'\n'}));
+    const QStringList unsafeLines = clicked->text.split(QChar{'\n'});
+    QCOMPARE(std::ranges::count_if(unsafeLines, [](const QString& line) {
+                 return line.startsWith(QStringLiteral("Type: "));
+             }),
+             1);
+    QCOMPARE(std::ranges::count_if(unsafeLines, [](const QString& line) {
+                 return line.startsWith(QStringLiteral("Path: "));
+             }),
+             1);
+    QVERIFY(!clicked->text.contains(QStringLiteral("\nType: forged")));
+    QVERIFY(!clicked->text.contains(QStringLiteral("\nPath: forged")));
     QCOMPARE(navigationRequests.size(), 0);
 }
 

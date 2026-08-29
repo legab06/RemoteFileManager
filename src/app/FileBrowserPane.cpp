@@ -49,6 +49,20 @@ QColor blendedColor(const QColor& base, const QColor& accent, float accentRatio)
                             base.blueF() * baseRatio + accent.blueF() * accentRatio, base.alphaF());
 }
 
+QString safePropertyValue(const QString& value)
+{
+    QString safe = value;
+    for (qsizetype index = 0; index < safe.size(); ++index) {
+        const QChar character = safe.at(index);
+        const QChar::Category category = character.category();
+        if (category == QChar::Other_Control || category == QChar::Separator_Line ||
+            category == QChar::Separator_Paragraph) {
+            safe[index] = QChar{' '};
+        }
+    }
+    return safe.simplified();
+}
+
 std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
 {
     if (QFileInfo(fileName).suffix().isEmpty()) {
@@ -189,13 +203,15 @@ std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() con
     const QString path = m_currentLocation.source == rfm::core::FileSource::Local
                              ? QDir(m_currentLocation.path).filePath(entry.name)
                              : rfm::core::RemotePath::join(m_currentLocation.path, entry.name);
-    const QString type = entry.directory
-                             ? tr("Folder")
-                             : mimeDescriptionForFileName(entry.name).value_or(tr("File"));
-    QStringList lines{tr("Name: %1").arg(entry.name), tr("Type: %1").arg(type),
-                      tr("Path: %1").arg(path)};
+    const QString type = entry.symbolicLink
+                             ? tr("Symbolic link")
+                             : entry.directory
+                                   ? tr("Folder")
+                                   : mimeDescriptionForFileName(entry.name).value_or(tr("File"));
+    QStringList lines{tr("Name: %1").arg(safePropertyValue(entry.name)),
+                      tr("Type: %1").arg(type), tr("Path: %1").arg(safePropertyValue(path))};
     if (!entry.directory) {
-        const QString extension = QFileInfo(entry.name).suffix();
+        const QString extension = safePropertyValue(QFileInfo(entry.name).suffix());
         if (!extension.isEmpty()) {
             lines.push_back(tr("Extension: %1").arg(extension));
         }
@@ -211,7 +227,7 @@ std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() con
         lines.push_back(
             tr("Modified: %1").arg(QLocale{}.toString(entry.modifiedAt, QLocale::ShortFormat)));
     }
-    return FileEntryProperties{entry.name, lines.join(QChar{'\n'})};
+    return FileEntryProperties{safePropertyValue(entry.name), lines.join(QChar{'\n'})};
 }
 
 bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
