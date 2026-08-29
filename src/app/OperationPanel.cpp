@@ -139,9 +139,10 @@ OperationPanel::OperationPanel(QWidget* parent) : QWidget(parent)
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
     m_table->setShowGrid(false);
+    m_table->setWordWrap(false);
     m_table->setHorizontalScrollMode(QAbstractItemView::ScrollPerPixel);
     m_table->verticalHeader()->hide();
-    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_table->verticalHeader()->setSectionResizeMode(QHeaderView::Fixed);
     QHeaderView* const header = m_table->horizontalHeader();
     header->setStretchLastSection(false);
     header->setSectionResizeMode(KindColumn, QHeaderView::ResizeToContents);
@@ -285,6 +286,7 @@ void OperationPanel::rebuildRows(const QList<quint64>& operationIds)
         m_rows.insert(id, row);
         updateRow(row, m_progress.value(id));
     }
+    m_table->resizeRowsToContents();
 
     if (currentId != 0 && m_rows.contains(currentId)) {
         m_table->setCurrentCell(m_rows.value(currentId), KindColumn, QItemSelectionModel::NoUpdate);
@@ -469,8 +471,37 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
 
 void OperationPanel::updateOperation(rfm::core::OperationProgress progress)
 {
-    if (progress.id == 0) {
+    const quint64 id = progress.id;
+    if (!storeOperation(std::move(progress))) {
         return;
+    }
+    const QList<quint64> operationIds = orderedOperationIds();
+    if (operationIds != currentOperationIds()) {
+        rebuildRows(operationIds);
+    } else {
+        const int row = m_rows.value(id);
+        updateRow(row, m_progress.value(id));
+        m_table->resizeRowToContents(row);
+    }
+    updateHistoryActions();
+}
+
+void OperationPanel::restoreOperations(const QList<rfm::core::OperationProgress>& operations)
+{
+    bool hasOperations = false;
+    for (const rfm::core::OperationProgress& operation : operations) {
+        hasOperations = storeOperation(operation) || hasOperations;
+    }
+    if (hasOperations) {
+        rebuildRows(orderedOperationIds());
+    }
+    updateHistoryActions();
+}
+
+bool OperationPanel::storeOperation(rfm::core::OperationProgress progress)
+{
+    if (progress.id == 0) {
+        return false;
     }
     const auto existing = m_progress.constFind(progress.id);
     const bool wasTerminal =
@@ -482,13 +513,7 @@ void OperationPanel::updateOperation(rfm::core::OperationProgress progress)
         m_terminalOrder.insert(progress.id, m_nextOrder++);
     }
     m_progress.insert(progress.id, progress);
-    const QList<quint64> operationIds = orderedOperationIds();
-    if (operationIds != currentOperationIds()) {
-        rebuildRows(operationIds);
-    } else {
-        updateRow(m_rows.value(progress.id), progress);
-    }
-    updateHistoryActions();
+    return true;
 }
 
 bool OperationPanel::removeTerminalOperation(quint64 id)

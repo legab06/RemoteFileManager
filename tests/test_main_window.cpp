@@ -15,6 +15,7 @@
 #include "remotefilemanager/core/TransferCoordinator.hpp"
 
 #include <QAbstractButton>
+#include <QAbstractItemModel>
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
@@ -367,6 +368,8 @@ class MainWindowTest final : public QObject
     void queuesDownloadsFromRemoteSelection();
     void displaysTransferProgressAndMultipleEntries();
     void ordersOperationRowsWithoutDuplicates();
+    void restoresOperationHistoryInSingleRebuild();
+    void keepsOperationRowsSingleLineAndRetainsExplicitCurrentItem();
     void preservesOperationPanelContextAcrossReordering();
     void displaysDirectoryTransferDetails();
     void displaysTransferStatesInEnglish();
@@ -1918,6 +1921,65 @@ void MainWindowTest::ordersOperationRowsWithoutDuplicates()
     panel.updateOperation(
         rfm::core::operationProgress(progress(1007, rfm::core::TransferState::Cancelled)));
     QVERIFY(rowForId(table, 1007) < rowForId(table, 1006));
+}
+
+void MainWindowTest::restoresOperationHistoryInSingleRebuild()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    auto oldest =
+        rfm::core::operationProgress(progress(1101, rfm::core::TransferState::Completed, 10, 10));
+    oldest.finishedAt = QDateTime::fromSecsSinceEpoch(10);
+    auto newest =
+        rfm::core::operationProgress(progress(1102, rfm::core::TransferState::Failed, 4, 10));
+    newest.finishedAt = QDateTime::fromSecsSinceEpoch(30);
+    auto middle =
+        rfm::core::operationProgress(progress(1103, rfm::core::TransferState::Cancelled, 0, 10));
+    middle.finishedAt = QDateTime::fromSecsSinceEpoch(20);
+
+    QSignalSpy rowsInserted(table->model(), &QAbstractItemModel::rowsInserted);
+    panel.restoreOperations({oldest, newest, middle});
+
+    QCOMPARE(rowsInserted.size(), 3);
+    QCOMPARE(operationIds(table), (QList<quint64>{1102, 1103, 1101}));
+}
+
+void MainWindowTest::keepsOperationRowsSingleLineAndRetainsExplicitCurrentItem()
+{
+    rfm::app::OperationPanel panel;
+    panel.resize(900, 240);
+    panel.show();
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    auto longDestination =
+        rfm::core::operationProgress(progress(1201, rfm::core::TransferState::Transferring, 1, 10));
+    longDestination.destination = QStringLiteral("/mnt/hdd2/Films Science Fiction");
+    auto shortDestination =
+        rfm::core::operationProgress(progress(1202, rfm::core::TransferState::Transferring, 1, 10));
+    shortDestination.destination = QStringLiteral("/srv");
+    auto currentItem =
+        rfm::core::operationProgress(progress(1203, rfm::core::TransferState::Transferring, 1, 10));
+    currentItem.currentItem = QStringLiteral("/tmp/archive/current-item.mkv");
+    panel.restoreOperations({longDestination, shortDestination, currentItem});
+    QCoreApplication::processEvents();
+
+    const int longRow = rowForId(table, 1201);
+    const int shortRow = rowForId(table, 1202);
+    const int currentRow = rowForId(table, 1203);
+    QVERIFY(longRow >= 0);
+    QVERIFY(shortRow >= 0);
+    QVERIFY(currentRow >= 0);
+    QVERIFY(!table->wordWrap());
+    QCOMPARE(table->item(longRow, 2)->text(), longDestination.destination);
+    QCOMPARE(table->item(longRow, 2)->toolTip(), longDestination.destination);
+    QCOMPARE(table->rowHeight(longRow), table->rowHeight(shortRow));
+    QVERIFY(
+        table->item(currentRow, 1)->text().contains(QStringLiteral("\nCurrent: current-item.mkv")));
+    QVERIFY(table->rowHeight(currentRow) > table->rowHeight(shortRow));
+    QVERIFY(table->cellWidget(longRow, 6) != nullptr);
 }
 
 void MainWindowTest::preservesOperationPanelContextAcrossReordering()

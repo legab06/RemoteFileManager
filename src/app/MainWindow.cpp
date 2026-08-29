@@ -1995,12 +1995,12 @@ void MainWindow::loadOperationHistory()
     const QList<rfm::core::OperationProgress> operations = m_operationHistoryStore->load();
     for (const rfm::core::OperationProgress& operation : operations) {
         m_operations.insert(operation.id, operation);
-        m_operationPanel->updateOperation(operation);
         if (operation.id >= m_nextOperationId &&
             operation.id != std::numeric_limits<quint64>::max()) {
             m_nextOperationId = operation.id + 1;
         }
     }
+    m_operationPanel->restoreOperations(operations);
 }
 
 void MainWindow::scheduleOperationHistorySave() { m_historySaveTimer->start(); }
