@@ -10,6 +10,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <atomic>
+#include <functional>
 #include <utility>
 
 namespace rfm::core
@@ -23,14 +25,52 @@ struct LocalDirectoryResult {
     [[nodiscard]] bool succeeded() const { return error.isEmpty(); }
 };
 
-enum class LocalFileOperationKind { CreateDirectory, Rename, Remove };
+enum class LocalFileOperationKind { CreateDirectory, Rename, Remove, Copy, Move };
+
+enum class LocalCollisionPolicy { Fail, Overwrite, Skip, Cancel };
+
+enum class LocalFileOperationOutcome { Succeeded, Failed, Skipped, Collision, Cancelled };
+
+enum class LocalRenameError { None, CrossDevice, Failure };
+
+struct LocalRenameResult {
+    LocalRenameError error{LocalRenameError::None};
+    QString detail;
+
+    [[nodiscard]] bool succeeded() const { return error == LocalRenameError::None; }
+};
+
+class LocalFileOperationBackend
+{
+  public:
+    virtual ~LocalFileOperationBackend() = default;
+
+    [[nodiscard]] virtual LocalRenameResult rename(const QString& source,
+                                                   const QString& destination) = 0;
+    [[nodiscard]] virtual bool validateCopy(const QString& source, const QString& destination,
+                                            QString& error) = 0;
+};
 
 struct LocalFileOperationRequest {
+    LocalFileOperationRequest() = default;
+    LocalFileOperationRequest(quint64 operationId, LocalFileOperationKind operationKind,
+                              QString operationParentPath, QStringList operationSourcePaths,
+                              QString operationNewName, QString operationDestinationDirectory = {},
+                              LocalCollisionPolicy operationCollisionPolicy =
+                                  LocalCollisionPolicy::Fail)
+        : id(operationId), kind(operationKind), parentPath(std::move(operationParentPath)),
+          sourcePaths(std::move(operationSourcePaths)), newName(std::move(operationNewName)),
+          destinationDirectory(std::move(operationDestinationDirectory)),
+          collisionPolicy(operationCollisionPolicy)
+    {}
+
     quint64 id{0};
     LocalFileOperationKind kind{LocalFileOperationKind::CreateDirectory};
     QString parentPath;
     QStringList sourcePaths;
     QString newName;
+    QString destinationDirectory;
+    LocalCollisionPolicy collisionPolicy{LocalCollisionPolicy::Fail};
 };
 
 struct LocalFileOperationItemResult {
@@ -38,14 +78,19 @@ struct LocalFileOperationItemResult {
     QString destination;
     bool success{false};
     QString error;
+    LocalFileOperationOutcome outcome{LocalFileOperationOutcome::Failed};
 };
 
 struct LocalFileOperationResult {
     quint64 id{0};
     LocalFileOperationKind kind{LocalFileOperationKind::CreateDirectory};
     QList<LocalFileOperationItemResult> items;
+    bool cancelled{false};
 
     [[nodiscard]] bool allSucceeded() const;
+    [[nodiscard]] qsizetype succeededCount() const;
+    [[nodiscard]] qsizetype failedCount() const;
+    [[nodiscard]] qsizetype skippedCount() const;
 };
 
 // Raw fields captured from one QStorageInfo enumeration. Keeping this value type
@@ -89,7 +134,9 @@ class LocalFileSystem final
     [[nodiscard]] static bool isValidName(const QString& name);
     [[nodiscard]] static LocalDirectoryResult listDirectory(const QString& path);
     [[nodiscard]] static LocalFileOperationResult
-    executeOperation(const LocalFileOperationRequest& request);
+    executeOperation(const LocalFileOperationRequest& request,
+                     LocalFileOperationBackend* backend = nullptr,
+                     const std::function<bool()>& cancellationRequested = {});
     [[nodiscard]] static QList<StorageVolume> mountedVolumes();
     [[nodiscard]] static LocalStorageSnapshot mountedVolumeSnapshot();
     [[nodiscard]] static QByteArray mountedVolumeFingerprint();
@@ -122,15 +169,24 @@ class LocalFileOperationWorker final : public QObject
 {
     Q_OBJECT
 
+  public:
+    // Thread-safe. It can be called directly while execute() owns the worker thread.
+    void requestCancellation(quint64 operationId) noexcept;
+
   public slots:
     void execute(rfm::core::LocalFileOperationRequest request);
 
   signals:
     void finished(rfm::core::LocalFileOperationResult result);
+
+  private:
+    std::atomic<quint64> m_cancelledOperationId{0};
 };
 
 } // namespace rfm::core
 
 Q_DECLARE_METATYPE(rfm::core::LocalFileOperationKind)
+Q_DECLARE_METATYPE(rfm::core::LocalCollisionPolicy)
+Q_DECLARE_METATYPE(rfm::core::LocalFileOperationOutcome)
 Q_DECLARE_METATYPE(rfm::core::LocalFileOperationRequest)
 Q_DECLARE_METATYPE(rfm::core::LocalFileOperationResult)
