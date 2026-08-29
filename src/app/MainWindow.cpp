@@ -208,6 +208,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     qRegisterMetaType<rfm::core::InternalTransferPayload>();
     qRegisterMetaType<rfm::core::RemoteOperationResult>();
     qRegisterMetaType<rfm::core::OperationProgress>();
+    qRegisterMetaType<rfm::core::RemoteOperationRequest>();
     qRegisterMetaType<rfm::core::TransferRequest>();
     qRegisterMetaType<rfm::core::TransferProgress>();
     qRegisterMetaType<rfm::core::BrowserLocation>();
@@ -286,8 +287,6 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     connect(this, &MainWindow::createDirectoryRequested, m_sshSession,
             &rfm::ssh::SshSession::createDirectory);
     connect(this, &MainWindow::renameRequested, m_sshSession, &rfm::ssh::SshSession::renameEntry);
-    connect(this, &MainWindow::moveRequested, m_sshSession, &rfm::ssh::SshSession::moveEntries);
-    connect(this, &MainWindow::copyRequested, m_sshSession, &rfm::ssh::SshSession::copyEntries);
     connect(this, &MainWindow::removeRequested, m_sshSession, &rfm::ssh::SshSession::removeEntries);
     connect(this, &MainWindow::transferRequested, m_transferCoordinator,
             &rfm::core::TransferCoordinator::enqueueTransfer);
@@ -297,6 +296,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::core::TransferCoordinator::resumeTransfer);
     connect(this, &MainWindow::cancelTransferRequested, m_transferCoordinator,
             &rfm::core::TransferCoordinator::cancelTransfer);
+    connect(this, &MainWindow::remoteOperationRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::enqueueRemoteOperation);
     connect(m_transferCoordinator, &rfm::core::TransferCoordinator::startTransferRequested,
             m_sshSession, &rfm::ssh::SshSession::startTransfer);
     connect(m_transferCoordinator, &rfm::core::TransferCoordinator::pauseActiveRequested,
@@ -305,7 +306,12 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             m_sshSession, &rfm::ssh::SshSession::resumeTransfer);
     connect(m_transferCoordinator, &rfm::core::TransferCoordinator::cancelActiveRequested,
             m_sshSession, &rfm::ssh::SshSession::cancelTransfer);
-    connect(this, &MainWindow::cancelRemoteOperationRequested, m_sshSession,
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::startRemoteOperationRequested,
+            m_sshSession, &rfm::ssh::SshSession::startRemoteOperation);
+    connect(this, &MainWindow::cancelRemoteOperationRequested, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::cancelRemoteOperation);
+    connect(m_transferCoordinator,
+            &rfm::core::TransferCoordinator::cancelActiveRemoteOperationRequested, m_sshSession,
             &rfm::ssh::SshSession::cancelRemoteOperation);
     connect(this, &MainWindow::shutdownRequested, m_transferCoordinator,
             &rfm::core::TransferCoordinator::shutdownTransfers);
@@ -337,22 +343,41 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     connect(m_sshSession, &rfm::ssh::SshSession::failed, this, &MainWindow::showConnectionError);
     connect(m_sshSession, &rfm::ssh::SshSession::operationFinished, this,
             &MainWindow::handleOperationResult);
-    connect(m_sshSession, &rfm::ssh::SshSession::operationUpdated, this,
-            &MainWindow::handleRemoteOperationProgress);
+    connect(m_sshSession, &rfm::ssh::SshSession::remoteOperationFinished, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::handleRemoteExecutorResult);
+    connect(m_sshSession, &rfm::ssh::SshSession::remoteOperationUpdated, m_transferCoordinator,
+            &rfm::core::TransferCoordinator::handleRemoteExecutorProgress);
     connect(m_sshSession, &rfm::ssh::SshSession::transferUpdated, m_transferCoordinator,
             &rfm::core::TransferCoordinator::handleExecutorProgress);
     connect(m_sshSession, &rfm::ssh::SshSession::transferExecutorFailed, m_transferCoordinator,
             &rfm::core::TransferCoordinator::handleExecutorFailure);
+    connect(m_sshSession, &rfm::ssh::SshSession::remoteOperationExecutorFailed,
+            m_transferCoordinator, &rfm::core::TransferCoordinator::handleRemoteExecutorFailure);
     connect(m_sshSession, &rfm::ssh::SshSession::transferRejected, m_transferCoordinator,
             &rfm::core::TransferCoordinator::handleExecutorRejection);
     connect(m_transferCoordinator, &rfm::core::TransferCoordinator::transferUpdated, this,
             &MainWindow::handleTransferProgress);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::remoteOperationUpdated, this,
+            &MainWindow::handleRemoteOperationProgress);
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::remoteOperationResultSilent,
+            this, [this](quint64 id) { m_silentRemoteOperationResults.insert(id); });
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::remoteOperationFinished, this,
+            &MainWindow::handleOperationResult);
     connect(m_transferCoordinator, &rfm::core::TransferCoordinator::transferRejected, this,
             [this](quint64 id, const QString& error) {
                 if (m_pendingTransferRequests.remove(id) > 0) {
                     m_nonTerminalTransfers.remove(id);
                 }
                 m_transferPanes.remove(id);
+                updateConnectionAction();
+                statusBar()->showMessage(error, 8000);
+            });
+    connect(m_transferCoordinator, &rfm::core::TransferCoordinator::remoteOperationRejected, this,
+            [this](quint64 id, const QString& error) {
+                m_operationContexts.remove(id);
+                m_remoteOperations.remove(id);
+                m_silentRemoteOperationResults.remove(id);
+                m_clipboardMoveOperations.remove(id);
                 updateConnectionAction();
                 statusBar()->showMessage(error, 8000);
             });
@@ -1431,6 +1456,7 @@ void MainWindow::resetDisconnectedUi()
     m_nonTerminalTransfers.clear();
     m_operationContexts.clear();
     m_remoteOperations.clear();
+    m_silentRemoteOperationResults.clear();
     m_transferPanes.clear();
     bool hasLocalPane = false;
     for (const quint64 paneId : m_paneWorkspace->paneIds()) {
@@ -1882,16 +1908,6 @@ void MainWindow::queueDownloads(QString localDirectory)
     }
 }
 
-void MainWindow::beginTrackedRemoteOperation(quint64 id, rfm::core::OperationKind kind,
-                                             const QList<rfm::core::RemoteSelection>& sources,
-                                             const QString& destination)
-{
-    const rfm::core::OperationProgress operation =
-        rfm::core::beginRemoteOperation(id, kind, sources, destination);
-    m_remoteOperations.insert(id, operation);
-    updateTrackedOperation(operation);
-}
-
 void MainWindow::updateTrackedOperation(rfm::core::OperationProgress operation)
 {
     const auto existing = m_operations.constFind(operation.id);
@@ -1972,16 +1988,31 @@ void MainWindow::clearTerminalOperations()
 void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& result)
 {
     const OperationContext context = m_operationContexts.take(result.id);
+    const bool trackedRemoteOperation = result.kind == rfm::core::RemoteOperationKind::Copy ||
+                                        result.kind == rfm::core::RemoteOperationKind::Move;
     bool operationCancelled = false;
-    if (result.kind == rfm::core::RemoteOperationKind::Copy ||
-        result.kind == rfm::core::RemoteOperationKind::Move) {
+    if (trackedRemoteOperation) {
         const rfm::core::OperationProgress started = m_remoteOperations.take(result.id);
-        const rfm::core::OperationProgress finished =
-            rfm::core::finishRemoteOperation(result, started);
-        operationCancelled = finished.state == rfm::core::OperationState::Cancelled;
-        updateTrackedOperation(finished);
+        operationCancelled = started.state == rfm::core::OperationState::Cancelled;
+        if (!rfm::core::isTerminal(started.state)) {
+            const rfm::core::OperationProgress finished =
+                rfm::core::finishRemoteOperation(result, started);
+            operationCancelled = finished.state == rfm::core::OperationState::Cancelled;
+            updateTrackedOperation(finished);
+        }
     }
-    if (m_clipboardMoveOperations.remove(result.id) > 0 && result.allSucceeded()) {
+    const bool suppressDialog = m_silentRemoteOperationResults.remove(result.id) > 0;
+    const auto clipboardMove = m_clipboardMoveOperations.find(result.id);
+    const std::optional<quint64> clipboardGeneration =
+        clipboardMove == m_clipboardMoveOperations.end()
+            ? std::nullopt
+            : std::optional<quint64>{clipboardMove.value()};
+    if (clipboardMove != m_clipboardMoveOperations.end()) {
+        m_clipboardMoveOperations.erase(clipboardMove);
+    }
+    if (clipboardGeneration.has_value() && result.allSucceeded() &&
+        m_internalClipboard.hasContent() &&
+        m_internalClipboard.generation() == *clipboardGeneration) {
         clearInternalClipboard();
     }
     QStringList failures;
@@ -1995,7 +2026,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
         }
         anySuccess = anySuccess || item.success;
     }
-    if (!failures.isEmpty()) {
+    if (!failures.isEmpty() && !suppressDialog) {
         QMessageBox::warning(this,
                              operationCancelled ? tr("Remote operation cancelled")
                                                 : tr("Remote operation incomplete"),
@@ -2005,7 +2036,11 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
         operationCancelled ? tr("Remote operation cancelled")
                            : (failures.isEmpty() ? tr("Remote operation completed")
                                                  : tr("Remote operation completed with errors")));
-    setBusy(false);
+    if (!trackedRemoteOperation) {
+        setBusy(false);
+    } else {
+        updateConnectionAction();
+    }
     if (anySuccess) {
         QSet<QString> affectedPaths;
         QHash<QString, QStringList> selectionsByPath;
@@ -2115,6 +2150,7 @@ void MainWindow::handleRemoteOperationProgress(rfm::core::OperationProgress prog
     }
     m_remoteOperations.insert(progress.id, progress);
     updateTrackedOperation(std::move(progress));
+    updateConnectionAction();
 }
 
 void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progress)
@@ -2145,7 +2181,8 @@ void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progr
 
 void MainWindow::updateConnectionAction()
 {
-    const bool enabled = !m_busy && m_busyPanes.isEmpty() && m_nonTerminalTransfers.isEmpty();
+    const bool enabled = !m_busy && m_busyPanes.isEmpty() && m_nonTerminalTransfers.isEmpty() &&
+                         m_remoteOperations.isEmpty();
     m_newConnectionAction->setEnabled(enabled && !m_connected);
     m_disconnectAction->setEnabled(enabled && m_connected);
     updateSelectedServerAction();
@@ -2195,8 +2232,6 @@ bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
     }
 
     const bool move = action == rfm::core::InternalTransferAction::Move;
-    setBusy(true, move ? tr("Moving %1 item(s)…").arg(payload.sources.size())
-                       : tr("Copying %1 item(s) on the server…").arg(payload.sources.size()));
     const quint64 id = nextOperationId();
     const QString sourceDirectory =
         payload.sources.isEmpty()
@@ -2204,12 +2239,12 @@ bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
             : rfm::core::RemotePath::parent(payload.sources.constFirst().path);
     m_operationContexts.insert(
         id, {payload.sourcePaneId, destinationPaneId, sourceDirectory, destinationDirectory});
-    beginTrackedRemoteOperation(
-        id, move ? rfm::core::OperationKind::RemoteMove : rfm::core::OperationKind::RemoteCopy,
-        payload.sources, destinationDirectory);
     if (clipboardMove) {
-        m_clipboardMoveOperations.insert(id);
+        m_clipboardMoveOperations.insert(id, m_internalClipboard.generation());
     }
+    emit remoteOperationRequested(
+        {id, move ? rfm::core::RemoteOperationKind::Move : rfm::core::RemoteOperationKind::Copy,
+         payload.sources, destinationDirectory});
     if (move) {
         emit moveRequested(id, payload.sources, destinationDirectory);
     } else {

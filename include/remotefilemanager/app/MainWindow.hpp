@@ -84,6 +84,7 @@ class MainWindow final : public QMainWindow
                        QString destinationDirectory);
     void copyRequested(quint64 id, QList<rfm::core::RemoteSelection> sources,
                        QString destinationDirectory);
+    void remoteOperationRequested(rfm::core::RemoteOperationRequest request);
     void removeRequested(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
     void transferRequested(rfm::core::TransferRequest request);
     void pauseTransferRequested(quint64 id);
@@ -154,9 +155,6 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleOperationResult(const rfm::core::RemoteOperationResult& result);
     Q_INVOKABLE void handleRemoteOperationProgress(rfm::core::OperationProgress progress);
     Q_INVOKABLE void handleTransferProgress(const rfm::core::TransferProgress& progress);
-    void beginTrackedRemoteOperation(quint64 id, rfm::core::OperationKind kind,
-                                     const QList<rfm::core::RemoteSelection>& sources,
-                                     const QString& destination);
     void updateTrackedOperation(rfm::core::OperationProgress operation);
     void loadOperationHistory();
     void scheduleOperationHistorySave();
@@ -338,10 +336,11 @@ class MainWindow final : public QMainWindow
     QHash<quint64, RemoteVolumeOperationContext> m_remoteVolumeOperations;
     QSet<quint64> m_remoteVolumeOperationsAwaitingRefresh;
     QHash<quint64, rfm::core::OperationProgress> m_remoteOperations;
+    QSet<quint64> m_silentRemoteOperationResults;
     QHash<quint64, rfm::core::OperationProgress> m_operations;
     QHash<quint64, quint64> m_transferPanes;
     rfm::core::InternalClipboard m_internalClipboard;
-    QSet<quint64> m_clipboardMoveOperations;
+    QHash<quint64, quint64> m_clipboardMoveOperations;
     std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
     std::unique_ptr<rfm::core::ServerProfileStore> m_serverProfileStore;
     QList<rfm::core::ConnectionProfile> m_serverProfiles;

@@ -37,11 +37,36 @@ La release v0.8.1 complète le pipeline de stockage sans modifier ses frontière
   continuer si libssh ne l'a pas déclarée fatale. Les erreurs secondaires déjà queued qui constatent
   ensuite l'absence de SFTP ne créent pas une seconde boîte de dialogue pendant la notification de
   cette même perte de connexion ; une erreur demandée ultérieurement reste signalée normalement ;
-- l'admission FIFO des Upload/Download appartient désormais au `TransferCoordinator` Core. Lui seul
-  publie `Queued`, annule les requêtes encore en attente et choisit le prochain actif. `SshSession`
-  est limitée à zéro ou un job de transfert, ne contient plus de `TransferQueue` et signale
-  sémantiquement la perte de son exécuteur avant le terminal actif. Remote Copy/Move reste sur son
-  scheduler historique jusqu'au prochain lot.
+- l'admission FIFO des opérations longues appartient désormais au `TransferCoordinator` Core. Deux
+  voies indépendantes conservent chacune au plus un actif : Upload/Download d'une part et Remote
+  Copy/Move d'autre part. Copy et Move partagent leur FIFO sans sérialiser le transfert SFTP
+  concurrent. Le coordinateur publie seul `Queued`, permet d'annuler Copy ou Move avant dispatch et
+  produit alors le résultat terminal synthétique utilisé par le nettoyage MainWindow. `SshSession`
+  exécute seulement les jobs dispatchés à partir de `Preparing`. Shutdown et déconnexion annulent les
+  queues sans les démarrer ; une perte SSH échoue actifs et queued exactement une fois avant le reset,
+  sans notification de connexion secondaire. La progression Copy/Move reste volontairement
+  indéterminée, car `cp` ne fournit aucun compteur d'octets fiable.
+- Remote Copy n'écrit plus directement dans son chemin final. Chaque élément réserve un staging
+  aléatoire court `.rfm-copy-<uuid>.partial` dans le dossier destination, indépendamment du nom
+  final ; le fallback Move emploie `.rfm-move-<uuid>.partial`. Seul le chemin exact actuellement
+  possédé par le job est masqué des listings et protégé des opérations UI. Les temporaires abandonnés
+  restent donc visibles et récupérables, sans filtrage global par motif. Remote Copy conserve la commande
+  historique
+  `cp -P [-R] -n` vers `staging/item`, puis revérifie l'absence de collision et promeut par rename
+  SFTP. Avant promotion, erreur et annulation conservent le cleanup récursif protégé nécessaire à un
+  contenu partiel. Après promotion, le staging attendu vide est retiré exclusivement par
+  `sftp_rmdir`, sans commande shell ni dépendance à `mountinfo` et sans fallback récursif. Si ce
+  `rmdir` échoue ou révèle un staging non vide, le fichier final reste intact, l'opération échoue et
+  indique le chemin temporaire conservé. Le slot FIFO Copy/Move reste occupé jusqu'à ce terminal ;
+- Copy et le fallback Move utilisent le même statut `cp` in-band. Le wrapper relaie `TERM` au
+  processus enfant et l'attend avant de terminer, afin qu'un EOF ou un `exit-status` SSH tardif ne
+  classe pas une commande par défaut. Lors d'une perte SSH multi-items, le job publie son résultat
+  réel avant sa destruction : succès déjà achevés, élément actif échoué avec son staging éventuel et
+  éléments restants explicitement non démarrés. Le coordinateur échoue les opérations queued sans
+  redispatch et l'UI ne reçoit qu'une notification de connexion ;
+- le clipboard porte une génération monotone. La réussite d'un Move ne vide que la génération dont
+  l'opération est issue : remplacer ou réutiliser le clipboard pendant l'opération protège le nouveau
+  contenu, tandis qu'un Move échoué conserve le clipboard correspondant.
 
 Les tests utilisent des fixtures `mountinfo`/sysfs et des doubles de backend. Ils couvrent
 notamment fichiers, dossiers et liens symboliques, montages sources ou descendants, bind mounts,

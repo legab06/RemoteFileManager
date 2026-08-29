@@ -21,7 +21,7 @@ ServerSideCopyJob::ServerSideCopyJob(ServerSideCopyBackend& backend, quint64 id,
                                       m_sources, m_destinationDirectory)),
       m_result{id, operationKind, {}}, m_operationKind(operationKind)
 {
-    m_progress.state = OperationState::Queued;
+    m_progress.state = OperationState::Preparing;
     m_progress.cancellationSupported = operationKind == RemoteOperationKind::Copy;
 }
 
@@ -51,12 +51,66 @@ QString ServerSideCopyJob::describeError(const RemoteBackendResult& result) cons
     return QStringLiteral("The remote copy failed.");
 }
 
-QString ServerSideCopyJob::fallbackDestination(const QString& destination) const
+QString ServerSideCopyJob::stagingDirectory(const QString& destination) const
 {
-    const QString temporaryName = QStringLiteral(".%1.rfm-move-%2.partial")
-                                      .arg(RemotePath::fileName(destination),
-                                           QUuid::createUuid().toString(QUuid::WithoutBraces));
+    const QString operation = m_operationKind == RemoteOperationKind::Move ? QStringLiteral("move")
+                                                                           : QStringLiteral("copy");
+    const QString temporaryName =
+        QStringLiteral(".rfm-%1-%2.partial")
+            .arg(operation, QUuid::createUuid().toString(QUuid::WithoutBraces));
     return RemotePath::join(RemotePath::parent(destination), temporaryName);
+}
+
+void ServerSideCopyJob::failTransport(QString error)
+{
+    if (isFinished()) {
+        return;
+    }
+    if (error.isEmpty()) {
+        error = QStringLiteral("The SSH/SFTP transport was lost during the remote operation.");
+    }
+
+    if (m_sourceIndex < m_sources.size()) {
+        const QString source = RemotePath::normalize(m_sources.at(m_sourceIndex).path);
+        const QString destination =
+            RemotePath::join(m_destinationDirectory, RemotePath::fileName(source));
+        if (m_result.items.size() == m_sourceIndex) {
+            m_result.items.push_back({source, destination, false, {}});
+        }
+        RemoteItemResult& current = m_result.items[m_sourceIndex];
+        if (!current.success) {
+            current.error = error;
+            if (m_stagingOwned && !m_stagingDirectory.isEmpty()) {
+                current.error +=
+                    QStringLiteral(" Temporary %1 staging may remain at %2; its contents are "
+                                   "indeterminate because cleanup was not attempted after the "
+                                   "transport loss.")
+                        .arg(m_operationKind == RemoteOperationKind::Move ? QStringLiteral("move")
+                                                                          : QStringLiteral("copy"),
+                             m_stagingDirectory);
+            }
+        }
+        for (qsizetype index = m_sourceIndex + 1; index < m_sources.size(); ++index) {
+            const QString remainingSource = RemotePath::normalize(m_sources.at(index).path);
+            m_result.items.push_back(
+                {remainingSource,
+                 RemotePath::join(m_destinationDirectory, RemotePath::fileName(remainingSource)),
+                 false, QStringLiteral("%1 The item was not started.").arg(error)});
+        }
+    }
+
+    m_copyActive = false;
+    m_progress.currentItem.clear();
+    m_progress.cancellationSupported = false;
+    m_progress.state = OperationState::Failed;
+    QStringList failures;
+    for (const RemoteItemResult& item : std::as_const(m_result.items)) {
+        if (!item.success) {
+            failures.push_back(QStringLiteral("%1: %2").arg(item.source, item.error));
+        }
+    }
+    m_progress.error = failures.join(QChar{'\n'});
+    m_phase = Phase::Finished;
 }
 
 void ServerSideCopyJob::prepareItem()
@@ -66,10 +120,10 @@ void ServerSideCopyJob::prepareItem()
         return;
     }
     const RemoteSelection& selection = m_sources.at(m_sourceIndex);
-    m_fallbackDestination.clear();
+    m_stagingDirectory.clear();
     m_pendingResult = {};
     m_cleanupContinuation = CleanupContinuation::None;
-    m_fallbackOwned = false;
+    m_stagingOwned = false;
     const QString source = RemotePath::normalize(selection.path);
     const QString destination =
         RemotePath::join(m_destinationDirectory, RemotePath::fileName(source));
@@ -106,7 +160,8 @@ void ServerSideCopyJob::prepareItem()
     m_result.items.push_back(item);
     m_progress.state = OperationState::Running;
     m_progress.currentItem = source;
-    m_phase = m_operationKind == RemoteOperationKind::Move ? Phase::RenameItem : Phase::StartItem;
+    m_phase =
+        m_operationKind == RemoteOperationKind::Move ? Phase::RenameItem : Phase::PrepareStaging;
 }
 
 void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
@@ -122,9 +177,7 @@ void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
     if (m_sourceIndex == m_sources.size()) {
         finish();
     } else {
-        if (m_operationKind == RemoteOperationKind::Move) {
-            m_progress.cancellationSupported = false;
-        }
+        m_progress.cancellationSupported = m_operationKind == RemoteOperationKind::Copy;
         m_phase = Phase::Prepare;
     }
 }
@@ -142,6 +195,17 @@ void ServerSideCopyJob::finishRemoval(const RemoteBackendResult& result)
     finishItem(contextual);
 }
 
+void ServerSideCopyJob::beginPostPromotionCleanup()
+{
+    m_pendingResult = {
+        RemoteBackendError::None,
+        QStringLiteral("The remote copy was promoted, but cleanup did not complete.")};
+    m_cleanupContinuation = CleanupContinuation::FinishSuccess;
+    m_progress.cancellationSupported = false;
+    m_copyActive = false;
+    m_phase = Phase::RemoveEmptyStaging;
+}
+
 void ServerSideCopyJob::beginCleanup(CleanupContinuation continuation,
                                      const RemoteBackendResult& result)
 {
@@ -149,7 +213,7 @@ void ServerSideCopyJob::beginCleanup(CleanupContinuation continuation,
     m_cleanupContinuation = continuation;
     m_progress.cancellationSupported = false;
     m_copyActive = false;
-    if (!m_fallbackOwned) {
+    if (!m_stagingOwned) {
         finishCleanup({});
         return;
     }
@@ -163,18 +227,21 @@ ServerSideCopyJob::cleanupFailure(const RemoteBackendResult& cleanupResult) cons
     RemoteBackendResult combined = m_pendingResult;
     combined.error = RemoteBackendError::Failure;
     const QString original = describeError(m_pendingResult);
+    const QString operation = m_operationKind == RemoteOperationKind::Move ? QStringLiteral("move")
+                                                                           : QStringLiteral("copy");
     combined.detail =
-        QStringLiteral("%1 Temporary move data remains at %2 because cleanup failed: %3")
-            .arg(original.isEmpty() ? QStringLiteral("The remote move did not complete.")
-                                    : original,
-                 m_fallbackDestination, cleanupDetail);
+        QStringLiteral("%1 Temporary %2 data remains at %3 because cleanup failed: %4")
+            .arg(original.isEmpty()
+                     ? QStringLiteral("The remote %1 did not complete.").arg(operation)
+                     : original,
+                 operation, m_stagingDirectory, cleanupDetail);
     return combined;
 }
 
 void ServerSideCopyJob::finishCleanup(const RemoteBackendResult& cleanupResult)
 {
     if (cleanupResult.succeeded()) {
-        m_fallbackOwned = false;
+        m_stagingOwned = false;
     }
 
     const CleanupContinuation continuation = m_cleanupContinuation;
@@ -188,13 +255,18 @@ void ServerSideCopyJob::finishCleanup(const RemoteBackendResult& cleanupResult)
                 QStringLiteral("The destination was created, but temporary move "
                                "cleanup failed. The source was preserved. Temporary "
                                "data remains at %1: %2")
-                    .arg(m_fallbackDestination, describeError(cleanupResult))};
+                    .arg(m_stagingDirectory, describeError(cleanupResult))};
             finishItem(failure);
         }
         return;
     }
     if (continuation == CleanupContinuation::FinishFailure) {
         finishItem(cleanupResult.succeeded() ? m_pendingResult : cleanupFailure(cleanupResult));
+        return;
+    }
+    if (continuation == CleanupContinuation::FinishSuccess) {
+        finishItem(cleanupResult.succeeded() ? RemoteBackendResult{}
+                                             : cleanupFailure(cleanupResult));
         return;
     }
     if (continuation == CleanupContinuation::FinishCancellation) {
@@ -207,11 +279,14 @@ void ServerSideCopyJob::finishCleanup(const RemoteBackendResult& cleanupResult)
             m_progress.error = failure.detail;
         } else if (m_pendingResult.succeeded()) {
             m_progress.state = OperationState::Cancelled;
-            m_progress.error = QStringLiteral("Remote move cancelled.");
+            m_progress.error = QStringLiteral("Remote copy cancelled.");
         } else {
             const QString failure = describeError(m_pendingResult);
             m_result.items.last().error =
-                QStringLiteral("Remote move cancellation failed. %1").arg(failure);
+                QStringLiteral("Remote %1 cancellation failed. %2")
+                    .arg(m_operationKind == RemoteOperationKind::Move ? QStringLiteral("move")
+                                                                      : QStringLiteral("copy"),
+                         failure);
             m_progress.state = OperationState::Failed;
             m_progress.error = failure;
         }
@@ -252,25 +327,25 @@ void ServerSideCopyJob::step()
             finishItem(renamed);
         } else if (renamed.error == RemoteBackendError::CrossDevice) {
             m_progress.cancellationSupported = true;
-            m_phase = Phase::PrepareFallback;
+            m_phase = Phase::PrepareStaging;
         } else {
             finishItem(renamed);
         }
         return;
     }
-    if (m_phase == Phase::PrepareFallback) {
+    if (m_phase == Phase::PrepareStaging) {
         const RemoteItemResult& item = m_result.items.last();
-        m_fallbackDestination = fallbackDestination(item.destination);
-        const RemoteBackendResult reserved = m_backend.reserveMoveStaging(m_fallbackDestination);
+        m_stagingDirectory = stagingDirectory(item.destination);
+        const RemoteBackendResult reserved = m_backend.reserveStaging(m_stagingDirectory);
         if (!reserved.succeeded()) {
             finishItem(
                 reserved.error == RemoteBackendError::AlreadyExists
                     ? RemoteBackendResult{RemoteBackendError::AlreadyExists,
                                           QStringLiteral(
-                                              "A temporary remote move item already exists.")}
+                                              "A temporary remote staging item already exists.")}
                     : reserved);
         } else {
-            m_fallbackOwned = true;
+            m_stagingOwned = true;
             m_phase = Phase::StartItem;
         }
         return;
@@ -281,14 +356,12 @@ void ServerSideCopyJob::step()
         const RemoteBackendResult started =
             m_operationKind == RemoteOperationKind::Move
                 ? m_backend.startMoveStagingCopy(
-                      item.source, RemotePath::join(m_fallbackDestination, QStringLiteral("item")))
-                : m_backend.startCopy(item.source, item.destination, selection.directory);
+                      item.source, RemotePath::join(m_stagingDirectory, QStringLiteral("item")))
+                : m_backend.startCopy(item.source,
+                                      RemotePath::join(m_stagingDirectory, QStringLiteral("item")),
+                                      selection.directory);
         if (!started.succeeded()) {
-            if (m_operationKind == RemoteOperationKind::Move) {
-                beginCleanup(CleanupContinuation::FinishFailure, started);
-            } else {
-                finishItem(started);
-            }
+            beginCleanup(CleanupContinuation::FinishFailure, started);
             return;
         }
         m_copyActive = true;
@@ -298,25 +371,33 @@ void ServerSideCopyJob::step()
     if (m_phase == Phase::PollItem) {
         const std::optional<RemoteBackendResult> polled = m_backend.pollCopy();
         if (polled.has_value()) {
-            if (polled->succeeded() && m_operationKind == RemoteOperationKind::Move) {
+            if (polled->succeeded()) {
                 m_progress.state = OperationState::Finalizing;
                 m_progress.cancellationSupported = false;
                 m_copyActive = false;
                 m_phase = Phase::PromoteItem;
             } else {
-                if (m_operationKind == RemoteOperationKind::Move) {
-                    beginCleanup(CleanupContinuation::FinishFailure, *polled);
-                } else {
-                    finishItem(*polled);
-                }
+                beginCleanup(CleanupContinuation::FinishFailure, *polled);
             }
         }
         return;
     }
     if (m_phase == Phase::PromoteItem) {
         const RemoteItemResult& item = m_result.items.last();
+        const RemoteProbeResult existing = m_backend.probe(item.destination);
+        if (existing.result.succeeded() && existing.node.exists) {
+            beginCleanup(
+                CleanupContinuation::FinishFailure,
+                {RemoteBackendError::AlreadyExists,
+                 QStringLiteral("A remote item appeared at the destination before promotion.")});
+            return;
+        }
+        if (existing.result.error != RemoteBackendError::NotFound) {
+            beginCleanup(CleanupContinuation::FinishFailure, existing.result);
+            return;
+        }
         const RemoteBackendResult promoted = m_backend.rename(
-            RemotePath::join(m_fallbackDestination, QStringLiteral("item")), item.destination);
+            RemotePath::join(m_stagingDirectory, QStringLiteral("item")), item.destination);
         if (!promoted.succeeded()) {
             RemoteBackendResult contextual = promoted;
             contextual.detail =
@@ -325,13 +406,20 @@ void ServerSideCopyJob::step()
                     .arg(describeError(promoted));
             beginCleanup(CleanupContinuation::FinishFailure, contextual);
         } else {
-            beginCleanup(CleanupContinuation::RemoveSource, {});
+            if (m_operationKind == RemoteOperationKind::Move) {
+                beginCleanup(CleanupContinuation::RemoveSource, {});
+            } else {
+                beginPostPromotionCleanup();
+            }
         }
         return;
     }
+    if (m_phase == Phase::RemoveEmptyStaging) {
+        finishCleanup(m_backend.removeEmptyDirectory(m_stagingDirectory));
+        return;
+    }
     if (m_phase == Phase::StartCleanup) {
-        const RemoteBackendResult started =
-            m_backend.startRemove(m_fallbackDestination, true, true);
+        const RemoteBackendResult started = m_backend.startRemove(m_stagingDirectory, true, true);
         if (!started.succeeded()) {
             finishCleanup(started);
         } else {
@@ -416,8 +504,9 @@ bool ServerSideCopyJob::requestCancel()
         finish();
         return false;
     }
-    if (m_phase == Phase::StartCleanup || m_phase == Phase::PollCleanup ||
-        m_phase == Phase::StartRemove || m_phase == Phase::PollRemove) {
+    if (m_phase == Phase::RemoveEmptyStaging || m_phase == Phase::StartCleanup ||
+        m_phase == Phase::PollCleanup || m_phase == Phase::StartRemove ||
+        m_phase == Phase::PollRemove) {
         return false;
     }
     m_progress.state = OperationState::Cancelling;
@@ -425,7 +514,7 @@ bool ServerSideCopyJob::requestCancel()
         m_phase = Phase::RequestCancellation;
         return true;
     }
-    if (m_operationKind == RemoteOperationKind::Move && m_fallbackOwned) {
+    if (m_stagingOwned) {
         beginCleanup(CleanupContinuation::FinishCancellation, {});
         return true;
     }
@@ -440,7 +529,26 @@ bool ServerSideCopyJob::requestCancel()
 void ServerSideCopyJob::finishCancellation(const RemoteBackendResult& result)
 {
     m_copyActive = false;
-    if (m_operationKind == RemoteOperationKind::Move && m_fallbackOwned) {
+    if (m_stagingOwned && result.succeeded()) {
+        beginCleanup(CleanupContinuation::FinishCancellation, result);
+        return;
+    }
+    if (m_stagingOwned && m_operationKind == RemoteOperationKind::Copy) {
+        appendCancelledItems();
+        const QString failure = describeError(result);
+        const QString detail =
+            QStringLiteral("Remote copy cancellation failed. Temporary copy data remains at %1 "
+                           "because process termination could not be confirmed: %2")
+                .arg(m_stagingDirectory, failure);
+        m_result.items.last().error = detail;
+        m_progress.currentItem.clear();
+        m_progress.cancellationSupported = false;
+        m_progress.state = OperationState::Failed;
+        m_progress.error = detail;
+        m_phase = Phase::Finished;
+        return;
+    }
+    if (m_stagingOwned) {
         beginCleanup(CleanupContinuation::FinishCancellation, result);
         return;
     }
@@ -461,6 +569,29 @@ void ServerSideCopyJob::finishCancellation(const RemoteBackendResult& result)
 }
 
 bool ServerSideCopyJob::isFinished() const { return m_phase == Phase::Finished; }
+
+std::optional<QString> ServerSideCopyJob::ownedStagingPath() const
+{
+    return !isFinished() && m_stagingOwned && !m_stagingDirectory.isEmpty()
+               ? std::optional<QString>{m_stagingDirectory}
+               : std::nullopt;
+}
+
+bool ServerSideCopyJob::ownsInternalPath(const QString& path) const
+{
+    const std::optional<QString> staging = ownedStagingPath();
+    if (!staging.has_value()) {
+        return false;
+    }
+    const QString normalized = RemotePath::normalize(path);
+    return normalized == *staging || normalized.startsWith(*staging + QChar{'/'});
+}
+
+bool ServerSideCopyJob::hidesListingEntry(const QString& parentPath, const QString& entryName) const
+{
+    const std::optional<QString> staging = ownedStagingPath();
+    return staging.has_value() && RemotePath::join(parentPath, entryName) == *staging;
+}
 
 const OperationProgress& ServerSideCopyJob::progress() const { return m_progress; }
 

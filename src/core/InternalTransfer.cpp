@@ -69,10 +69,15 @@ void InternalClipboard::set(InternalTransferAction action, InternalTransferPaylo
         clear();
         return;
     }
+    ++m_generation;
     m_content = ClipboardEntry{action, std::move(payload)};
 }
 
-void InternalClipboard::clear() { m_content.reset(); }
+void InternalClipboard::clear()
+{
+    ++m_generation;
+    m_content.reset();
+}
 
 bool InternalClipboard::hasContent() const { return m_content.has_value(); }
 
@@ -80,6 +85,8 @@ bool InternalClipboard::isCut() const
 {
     return m_content.has_value() && m_content->action == InternalTransferAction::Move;
 }
+
+quint64 InternalClipboard::generation() const { return m_generation; }
 
 const std::optional<ClipboardEntry>& InternalClipboard::content() const { return m_content; }
 

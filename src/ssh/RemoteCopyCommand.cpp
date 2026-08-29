@@ -5,7 +5,23 @@ namespace rfm::ssh
 namespace
 {
 
-constexpr auto moveStagingStatusPrefix = "RFM_MOVE_COPY_STATUS:";
+constexpr auto copyStatusPrefix = "RFM_COPY_STATUS:";
+
+QString wrapCopyCommand(const QString& command)
+{
+    return QStringLiteral("rfm_copy_pid=; "
+                          "rfm_forward_term() { "
+                          "[ -z \"$rfm_copy_pid\" ] || kill -TERM \"$rfm_copy_pid\" 2>/dev/null; "
+                          "[ -z \"$rfm_copy_pid\" ] || wait \"$rfm_copy_pid\" 2>/dev/null; "
+                          "exit 143; }; "
+                          "trap 'rfm_forward_term' TERM HUP INT; "
+                          "%1 & rfm_copy_pid=$!; "
+                          "wait \"$rfm_copy_pid\"; rfm_copy_status=$?; "
+                          "trap - TERM HUP INT; "
+                          "printf '\\nRFM_COPY_STATUS:%s\\n' \"$rfm_copy_status\"; "
+                          "exit \"$rfm_copy_status\"")
+        .arg(command);
+}
 
 } // namespace
 
@@ -27,8 +43,9 @@ QString RemoteCopyCommand::build(const QString& source, const QString& destinati
         quotedDestination.isEmpty()) {
         return {};
     }
-    return QStringLiteral("cp -P %1-n -- %2 %3")
-        .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedSource, quotedDestination);
+    return wrapCopyCommand(
+        QStringLiteral("cp -P %1-n -- %2 %3")
+            .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedSource, quotedDestination));
 }
 
 QString RemoteCopyCommand::buildMoveStaging(const QString& source, const QString& destination)
@@ -41,17 +58,12 @@ QString RemoteCopyCommand::buildMoveStaging(const QString& source, const QString
     }
     // GNU cp -a preserves links, modes, ownership where permitted, timestamps,
     // ACLs, xattrs and hard-link relationships while recursively copying trees.
-    // Report cp's status in-band as well: an SSH exit-status request may arrive
-    // after EOF and is not guaranteed to be observed by a non-blocking poller.
-    return QStringLiteral("cp -a -- %1 %2; rfm_copy_status=$?; "
-                          "printf '\\nRFM_MOVE_COPY_STATUS:%s\\n' \"$rfm_copy_status\"; "
-                          "exit \"$rfm_copy_status\"")
-        .arg(quotedSource, quotedDestination);
+    return wrapCopyCommand(QStringLiteral("cp -a -- %1 %2").arg(quotedSource, quotedDestination));
 }
 
-std::optional<quint32> RemoteCopyCommand::parseMoveStagingStatus(const QByteArray& standardOutput)
+std::optional<quint32> RemoteCopyCommand::parseCopyStatus(const QByteArray& standardOutput)
 {
-    const QByteArray prefix{moveStagingStatusPrefix};
+    const QByteArray prefix{copyStatusPrefix};
     const qsizetype prefixPosition = standardOutput.lastIndexOf(prefix);
     if (prefixPosition < 0 ||
         (prefixPosition > 0 && standardOutput.at(prefixPosition - 1) != '\n')) {

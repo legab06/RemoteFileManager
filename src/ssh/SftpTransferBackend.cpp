@@ -1,4 +1,5 @@
 #include "SftpTransferBackend.hpp"
+#include "SshTransportHealth.hpp"
 #include <fcntl.h>
 #include <libssh/sftp.h>
 namespace rfm::ssh
@@ -52,20 +53,6 @@ rfm::core::TransferBackendError map(int e)
     return rfm::core::TransferBackendError::Io;
 }
 
-bool transportFatal(ssh_session session)
-{
-    if (session == nullptr || ssh_is_connected(session) == 0) {
-        return true;
-    }
-    const int status = ssh_get_status(session);
-    if ((status & (SSH_CLOSED | SSH_CLOSED_ERROR)) != 0) {
-        return true;
-    }
-    const int error = ssh_get_error_code(session);
-    // SFTP may report a generic status even though the underlying channel operation
-    // has already marked the SSH session as non-recoverable.
-    return error != SSH_NO_ERROR && error != SSH_REQUEST_DENIED && error != SSH_EINTR;
-}
 } // namespace
 SftpTransferBackend::SftpTransferBackend(ssh_session sshSession, sftp_session sftpSession)
     : m_sshSession(sshSession), m_sftpSession(sftpSession)
@@ -79,14 +66,14 @@ SftpTransferBackend::~SftpTransferBackend()
 }
 bool SftpTransferBackend::connectionAlive() const
 {
-    return !m_transportFatal && m_sftpSession != nullptr && !transportFatal(m_sshSession);
+    return !m_transportFatal && transportAlive(m_sshSession, m_sftpSession);
 }
 rfm::core::TransferBackendResult SftpTransferBackend::result() const
 {
     rfm::core::TransferBackendError error = map(sftp_get_error(m_sftpSession));
     m_transportFatal = m_transportFatal ||
                        error == rfm::core::TransferBackendError::ConnectionLost ||
-                       transportFatal(m_sshSession);
+                       !transportAlive(m_sshSession, m_sftpSession);
     if (m_transportFatal) {
         error = rfm::core::TransferBackendError::ConnectionLost;
     }

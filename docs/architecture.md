@@ -31,15 +31,18 @@ worker avec une file de tâches. Les transferts et copies serveur longues avance
 réordonnancées dans la boucle d'événements afin que le worker puisse traiter navigation, annulation
 et arrêt propre entre deux étapes.
 
-L'admission des Upload/Download est séparée de leur exécution. `TransferCoordinator`, dans le thread
-graphique mais sans aucune I/O, possède l'unique `TransferQueue`, publie `Queued`, conserve au plus
-une requête active et route pause, reprise et annulation vers son exécuteur. `SshSession` ne choisit
-jamais le transfert suivant : elle exécute uniquement le job actif et publie les états à partir de
-`Preparing`. Après un terminal, le coordinateur libère son slot puis décide seul du dispatch suivant.
-Une indisponibilité fatale de l'exécuteur est signalée avant le terminal actif ; le coordinateur peut
-ainsi échouer les requêtes encore queued sans connaître libssh ni démarrer un nouveau job. Le shutdown
-et la déconnexion extraient également cette queue avant de demander le nettoyage coopératif du job
-actif au worker.
+L'admission des opérations longues est séparée de leur exécution. `TransferCoordinator`, dans le
+thread graphique mais sans aucune I/O, possède deux voies FIFO indépendantes : une pour les
+Upload/Download et une commune aux Remote Copy/Move. Chaque voie conserve au plus une requête active,
+ce qui préserve la concurrence existante entre un transfert SFTP et une copie serveur. Le coordinateur
+publie seul `Queued`, route les annulations et choisit la prochaine requête de chaque voie.
+`SshSession` ne choisit jamais le travail suivant : elle exécute uniquement les jobs dispatchés et
+publie leur travail effectif à partir de `Preparing`. Après le terminal et le résultat métier d'un
+Copy/Move, le coordinateur libère son slot puis décide seul du dispatch suivant. Une indisponibilité
+fatale de l'exécuteur est signalée avant sa destruction ; le coordinateur échoue alors les actifs et
+les requêtes encore queued sans connaître libssh ni démarrer un nouveau job. Le shutdown et la
+déconnexion extraient les deux queues avant de demander le nettoyage coopératif des jobs actifs au
+worker.
 
 La découverte des volumes utilise la même discipline : `LocalFileSystemWorker` lit
 la machine cliente et `SshSession` lit le serveur connecté. Les deux collecteurs
@@ -66,9 +69,11 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
 
 ## Opérations distantes
 
-- Remote Copy/Move conserve temporairement son scheduler propre dans `SshSession`; son admission dans
-  l'autorité commune est reportée au lot suivant. Le coordinateur n'est toutefois couplé ni à SSH ni
-  à un thread d'exécution particulier, afin de pouvoir accueillir ensuite un exécuteur local.
+- Remote Copy et Remote Move partagent une voie FIFO du `TransferCoordinator`. Une requête queued peut
+  être annulée sans créer de `ServerSideCopyJob`; le coordinateur publie alors `Cancelled` et un
+  résultat métier synthétique afin que l'UI nettoie contexte et clipboard par son chemin habituel.
+  L'annulation active reste coopérative et ne libère le slot qu'après le terminal et le résultat de
+  l'exécuteur. Shutdown, déconnexion et perte SSH terminalisent la queue sans nouveau dispatch.
 - SFTP sert à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
 - Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
@@ -77,10 +82,30 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
   progression indéterminée honnête ; aucun pourcentage n'est estimé ou fabriqué.
 - Les commandes distantes sont construites et échappées dans une couche dédiée ; aucun chemin fourni par l’utilisateur n’est concaténé naïvement dans une commande shell.
 - Les opérations de fichiers dépendent de `RemoteFileBackend`, dont l’implémentation libssh reste privée au transport. Les tests utilisent un double sans connexion réseau.
-- La copie distante utilise actuellement `cp -P -n` via un canal SSH non bloquant, faute de
-  primitive de copie serveur exposée par SFTP/libssh. Ses arguments sont échappés séparément, les
-  collisions sont refusées avant et pendant l'exécution, les liens symboliques restent des liens et
-  l'annulation envoie `TERM` au processus distant avant de fermer le canal.
+- La copie distante utilise `cp -P -n` via un canal SSH non bloquant, faute de primitive de copie
+  serveur exposée par SFTP/libssh. Pour chaque élément, elle réserve atomiquement dans le dossier
+  destination un répertoire court `.rfm-copy-<uuid>.partial`, donc sur le même filesystem et
+  indépendamment de la longueur du nom final, puis copie vers son enfant `item`. Le fallback Move
+  utilise de même `.rfm-move-<uuid>.partial`. Tant qu'un job possède ce chemin exact, les listings le
+  masquent et les opérations UI le refusent comme source ou cible. Un staging abandonné par un job
+  terminal ou une ancienne session redevient visible : aucun motif de nom n'est filtré globalement.
+  Le nom final reste absent pendant la copie. Après le succès réel de
+  `cp`, sa disponibilité est revérifiée et `item` est promu par rename SFTP. Le staging alors attendu
+  vide est supprimé uniquement par `sftp_rmdir`, sans shell, suppression récursive ni lecture de
+  `mountinfo`. Un échec de ce `rmdir`, y compris parce que le répertoire n'est pas vide, conserve le
+  fichier final et le staging, puis publie `Failed` avec son chemin, sans fallback récursif. Avant la
+  promotion, une annulation ou une erreur peut laisser un arbre partiel : le cleanup récursif protégé
+  reste alors utilisé et doit finir avant le terminal. L'annulation attend la terminaison du processus
+  puis ce nettoyage avant de publier `Cancelled` ; un échec conserve un diagnostic avec le chemin du
+  staging éventuellement restant.
+  Les arguments restent échappés séparément et la sémantique Copy demeure distincte du fallback
+  Move : `-P`, `-R` seulement pour un dossier et `-n`, sans remplacement implicite par `cp -a`.
+  Copy et le fallback Move exécutent cependant `cp` sous un wrapper commun qui publie son statut
+  in-band. Le wrapper intercepte `TERM`, le transmet au PID de `cp` et attend sa terminaison avant de
+  fermer le canal ; EOF ou un callback SSH tardif ne peut donc ni fabriquer un succès ni contredire
+  un statut vérifié. Une perte de transport terminalise le job avant sa destruction : les éléments
+  déjà promus et nettoyés restent réussis, l'élément actif indique son staging potentiellement
+  restant et les éléments non démarrés sont distingués dans le résultat métier réel.
 - Un déplacement tente d'abord le rename SFTP. Comme SFTP v3 réduit `EXDEV` à une erreur
   générique, le transport ne qualifie le fallback qu'après comparaison par `statvfs` des
   répertoires qui contiennent les entrées source et destination. Il vérifie aussi que l'entrée
@@ -92,8 +117,8 @@ point de montage stocké pour naviguer et ne déduit jamais un chemin du texte a
   sur le filesystem cible. La copie de déplacement utilise `cp -a` dans ce répertoire : elle
   préserve liens, modes, dates, propriétaires lorsque les droits le permettent, ACL, attributs
   étendus, capabilities et liens physiques dans l'arbre copié. La copie distante ordinaire
-  reste en `cp -P -n` et conserve donc sa sémantique existante. Le wrapper du seul `cp -a`
-  publie aussi son code de retour dans stdout avant EOF : le worker peut ainsi valider une copie
+  reste en `cp -P -n` et conserve donc sa sémantique existante. Le wrapper commun
+  publie le code de retour dans stdout avant EOF : le worker peut ainsi valider une copie
   courte même si la notification SSH `exit-status` arrive tardivement, tout en refusant une
   incohérence entre les deux statuts lorsqu'ils sont tous deux disponibles.
 - Après la copie, le worker promeut l'enfant temporaire par rename SFTP, nettoie le répertoire

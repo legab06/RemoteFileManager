@@ -25,6 +25,7 @@ add_library(
     ssh/RemoteVolumeService.cpp
     ssh/SshSession.cpp
     ssh/SftpTransferBackend.cpp
+    ssh/SshTransportHealth.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/LocalFileSystem.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/RemoteMoveSafety.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/Storage.hpp
