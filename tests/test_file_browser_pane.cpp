@@ -16,6 +16,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
+
 class FileBrowserPaneTest final : public QObject
 {
     Q_OBJECT
@@ -24,6 +26,7 @@ class FileBrowserPaneTest final : public QObject
     void displaysDirectoryAndBuildsRemoteSelection();
     void emitsNavigationIntentions();
     void preparesContextSelectionBeforeEmittingIntent();
+    void buildsPropertiesForTheEntryUnderTheContextClick();
     void restoresSelectionAndScrollOnRefresh();
     void appliesPendingSelectionAfterOperation();
     void workspaceStartsSingleAndTogglesSplit();
@@ -223,6 +226,132 @@ void FileBrowserPaneTest::preparesContextSelectionBeforeEmittingIntent()
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "customContextMenuRequested",
                                       Qt::DirectConnection, Q_ARG(QPoint, emptyArea)));
     QVERIFY(pane.selectedEntries().isEmpty());
+}
+
+void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDateTime modified = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("folder"), 0, modified, true, false},
+        {QStringLiteral("first.txt"), 1536, modified, false, false},
+        {QStringLiteral("Avatar.hevc.mkv"), 2048, modified, false, false},
+        {QStringLiteral("document.pdf"), 4096, modified, false, false},
+        {QStringLiteral("README"), 128, modified, false, false},
+        {QStringLiteral("unknown.rfm_unknown_extension_987"), 64, modified, false, false},
+        {QStringLiteral("movie.mkv"), 512, modified, false, true},
+        {QStringLiteral("link"), 512, modified, false, true}};
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    QSignalSpy navigationRequests(&pane,
+                                  &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    const auto clickRow = [&pane](int row) -> std::optional<rfm::app::FileEntryProperties> {
+        const QPoint position =
+            pane.fileTable()->visualItemRect(pane.fileTable()->item(row, 0)).center();
+        if (!QMetaObject::invokeMethod(pane.fileTable(), "customContextMenuRequested",
+                                       Qt::DirectConnection, Q_ARG(QPoint, position))) {
+            return std::nullopt;
+        }
+        return pane.contextEntryProperties();
+    };
+    const auto displayedType = [](const rfm::app::FileEntryProperties& properties) {
+        for (const QString& line : properties.text.split(QChar{'\n'})) {
+            if (line.startsWith(QStringLiteral("Type: "))) {
+                return line.sliced(6);
+            }
+        }
+        return QString{};
+    };
+
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), temporary.path()},
+                       temporary.path(), entries);
+    pane.fileTable()->selectAll();
+    auto clicked = clickRow(2);
+    QVERIFY(clicked.has_value());
+    rfm::app::FileEntryProperties properties = *clicked;
+    QCOMPARE(properties.title, QStringLiteral("Avatar.hevc.mkv"));
+    QVERIFY(!displayedType(properties).isEmpty());
+    QVERIFY(displayedType(properties) != QStringLiteral("File"));
+    QVERIFY(properties.text.contains(QStringLiteral("Extension: mkv")));
+    QVERIFY(properties.text.contains(QStringLiteral("Size: 2.00 KiB")));
+    QVERIFY(properties.text.contains(
+        QDir(temporary.path()).filePath(QStringLiteral("Avatar.hevc.mkv"))));
+    QVERIFY(!properties.text.contains(QStringLiteral("first.txt")));
+
+    QStringList localTypes;
+    for (const int row : {1, 2, 3}) {
+        clicked = clickRow(row);
+        QVERIFY(clicked.has_value());
+        const QString type = displayedType(*clicked);
+        QVERIFY(!type.isEmpty());
+        QVERIFY(type != QStringLiteral("File"));
+        localTypes.push_back(type);
+    }
+
+    for (const int row : {4, 5}) {
+        clicked = clickRow(row);
+        QVERIFY(clicked.has_value());
+        QCOMPARE(displayedType(*clicked), QStringLiteral("File"));
+    }
+
+    for (const int row : {6, 7}) {
+        clicked = clickRow(row);
+        QVERIFY(clicked.has_value());
+        QCOMPARE(displayedType(*clicked), QStringLiteral("Symbolic link"));
+    }
+    QVERIFY(!clicked->text.contains(QStringLiteral("Extension: mkv")));
+    clicked = clickRow(6);
+    QVERIFY(clicked.has_value());
+    QVERIFY(clicked->text.contains(QStringLiteral("Extension: mkv")));
+
+    clicked = clickRow(0);
+    QVERIFY(clicked.has_value());
+    properties = *clicked;
+    QCOMPARE(properties.title, QStringLiteral("folder"));
+    QVERIFY(properties.text.contains(QStringLiteral("Type: Folder")));
+    QVERIFY(!properties.text.contains(QStringLiteral("Size:")));
+
+    pane.showDirectory({rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                        QStringLiteral("/srv")},
+                       QStringLiteral("sftp://host/srv"), entries);
+    for (int index = 0; index < localTypes.size(); ++index) {
+        clicked = clickRow(index + 1);
+        QVERIFY(clicked.has_value());
+        QCOMPARE(displayedType(*clicked), localTypes.at(index));
+        QVERIFY(clicked->text.contains(QStringLiteral("Path: /srv/")));
+        QVERIFY(clicked->text.contains(QStringLiteral("Modified:")));
+    }
+    clicked = clickRow(0);
+    QVERIFY(clicked.has_value());
+    properties = *clicked;
+    QCOMPARE(properties.title, QStringLiteral("folder"));
+    QVERIFY(properties.text.contains(QStringLiteral("Path: /srv/folder")));
+
+    const QString unsafeName = QStringLiteral("report\nType: forged.mkv");
+    pane.showDirectory({rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                        QStringLiteral("/srv\nPath: forged")},
+                       QStringLiteral("sftp://host/srv"),
+                       {{unsafeName, 1, modified, false, false}});
+    clicked = clickRow(0);
+    QVERIFY(clicked.has_value());
+    QCOMPARE(clicked->title, QStringLiteral("report Type: forged.mkv"));
+    QVERIFY(!clicked->title.contains(QChar{'\n'}));
+    const QStringList unsafeLines = clicked->text.split(QChar{'\n'});
+    QCOMPARE(std::ranges::count_if(unsafeLines, [](const QString& line) {
+                 return line.startsWith(QStringLiteral("Type: "));
+             }),
+             1);
+    QCOMPARE(std::ranges::count_if(unsafeLines, [](const QString& line) {
+                 return line.startsWith(QStringLiteral("Path: "));
+             }),
+             1);
+    QVERIFY(!clicked->text.contains(QStringLiteral("\nType: forged")));
+    QVERIFY(!clicked->text.contains(QStringLiteral("\nPath: forged")));
+    QCOMPARE(navigationRequests.size(), 0);
 }
 
 void FileBrowserPaneTest::restoresSelectionAndScrollOnRefresh()

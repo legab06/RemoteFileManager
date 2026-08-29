@@ -10,6 +10,8 @@
 #include <QString>
 #include <QStringList>
 
+#include <utility>
+
 namespace rfm::core
 {
 
@@ -50,6 +52,17 @@ struct LocalFileOperationResult {
 // separate makes it possible to derive the displayed volumes and their identity
 // fingerprint from exactly the same mount snapshot.
 struct LocalStorageMount {
+    LocalStorageMount() = default;
+    LocalStorageMount(QString rootPathValue, QString deviceValue, QByteArray fileSystemTypeValue,
+                      QString fileSystemLabelValue, qint64 bytesTotalValue, bool readOnlyValue,
+                      bool validValue, bool readyValue, QString deviceNumberValue = {})
+        : rootPath(std::move(rootPathValue)), device(std::move(deviceValue)),
+          fileSystemType(std::move(fileSystemTypeValue)),
+          fileSystemLabel(std::move(fileSystemLabelValue)), bytesTotal(bytesTotalValue),
+          readOnly(readOnlyValue), valid(validValue), ready(readyValue),
+          deviceNumber(std::move(deviceNumberValue))
+    {}
+
     QString rootPath;
     QString device;
     QByteArray fileSystemType;
@@ -58,6 +71,7 @@ struct LocalStorageMount {
     bool readOnly{false};
     bool valid{false};
     bool ready{false};
+    QString deviceNumber;
 };
 
 struct LocalStorageSnapshot {

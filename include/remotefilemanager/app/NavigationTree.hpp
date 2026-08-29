@@ -56,13 +56,22 @@ class NavigationTree final : public QWidget
         Placeholder
     };
 
+    enum class ContextAction { Connect, Disconnect, Open, Mount, Unmount, Properties };
+
     explicit NavigationTree(QWidget* parent = nullptr);
 
     [[nodiscard]] QTreeWidget* tree() const;
     [[nodiscard]] QString selectedProfileId() const;
-    [[nodiscard]] QString profileIdAt(const QPoint& viewportPosition) const;
+    [[nodiscard]] QList<ContextAction> contextActionsAt(const QPoint& viewportPosition) const;
     [[nodiscard]] std::optional<rfm::core::StorageVolume> selectedLocalStorageVolume() const;
     [[nodiscard]] std::optional<SelectedStorageVolume> selectedStorageVolume() const;
+    [[nodiscard]] QString selectedPropertiesTitle() const;
+    [[nodiscard]] QString selectedPropertiesText() const;
+
+    void selectItemAt(const QPoint& viewportPosition);
+    void activateSelectedItem();
+    void mountSelectedVolume();
+    void unmountSelectedVolume();
 
     void setProfiles(const QList<rfm::core::ConnectionProfile>& profiles);
     void setActiveServer(RemoteMachineDescriptor machine, const QString& initialPath);
@@ -116,6 +125,7 @@ class NavigationTree final : public QWidget
     [[nodiscard]] static NodeKind itemKind(const QTreeWidgetItem* item);
     [[nodiscard]] static QString normalizedLocalPath(const QString& path);
     [[nodiscard]] static QString localStorageIdentity(const rfm::core::StorageVolume& volume);
+    [[nodiscard]] static bool canUnmountVolume(const SelectedStorageVolume& selected);
     [[nodiscard]] static QString volumeOperationIdentity(const QString& machineId,
                                                          const QString& device);
     void updateVolumeActions();

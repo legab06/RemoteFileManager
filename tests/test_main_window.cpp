@@ -393,6 +393,8 @@ class MainWindowTest final : public QObject
     void copiesAndMovesSelectionToOtherPane();
     void queuesRemoteCopiesWithoutBlockingTheWindow();
     void remoteExecutorFailureShowsOnlyConnectionDialog();
+    void fileContextMenuOffersProperties_data();
+    void fileContextMenuOffersProperties();
     void contextMenuUsesSharedInterPaneActions();
     void contextMenuUsesClipboardAndKeepsExplicitDestinationActions();
     void buildsCanonicalInterPanePathsThroughTheRealUiChain();
@@ -1111,6 +1113,7 @@ void MainWindowTest::dockVisibilityActionsTrackPanels()
     QVERIFY(operationAction != nullptr);
     QCOMPARE(placesAction->text(), QStringLiteral("Places"));
     QCOMPARE(operationAction->text(), QStringLiteral("Operations"));
+    QVERIFY(window.findChild<QLabel*>(QStringLiteral("storageHeaderLabel")) == nullptr);
 
     QMenu* viewMenu = nullptr;
     for (QMenu* const menu : window.findChildren<QMenu*>()) {
@@ -3093,6 +3096,62 @@ void MainWindowTest::rejectsOtherPaneOperationsForSameDirectory()
     workspace->primaryPane()->fileTable()->selectRow(0);
     QVERIFY(!copyOther->isEnabled());
     QVERIFY(!moveOther->isEnabled());
+}
+
+void MainWindowTest::fileContextMenuOffersProperties_data()
+{
+    QTest::addColumn<bool>("local");
+    QTest::addColumn<bool>("directory");
+
+    QTest::newRow("local-file") << true << false;
+    QTest::newRow("local-folder") << true << true;
+    QTest::newRow("remote-file") << false << false;
+    QTest::newRow("remote-folder") << false << true;
+}
+
+void MainWindowTest::fileContextMenuOffersProperties()
+{
+    QFETCH(bool, local);
+    QFETCH(bool, directory);
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::MainWindow window;
+    window.show();
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const pane = workspace->primaryPane();
+    const QString name = directory ? QStringLiteral("folder") : QStringLiteral("file.txt");
+    const rfm::core::BrowserLocation location{
+        local ? rfm::core::FileSource::Local : rfm::core::FileSource::Ssh,
+        local ? QString::fromLatin1(rfm::core::LocalMachineId) : QStringLiteral("remote-id"),
+        local ? temporary.path() : QStringLiteral("/srv")};
+    pane->showDirectory(location, location.path,
+                        {{name, directory ? quint64{0} : quint64{42},
+                          QDateTime::fromSecsSinceEpoch(1'700'000'000), directory, false}});
+    const QPoint position =
+        pane->fileTable()->visualItemRect(pane->fileTable()->item(0, 0)).center();
+    QAction* const properties =
+        window.findChild<QAction*>(QStringLiteral("filePropertiesAction"));
+    QVERIFY(properties != nullptr);
+
+    QTimer::singleShot(0, [&window, properties] {
+        auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        QVERIFY(menu != nullptr);
+        const QList<QAction*> actions = menu->actions();
+        QVERIFY(actions.contains(properties));
+        QVERIFY(actions.contains(
+            window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))));
+        QVERIFY(actions.contains(window.findChild<QAction*>(QStringLiteral("removeAction"))));
+        QVERIFY(actions.contains(
+            window.findChild<QAction*>(QStringLiteral("createDirectoryAction"))));
+        QCOMPARE(actions.constLast(), properties);
+        QVERIFY(actions.at(actions.size() - 2)->isSeparator());
+        menu->close();
+    });
+    QVERIFY(QMetaObject::invokeMethod(pane->fileTable(), "customContextMenuRequested",
+                                      Qt::DirectConnection, Q_ARG(QPoint, position)));
+    const auto clickedProperties = pane->contextEntryProperties();
+    QVERIFY(clickedProperties.has_value());
+    QCOMPARE(clickedProperties->title, name);
 }
 
 void MainWindowTest::contextMenuUsesSharedInterPaneActions()

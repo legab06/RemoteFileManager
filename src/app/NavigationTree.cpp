@@ -208,15 +208,7 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
                 updateVolumeActions();
                 emit selectedProfileChanged();
             });
-    connect(m_mountVolumeButton, &QPushButton::clicked, this, [this] {
-        if (const auto selected = selectedStorageVolume(); selected.has_value()) {
-            if (selected->local) {
-                emit localVolumeMountRequested(selected->volume);
-            } else {
-                emit remoteVolumeMountRequested(selected->machineId, selected->volume);
-            }
-        }
-    });
+    connect(m_mountVolumeButton, &QPushButton::clicked, this, &NavigationTree::mountSelectedVolume);
     connect(m_openVolumeButton, &QPushButton::clicked, this, [this] {
         if (const auto selected = selectedStorageVolume(); selected.has_value() &&
                                                            selected->volume.mounted &&
@@ -228,15 +220,8 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
             }
         }
     });
-    connect(m_unmountVolumeButton, &QPushButton::clicked, this, [this] {
-        if (const auto selected = selectedStorageVolume(); selected.has_value()) {
-            if (selected->local) {
-                emit localVolumeUnmountRequested(selected->volume);
-            } else {
-                emit remoteVolumeUnmountRequested(selected->machineId, selected->volume);
-            }
-        }
-    });
+    connect(m_unmountVolumeButton, &QPushButton::clicked, this,
+            &NavigationTree::unmountSelectedVolume);
     updateVolumeActions();
 }
 
@@ -254,16 +239,127 @@ QString NavigationTree::selectedProfileId() const
     return {};
 }
 
-QString NavigationTree::profileIdAt(const QPoint& viewportPosition) const
+QList<NavigationTree::ContextAction>
+NavigationTree::contextActionsAt(const QPoint& viewportPosition) const
 {
-    QTreeWidgetItem* item = m_tree->itemAt(viewportPosition);
-    while (item != nullptr) {
-        if (itemKind(item) == NodeKind::ServerProfile) {
-            return item->data(0, SavedProfileIdRole).toString();
+    const QTreeWidgetItem* const item = m_tree->itemAt(viewportPosition);
+    if (item == nullptr) {
+        return {};
+    }
+    if (item->data(0, VolumeRole).isValid()) {
+        const QString machineId = item->data(0, ProfileIdRole).toString();
+        const SelectedStorageVolume selected{
+            item->data(0, VolumeRole).value<rfm::core::StorageVolume>(), machineId,
+            machineId == QString::fromLatin1(rfm::core::LocalMachineId)};
+        if (selected.volume.mounted) {
+            QList<ContextAction> actions{ContextAction::Open};
+            if (canUnmountVolume(selected)) {
+                actions.push_back(ContextAction::Unmount);
+            }
+            actions.push_back(ContextAction::Properties);
+            return actions;
         }
-        item = item->parent();
+        return {ContextAction::Mount, ContextAction::Properties};
+    }
+
+    const NodeKind kind = itemKind(item);
+    if (kind == NodeKind::ServerProfile &&
+        !item->data(0, SavedProfileIdRole).toString().isEmpty()) {
+        return {item->data(0, ActiveRole).toBool() ? ContextAction::Disconnect
+                                                   : ContextAction::Connect,
+                ContextAction::Properties};
+    }
+    if (kind == NodeKind::LocalLocation || kind == NodeKind::LocalDirectory ||
+        kind == NodeKind::RemoteDirectory) {
+        return {ContextAction::Open, ContextAction::Properties};
     }
     return {};
+}
+
+QString NavigationTree::selectedPropertiesTitle() const
+{
+    const QTreeWidgetItem* const item = m_tree->currentItem();
+    if (item == nullptr) {
+        return {};
+    }
+    const QString baseText = item->data(0, BaseTextRole).toString();
+    return baseText.isEmpty() ? item->text(0) : baseText;
+}
+
+QString NavigationTree::selectedPropertiesText() const
+{
+    const QTreeWidgetItem* const item = m_tree->currentItem();
+    if (item == nullptr) {
+        return {};
+    }
+    if (item->data(0, VolumeRole).isValid()) {
+        QTextDocument document;
+        document.setHtml(item->toolTip(0));
+        return document.toPlainText();
+    }
+    const NodeKind kind = itemKind(item);
+    const QString path = item->data(0, PathRole).toString();
+    if ((kind == NodeKind::LocalLocation || kind == NodeKind::LocalDirectory) && !path.isEmpty()) {
+        return tr("Type: Local folder\nLocation: %1").arg(path);
+    }
+    if (kind == NodeKind::RemoteDirectory && !path.isEmpty()) {
+        return tr("Type: Remote folder\nLocation: %1").arg(path);
+    }
+    return {};
+}
+
+void NavigationTree::selectItemAt(const QPoint& viewportPosition)
+{
+    if (QTreeWidgetItem* const item = m_tree->itemAt(viewportPosition)) {
+        m_tree->setCurrentItem(item);
+    }
+}
+
+void NavigationTree::activateSelectedItem()
+{
+    const auto selected = selectedStorageVolume();
+    if (selected.has_value() && m_volumeOperations.contains(volumeOperationIdentity(
+                                    selected->machineId, selected->volume.device))) {
+        return;
+    }
+    activateItem(m_tree->currentItem());
+}
+
+void NavigationTree::mountSelectedVolume()
+{
+    if (const auto selected = selectedStorageVolume(); selected.has_value()) {
+        const QString localDevice = QDir::cleanPath(selected->volume.device.trimmed());
+        const bool operableDevice = selected->local
+                                        ? localDevice.startsWith(QStringLiteral("/dev/")) &&
+                                              localDevice != QStringLiteral("/dev")
+                                        : rfm::core::isSafeLinuxDevicePath(selected->volume.device);
+        if (!operableDevice || selected->volume.mounted ||
+            m_volumeOperations.contains(
+                volumeOperationIdentity(selected->machineId, selected->volume.device))) {
+            return;
+        }
+        if (selected->local) {
+            emit localVolumeMountRequested(selected->volume);
+        } else {
+            emit remoteVolumeMountRequested(selected->machineId, selected->volume);
+        }
+    }
+}
+
+void NavigationTree::unmountSelectedVolume()
+{
+    if (const auto selected = selectedStorageVolume();
+        selected.has_value() && canUnmountVolume(*selected)) {
+        if (m_volumeOperations.contains(
+                volumeOperationIdentity(selected->machineId, selected->volume.device))) {
+            return;
+        }
+        if (selected->local) {
+            emit localVolumeUnmountRequested(selected->volume);
+        } else {
+            emit remoteVolumeUnmountRequested(selected->machineId, selected->volume);
+        }
+    }
 }
 
 std::optional<rfm::core::StorageVolume> NavigationTree::selectedLocalStorageVolume() const
@@ -357,14 +453,16 @@ NavigationTree::uniqueStorageVolumes(const QList<rfm::core::StorageVolume>& volu
     QSet<QString> mountedDevices;
     if (local) {
         for (const rfm::core::StorageVolume& volume : volumes) {
-            if (volume.mounted && !volume.device.trimmed().isEmpty()) {
-                mountedDevices.insert(QDir::cleanPath(volume.device.trimmed()));
+            if (volume.mounted) {
+                const QString identity = localStorageIdentity(volume);
+                if (!identity.isEmpty()) {
+                    mountedDevices.insert(identity);
+                }
             }
         }
     }
     for (const rfm::core::StorageVolume& volume : volumes) {
-        if (local && !volume.mounted &&
-            mountedDevices.contains(QDir::cleanPath(volume.device.trimmed()))) {
+        if (local && !volume.mounted && mountedDevices.contains(localStorageIdentity(volume))) {
             continue;
         }
         const QString identity =
@@ -376,9 +474,17 @@ NavigationTree::uniqueStorageVolumes(const QList<rfm::core::StorageVolume>& volu
         if (existing == indexes.cend()) {
             indexes.insert(identity, uniqueVolumes.size());
             uniqueVolumes.push_back(volume);
-        } else if (volume.kind == rfm::core::StorageKind::External &&
-                   uniqueVolumes.at(existing.value()).kind != rfm::core::StorageKind::External) {
-            uniqueVolumes[existing.value()] = volume;
+        } else {
+            const rfm::core::StorageVolume& current = uniqueVolumes.at(existing.value());
+            const bool preferMounted = volume.mounted && !current.mounted;
+            const bool preferRoot = volume.mounted && current.mounted &&
+                                    volume.rootPath == QStringLiteral("/") &&
+                                    current.rootPath != QStringLiteral("/");
+            const bool preferExternal = volume.kind == rfm::core::StorageKind::External &&
+                                        current.kind != rfm::core::StorageKind::External;
+            if (preferMounted || preferRoot || preferExternal) {
+                uniqueVolumes[existing.value()] = volume;
+            }
         }
     }
     return uniqueVolumes;
@@ -632,10 +738,7 @@ void NavigationTree::updateVolumeActions()
     const bool busy = selected && m_volumeOperations.contains(volumeOperationIdentity(
                                       selectedVolume->machineId, volume.device));
     const bool canMount = selected && operableDevice && !volume.mounted;
-    const bool canUnmount =
-        selected && operableDevice && volume.mounted &&
-        rfm::core::RemotePath::normalize(volume.rootPath) != QStringLiteral("/") &&
-        volume.kind != rfm::core::StorageKind::System;
+    const bool canUnmount = selected && operableDevice && canUnmountVolume(*selectedVolume);
 
     m_mountVolumeButton->setVisible(canMount);
     m_mountVolumeButton->setEnabled(canMount && !busy);
@@ -643,6 +746,18 @@ void NavigationTree::updateVolumeActions()
     m_openVolumeButton->setEnabled(selected && volume.mounted && !busy);
     m_unmountVolumeButton->setVisible(canUnmount);
     m_unmountVolumeButton->setEnabled(canUnmount && !busy);
+}
+
+bool NavigationTree::canUnmountVolume(const SelectedStorageVolume& selected)
+{
+    const QString localDevice = QDir::cleanPath(selected.volume.device.trimmed());
+    const bool operableDevice = selected.local
+                                    ? localDevice.startsWith(QStringLiteral("/dev/")) &&
+                                          localDevice != QStringLiteral("/dev")
+                                    : rfm::core::isSafeLinuxDevicePath(selected.volume.device);
+    return operableDevice && selected.volume.mounted &&
+           rfm::core::RemotePath::normalize(selected.volume.rootPath) != QStringLiteral("/") &&
+           selected.volume.kind != rfm::core::StorageKind::System;
 }
 
 void NavigationTree::updateVolumeItemPresentation(QTreeWidgetItem* item)
@@ -924,14 +1039,21 @@ QString NavigationTree::normalizedLocalPath(const QString& path)
 
 QString NavigationTree::localStorageIdentity(const rfm::core::StorageVolume& volume)
 {
+    const QString deviceNumber = volume.deviceNumber.trimmed();
+    if (!deviceNumber.isEmpty()) {
+        return QStringLiteral("number\n%1").arg(deviceNumber);
+    }
+    const QString device = QDir::cleanPath(volume.device.trimmed());
+    if (device.startsWith(QStringLiteral("/dev/")) && device != QStringLiteral("/dev")) {
+        const QString canonicalDevice = QFileInfo(device).canonicalFilePath();
+        return QStringLiteral("device\n%1")
+            .arg(canonicalDevice.isEmpty() ? device : QDir::cleanPath(canonicalDevice));
+    }
     if (volume.mounted) {
         const QString path = normalizedLocalPath(volume.rootPath);
         return path.isEmpty() ? QString{} : QStringLiteral("path\n%1").arg(path);
     }
-    const QString device = QDir::cleanPath(volume.device.trimmed());
-    return device.isEmpty() || device == QStringLiteral(".")
-               ? QString{}
-               : QStringLiteral("device\n%1").arg(device);
+    return {};
 }
 
 } // namespace rfm::app

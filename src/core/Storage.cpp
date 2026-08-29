@@ -237,7 +237,8 @@ void appendBlockDevices(const QJsonArray& entries, const QString& parentDevice,
                                jsonString(object, QStringLiteral("model")),
                                jsonUnsignedInteger(object, QStringLiteral("size")),
                                jsonBool(object, QStringLiteral("rm")),
-                               jsonBool(object, QStringLiteral("ro"))});
+                               jsonBool(object, QStringLiteral("ro")),
+                               jsonString(object, QStringLiteral("maj:min"))});
         }
         appendBlockDevices(object.value(QStringLiteral("children")).toArray(), device, devices);
     }
@@ -381,6 +382,7 @@ StorageVolume makeStorageVolume(const LinuxMountInfo& mount, const StorageDevice
     volume.fileSystemLabel = fileSystemLabel.trimmed();
     volume.deviceModel = device.deviceModel.trimmed();
     volume.mounted = true;
+    volume.deviceNumber = mount.deviceNumber;
     volume.displayName = storageDisplayName(volume.fileSystemLabel, volume.deviceModel,
                                             volume.device, volume.rootPath);
     return volume;
@@ -498,11 +500,15 @@ QList<StorageVolume> mergeLinuxBlockDevices(QList<StorageVolume> mountedVolumes,
                                             const QList<LinuxBlockDevice>& blockDevices)
 {
     QSet<QString> mountedDevices;
+    QSet<QString> mountedDeviceNumbers;
     QSet<QString> mountedRoots;
     for (const StorageVolume& volume : std::as_const(mountedVolumes)) {
         const QString device = RemotePath::normalize(volume.device.trimmed());
         if (device.startsWith(QStringLiteral("/dev/"))) {
             mountedDevices.insert(device);
+        }
+        if (!volume.deviceNumber.trimmed().isEmpty()) {
+            mountedDeviceNumbers.insert(volume.deviceNumber.trimmed());
         }
         const QString rootPath = RemotePath::normalize(volume.rootPath);
         if (volume.mounted && rootPath.startsWith(QChar{'/'})) {
@@ -531,6 +537,7 @@ QList<StorageVolume> mergeLinuxBlockDevices(QList<StorageVolume> mountedVolumes,
             !hasNavigableBlockFileSystem(blockDevice.fileSystemType) ||
             objectType == QStringLiteral("loop") || objectType == QStringLiteral("zram") ||
             parentsWithNavigableChildren.contains(device) || mountedDevices.contains(device) ||
+            mountedDeviceNumbers.contains(blockDevice.deviceNumber.trimmed()) ||
             (mountPoint.startsWith(QChar{'/'}) && mountedRoots.contains(mountPoint)) ||
             addedDevices.contains(device)) {
             continue;
@@ -573,6 +580,7 @@ QList<StorageVolume> mergeLinuxBlockDevices(QList<StorageVolume> mountedVolumes,
         volume.fileSystemLabel = blockDevice.fileSystemLabel.trimmed();
         volume.deviceModel = model;
         volume.mounted = mounted;
+        volume.deviceNumber = blockDevice.deviceNumber.trimmed();
         volume.displayName = storageDisplayName(volume.fileSystemLabel, volume.deviceModel,
                                                 volume.device, volume.rootPath);
         mountedVolumes.push_back(std::move(volume));

@@ -20,7 +20,9 @@
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QLocale>
+#include <QMimeDatabase>
 #include <QMimeData>
+#include <QMimeType>
 #include <QPainter>
 #include <QPixmap>
 #include <QScrollBar>
@@ -45,6 +47,38 @@ QColor blendedColor(const QColor& base, const QColor& accent, float accentRatio)
     return QColor::fromRgbF(base.redF() * baseRatio + accent.redF() * accentRatio,
                             base.greenF() * baseRatio + accent.greenF() * accentRatio,
                             base.blueF() * baseRatio + accent.blueF() * accentRatio, base.alphaF());
+}
+
+QString safePropertyValue(const QString& value)
+{
+    QString safe = value;
+    for (qsizetype index = 0; index < safe.size(); ++index) {
+        const QChar character = safe.at(index);
+        const QChar::Category category = character.category();
+        if (category == QChar::Other_Control || category == QChar::Separator_Line ||
+            category == QChar::Separator_Paragraph) {
+            safe[index] = QChar{' '};
+        }
+    }
+    return safe.simplified();
+}
+
+std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
+{
+    if (QFileInfo(fileName).suffix().isEmpty()) {
+        return std::nullopt;
+    }
+    const QMimeType mimeType =
+        QMimeDatabase{}.mimeTypeForFile(fileName, QMimeDatabase::MatchExtension);
+    if (!mimeType.isValid() || mimeType.isDefault() ||
+        mimeType.name() == QStringLiteral("application/octet-stream")) {
+        return std::nullopt;
+    }
+    const QString description = mimeType.comment().trimmed();
+    if (description.isEmpty() || description == mimeType.name()) {
+        return std::nullopt;
+    }
+    return description;
 }
 
 class InternalDragTable final : public QTableWidget
@@ -153,6 +187,47 @@ QByteArray FileBrowserPane::createInternalDragData() const
     }
     return rfm::core::encodeInternalTransfer(
         {m_applicationInstanceId, m_connectionIdentity, m_paneId, selectedEntries()});
+}
+
+std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() const
+{
+    if (m_contextMenuRow < 0 || m_contextMenuRow >= m_fileTable->rowCount()) {
+        return std::nullopt;
+    }
+    const QTableWidgetItem* const nameItem = m_fileTable->item(m_contextMenuRow, 0);
+    if (nameItem == nullptr || !nameItem->data(Qt::UserRole + 2).isValid()) {
+        return std::nullopt;
+    }
+    const rfm::core::RemoteEntry entry =
+        nameItem->data(Qt::UserRole + 2).value<rfm::core::RemoteEntry>();
+    const QString path = m_currentLocation.source == rfm::core::FileSource::Local
+                             ? QDir(m_currentLocation.path).filePath(entry.name)
+                             : rfm::core::RemotePath::join(m_currentLocation.path, entry.name);
+    const QString type = entry.symbolicLink
+                             ? tr("Symbolic link")
+                             : entry.directory
+                                   ? tr("Folder")
+                                   : mimeDescriptionForFileName(entry.name).value_or(tr("File"));
+    QStringList lines{tr("Name: %1").arg(safePropertyValue(entry.name)),
+                      tr("Type: %1").arg(type), tr("Path: %1").arg(safePropertyValue(path))};
+    if (!entry.directory) {
+        const QString extension = safePropertyValue(QFileInfo(entry.name).suffix());
+        if (!extension.isEmpty()) {
+            lines.push_back(tr("Extension: %1").arg(extension));
+        }
+    }
+    if (!entry.directory || entry.size > 0) {
+        const qint64 displaySize =
+            entry.size > static_cast<quint64>(std::numeric_limits<qint64>::max())
+                ? std::numeric_limits<qint64>::max()
+                : static_cast<qint64>(entry.size);
+        lines.push_back(tr("Size: %1").arg(QLocale{}.formattedDataSize(displaySize)));
+    }
+    if (entry.modifiedAt.isValid()) {
+        lines.push_back(
+            tr("Modified: %1").arg(QLocale{}.toString(entry.modifiedAt, QLocale::ShortFormat)));
+    }
+    return FileEntryProperties{safePropertyValue(entry.name), lines.join(QChar{'\n'})};
 }
 
 bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
@@ -296,6 +371,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         m_forwardHistory.clear();
     }
     m_currentLocation = normalizedLocation;
+    m_contextMenuRow = -1;
     m_fileTable->setDragEnabled(m_currentLocation.source == rfm::core::FileSource::Ssh);
     m_fileTable->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
     m_fileTable->viewport()->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
@@ -308,6 +384,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
             entry.name);
         nameItem->setData(Qt::UserRole, entry.directory);
         nameItem->setData(Qt::UserRole + 1, entry.symbolicLink);
+        nameItem->setData(Qt::UserRole + 2, QVariant::fromValue(entry));
         m_fileTable->setItem(static_cast<int>(row), 0, nameItem);
         const qint64 displaySize =
             entry.size > static_cast<quint64>(std::numeric_limits<qint64>::max())
@@ -340,6 +417,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
 void FileBrowserPane::clear()
 {
     m_currentLocation = {};
+    m_contextMenuRow = -1;
     m_pendingSelectionNames.clear();
     m_backHistory.clear();
     m_forwardHistory.clear();
@@ -534,9 +612,13 @@ void FileBrowserPane::prepareContextMenu(const QPoint& position)
 {
     if (QTableWidgetItem* const item = m_fileTable->itemAt(position);
         item != nullptr && !item->isSelected()) {
+        m_contextMenuRow = item->row();
         m_fileTable->clearSelection();
         m_fileTable->selectRow(item->row());
+    } else if (item != nullptr) {
+        m_contextMenuRow = item->row();
     } else if (item == nullptr) {
+        m_contextMenuRow = -1;
         m_fileTable->clearSelection();
     }
     emit contextMenuRequested(m_fileTable->viewport()->mapToGlobal(position));

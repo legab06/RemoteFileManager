@@ -22,6 +22,8 @@ class NavigationTreeTest final : public QObject
     void exposesOnlyTheActiveServerFileTree();
     void omitsEmptyExternalDevicesCategory();
     void deduplicatesAndNavigatesExternalDevice();
+    void exposesContextActionsForItemUnderCursor();
+    void deduplicatesLocalBlockAliasesByDeviceNumber();
     void refreshesRemoteStorageWithoutMixingMachines();
     void preservesRemoteMountpointsForOneDevice();
     void showsHumanMetadataAndRefreshesWithoutChangingNavigation();
@@ -89,6 +91,14 @@ QList<QTreeWidgetItem*> volumeItemsByDevice(QTreeWidgetItem* root, const QString
         matches.append(volumeItemsByDevice(root->child(index), device));
     }
     return matches;
+}
+
+QList<rfm::app::NavigationTree::ContextAction>
+contextActionsFor(rfm::app::NavigationTree& navigation, QTreeWidgetItem* item)
+{
+    navigation.tree()->scrollToItem(item);
+    QApplication::processEvents();
+    return navigation.contextActionsAt(navigation.tree()->visualItemRect(item).center());
 }
 
 rfm::app::RemoteMachineDescriptor remoteMachine(const QString& id,
@@ -303,6 +313,101 @@ void NavigationTreeTest::deduplicatesAndNavigatesExternalDevice()
                                       Q_ARG(int, 0)));
     QCOMPARE(activated.size(), 1);
     QCOMPARE(activated.constFirst().constFirst().toString(), QDir(temporary.path()).absolutePath());
+}
+
+void NavigationTreeTest::exposesContextActionsForItemUnderCursor()
+{
+    using ContextAction = rfm::app::NavigationTree::ContextAction;
+    QTemporaryDir mountedPath;
+    QVERIFY(mountedPath.isValid());
+    rfm::app::NavigationTree navigation;
+    navigation.resize(640, 700);
+    navigation.setProfiles({{QStringLiteral("Offline"), QStringLiteral("offline.test"),
+                             QStringLiteral("alice"), 22, QStringLiteral("offline-id")},
+                            {QStringLiteral("Online"), QStringLiteral("online.test"),
+                             QStringLiteral("bob"), 22, QStringLiteral("online-id")}});
+    navigation.setActiveServer({QStringLiteral("online-id"), QStringLiteral("Online"),
+                                QStringLiteral("online.test"), QStringLiteral("bob"), 22,
+                                QStringLiteral("online-id")},
+                               QStringLiteral("/home/bob"));
+
+    rfm::core::StorageVolume mounted;
+    mounted.displayName = QStringLiteral("Mounted");
+    mounted.rootPath = mountedPath.path();
+    mounted.device = QStringLiteral("/dev/sdz1");
+    mounted.deviceNumber = QStringLiteral("65:1");
+    mounted.kind = rfm::core::StorageKind::External;
+    mounted.mounted = true;
+    rfm::core::StorageVolume available = mounted;
+    available.displayName = QStringLiteral("Available");
+    available.rootPath.clear();
+    available.device = QStringLiteral("/dev/sdz2");
+    available.deviceNumber = QStringLiteral("65:2");
+    available.mounted = false;
+    navigation.setStorageVolumes({mounted, available});
+    navigation.tree()->expandAll();
+    navigation.show();
+    QApplication::processEvents();
+
+    QTreeWidgetItem* const machine = navigation.tree()->topLevelItem(0);
+    QTreeWidgetItem* const servers = navigation.tree()->topLevelItem(1);
+    QTreeWidgetItem* const offline = servers->child(0);
+    QTreeWidgetItem* const online = servers->child(1);
+    QTreeWidgetItem* const localFolder = machine->child(0);
+    QTreeWidgetItem* const remoteFolder = childNamed(online, QStringLiteral("Home"));
+    QTreeWidgetItem* const mountedItem = volumeItemByDevice(machine, mounted.device);
+    QTreeWidgetItem* const availableItem = volumeItemByDevice(machine, available.device);
+    QVERIFY(remoteFolder != nullptr);
+    QVERIFY(mountedItem != nullptr);
+    QVERIFY(availableItem != nullptr);
+
+    navigation.tree()->setCurrentItem(online);
+    QCOMPARE(contextActionsFor(navigation, offline),
+             QList<ContextAction>({ContextAction::Connect, ContextAction::Properties}));
+    QCOMPARE(contextActionsFor(navigation, online),
+             QList<ContextAction>({ContextAction::Disconnect, ContextAction::Properties}));
+    QCOMPARE(contextActionsFor(navigation, localFolder),
+             QList<ContextAction>({ContextAction::Open, ContextAction::Properties}));
+    QCOMPARE(contextActionsFor(navigation, remoteFolder),
+             QList<ContextAction>({ContextAction::Open, ContextAction::Properties}));
+    QCOMPARE(contextActionsFor(navigation, mountedItem),
+             QList<ContextAction>(
+                 {ContextAction::Open, ContextAction::Unmount, ContextAction::Properties}));
+    QCOMPARE(contextActionsFor(navigation, availableItem),
+             QList<ContextAction>({ContextAction::Mount, ContextAction::Properties}));
+
+    QCOMPARE(contextActionsFor(navigation, machine), QList<ContextAction>{});
+    QCOMPARE(contextActionsFor(navigation, servers), QList<ContextAction>{});
+    QCOMPARE(contextActionsFor(navigation, childNamed(machine, QStringLiteral("Volumes"))),
+             QList<ContextAction>{});
+    QCOMPARE(navigation.tree()->currentItem(), online);
+}
+
+void NavigationTreeTest::deduplicatesLocalBlockAliasesByDeviceNumber()
+{
+    QTemporaryDir mountedPath;
+    QVERIFY(mountedPath.isValid());
+    rfm::app::NavigationTree navigation;
+    rfm::core::StorageVolume mounted = storageVolume(QStringLiteral("Archive"), mountedPath.path(),
+                                                     rfm::core::StorageKind::Internal);
+    mounted.device = QStringLiteral("/dev/mapper/archive");
+    mounted.deviceNumber = QStringLiteral("253:3");
+    mounted.mounted = true;
+    rfm::core::StorageVolume alias = mounted;
+    alias.rootPath.clear();
+    alias.device = QStringLiteral("/dev/dm-3");
+    alias.mounted = false;
+    rfm::core::StorageVolume distinct = alias;
+    distinct.displayName = QStringLiteral("Distinct");
+    distinct.device = QStringLiteral("/dev/dm-4");
+    distinct.deviceNumber = QStringLiteral("253:4");
+
+    navigation.setStorageVolumes({mounted, alias, distinct});
+
+    QTreeWidgetItem* const machine = navigation.tree()->topLevelItem(0);
+    QCOMPARE(volumeItemsByDevice(machine, mounted.device).size(), 1);
+    QCOMPARE(volumeItemsByDevice(machine, alias.device).size(), 0);
+    QCOMPARE(volumeItemsByDevice(machine, distinct.device).size(), 1);
 }
 
 void NavigationTreeTest::refreshesRemoteStorageWithoutMixingMachines()
