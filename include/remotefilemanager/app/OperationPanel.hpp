@@ -23,6 +23,7 @@ class OperationPanel final : public QWidget
     [[nodiscard]] static QString formatSpeed(quint64 bytesPerSecond);
     [[nodiscard]] bool removeTerminalOperation(quint64 id);
     void clearTerminalOperations();
+    void restoreOperations(const QList<rfm::core::OperationProgress>& operations);
 
   public slots:
     void updateOperation(rfm::core::OperationProgress progress);
@@ -39,6 +40,7 @@ class OperationPanel final : public QWidget
     [[nodiscard]] QList<quint64> orderedOperationIds() const;
     [[nodiscard]] QList<quint64> currentOperationIds() const;
     [[nodiscard]] quint64 selectedOperationId() const;
+    bool storeOperation(rfm::core::OperationProgress progress);
     void rebuildRows(const QList<quint64>& operationIds);
     void rebuildRowMappings();
     void updateRow(int row, const rfm::core::OperationProgress& progress);
