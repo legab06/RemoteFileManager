@@ -9,4 +9,8 @@ namespace rfm::core::detail
 executeLocalCopyMove(const LocalFileOperationRequest& request, LocalFileOperationBackend* backend,
                      const std::function<bool()>& cancellationRequested);
 
+[[nodiscard]] bool destinationMayReenterSourceOnLinux(const QString& source,
+                                                       const QString& destination,
+                                                       const QByteArray& mountInfo);
+
 } // namespace rfm::core::detail

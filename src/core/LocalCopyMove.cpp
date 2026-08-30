@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QObject>
 #include <QStorageInfo>
+#include <QStringList>
 #include <QUuid>
 
 #include <algorithm>
@@ -131,6 +132,58 @@ bool physicalPathIsAtOrBelow(const QString& path, const QString& rootPath)
     return cleanPath.startsWith(cleanRoot, sensitivity);
 }
 
+QString unescapeMountInfoPath(QString value)
+{
+    value.replace(QStringLiteral("\\040"), QStringLiteral(" "));
+    value.replace(QStringLiteral("\\011"), QStringLiteral("\t"));
+    value.replace(QStringLiteral("\\012"), QStringLiteral("\n"));
+    value.replace(QStringLiteral("\\134"), QStringLiteral("\\"));
+    return value;
+}
+
+struct LinuxMountPoint {
+    QString device;
+    QString root;
+    QString point;
+};
+
+QList<LinuxMountPoint> parseLinuxMountInfo(const QByteArray& mountInfo)
+{
+    QList<LinuxMountPoint> mounts;
+    for (const QByteArray& line : mountInfo.split('\n')) {
+        const QList<QByteArray> fields = line.split(' ');
+        if (fields.size() < 5) {
+            continue;
+        }
+        mounts.push_back({QString::fromLatin1(fields.at(2)),
+                          unescapeMountInfoPath(QString::fromLocal8Bit(fields.at(3))),
+                          unescapeMountInfoPath(QString::fromLocal8Bit(fields.at(4)))});
+    }
+    return mounts;
+}
+
+const LinuxMountPoint* mountForPath(const QList<LinuxMountPoint>& mounts, const QString& path)
+{
+    const LinuxMountPoint* match = nullptr;
+    for (const LinuxMountPoint& mount : mounts) {
+        if (physicalPathIsAtOrBelow(path, mount.point) &&
+            (match == nullptr || mount.point.size() > match->point.size())) {
+            match = &mount;
+        }
+    }
+    return match;
+}
+
+QString mountRelativePath(const LinuxMountPoint& mount, const QString& path)
+{
+    QString suffix = QDir::cleanPath(path).mid(mount.point.size());
+    if (suffix.startsWith(QLatin1Char('/'))) {
+        suffix.removeFirst();
+    }
+    return suffix.isEmpty() ? QDir::cleanPath(mount.root)
+                            : QDir::cleanPath(mount.root + QLatin1Char('/') + suffix);
+}
+
 QString physicalEntryLocation(const QString& path)
 {
     const QFileInfo info(path);
@@ -164,6 +217,16 @@ bool validatePhysicalDestination(const QString& source, const QString& destinati
         error = translated("A folder cannot be copied or moved inside itself.");
         return false;
     }
+#ifdef Q_OS_LINUX
+    QFile mountInfoFile(QStringLiteral("/proc/self/mountinfo"));
+    const bool mountInfoAvailable = mountInfoFile.open(QIODevice::ReadOnly);
+    const QByteArray mountInfo = mountInfoAvailable ? mountInfoFile.readAll() : QByteArray{};
+    if (destinationMayReenterSourceOnLinux(canonicalSource, canonicalDestinationDirectory,
+                                           mountInfo)) {
+        error = translated("The destination may resolve inside the source folder.");
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -929,6 +992,29 @@ LocalFileOperationItemResult itemResult(const EntryAttempt& attempt)
 }
 
 } // namespace
+
+bool destinationMayReenterSourceOnLinux(const QString& source, const QString& destination,
+                                        const QByteArray& mountInfo)
+{
+#ifdef Q_OS_LINUX
+    const QList<LinuxMountPoint> mounts = parseLinuxMountInfo(mountInfo);
+    const LinuxMountPoint* const sourceMount = mountForPath(mounts, source);
+    const LinuxMountPoint* const destinationMount = mountForPath(mounts, destination);
+    if (sourceMount == nullptr || destinationMount == nullptr) {
+        return true;
+    }
+    if (sourceMount->device != destinationMount->device) {
+        return false;
+    }
+    return physicalPathIsAtOrBelow(mountRelativePath(*destinationMount, destination),
+                                   mountRelativePath(*sourceMount, source));
+#else
+    Q_UNUSED(source)
+    Q_UNUSED(destination)
+    Q_UNUSED(mountInfo)
+    return false;
+#endif
+}
 
 LocalFileOperationResult executeLocalCopyMove(const LocalFileOperationRequest& request,
                                               LocalFileOperationBackend* backend,

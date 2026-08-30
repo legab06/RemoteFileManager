@@ -48,6 +48,7 @@ class InternalClipboard final
 
     [[nodiscard]] bool hasContent() const;
     [[nodiscard]] bool isCut() const;
+    [[nodiscard]] bool matchesCutGeneration(quint64 generation) const;
     [[nodiscard]] quint64 generation() const;
     [[nodiscard]] const std::optional<ClipboardEntry>& content() const;
 

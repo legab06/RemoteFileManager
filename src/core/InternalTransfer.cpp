@@ -87,6 +87,11 @@ bool InternalClipboard::isCut() const
     return m_content.has_value() && m_content->action == InternalTransferAction::Move;
 }
 
+bool InternalClipboard::matchesCutGeneration(quint64 generation) const
+{
+    return isCut() && m_generation == generation;
+}
+
 quint64 InternalClipboard::generation() const { return m_generation; }
 
 const std::optional<ClipboardEntry>& InternalClipboard::content() const { return m_content; }

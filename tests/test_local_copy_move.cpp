@@ -1,5 +1,7 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 
+#include "../src/core/LocalCopyMove.hpp"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -158,6 +160,7 @@ class LocalCopyMoveTest final : public QObject
     void refusesCopyIntoSourceBeforeCreatingStaging();
     void refusesMoveIntoSourceBeforeCreatingStaging();
     void refusesDestinationAliasedInsideSource();
+    void refusesBindMountAliasInsideSource();
     void cancellationBeforeOverwritePublicationRestoresEverything();
     void cancellationAfterPublicationCompletesMove();
     void preservesRawSymbolicLinkTargets();
@@ -580,6 +583,21 @@ void LocalCopyMoveTest::refusesMoveIntoSourceBeforeCreatingStaging()
     QVERIFY(result.items.constFirst().error.contains(QStringLiteral("inside itself")));
     QVERIFY(temporaryEntries(root.filePath(QStringLiteral("foo/bar"))).isEmpty());
     QVERIFY(QFileInfo(source).isDir());
+}
+
+void LocalCopyMoveTest::refusesBindMountAliasInsideSource()
+{
+#ifdef Q_OS_LINUX
+    const QByteArray mountInfo(
+        "36 25 0:32 / / rw,relatime - ext4 /dev/sda rw\n"
+        "44 36 0:32 /foo/bar /mnt/alias rw,relatime - ext4 /dev/sda rw\n");
+    QVERIFY(rfm::core::detail::destinationMayReenterSourceOnLinux(
+        QStringLiteral("/foo"), QStringLiteral("/mnt/alias"), mountInfo));
+    QVERIFY(!rfm::core::detail::destinationMayReenterSourceOnLinux(
+        QStringLiteral("/foo"), QStringLiteral("/srv/destination"), mountInfo));
+#else
+    QSKIP("The bind-mount guard is Linux-specific.");
+#endif
 }
 
 void LocalCopyMoveTest::refusesDestinationAliasedInsideSource()

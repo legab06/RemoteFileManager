@@ -428,6 +428,7 @@ class MainWindowTest final : public QObject
     void formatsTransferSizesAndSpeeds();
     void displaysSpeedOnlyForRunningTransfers();
     void displaysQueuedOperationUntilWorkerStarts();
+    void displaysLocalSuccessWarning();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void refreshesAfterCompletedUpload();
     void appliesOnlyExpectedDirectoryResult();
@@ -459,6 +460,7 @@ class MainWindowTest final : public QObject
     void mutatesLocalEntriesAndRefreshesMatchingPanes();
     void preservesCutAfterIndependentLocalMove();
     void consumesCutAfterSuccessfulLocalPaste();
+    void allowsCopyFromReadOnlyLocalDirectory();
     void aggregatesLocalCollisionSkip();
     void aggregatesLocalCollisionReplace();
     void cancelsLocalCollisionAfterPartialSuccess();
@@ -1123,6 +1125,31 @@ void MainWindowTest::consumesCutAfterSuccessfulLocalPaste()
     window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->trigger();
     QTRY_VERIFY(QFileInfo(QDir(destination).filePath(QStringLiteral("A"))).exists());
     QTRY_VERIFY(!QFileInfo(QDir(source).filePath(QStringLiteral("A"))).exists());
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QTRY_COMPARE(table->item(0, 3)->text(), QStringLiteral("Completed"));
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
+}
+
+void MainWindowTest::allowsCopyFromReadOnlyLocalDirectory()
+{
+    const QString source = QStringLiteral("/sys");
+    if (!QFileInfo(source).isDir() || QFileInfo(source).isWritable()) {
+        QSKIP("No known read-only local directory is available.");
+    }
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, temporary.path(), {{QStringLiteral("kernel"), 0, {}, true, false}},
+                   {});
+    auto* const primary = window.findChild<rfm::app::PaneWorkspace*>()->primaryPane();
+    primary->fileTable()->selectRow(0);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("renameAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("removeAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("createDirectoryAction"))->isEnabled());
 }
 
 void MainWindowTest::aggregatesLocalCollisionSkip()
@@ -1195,6 +1222,8 @@ void MainWindowTest::aggregatesLocalCollisionReplace()
     QTRY_COMPARE(table->item(0, 3)->text(), QStringLiteral("Completed"));
     QVERIFY(table->item(0, 4)->text().contains(QStringLiteral("2 / 2")) ||
             table->cellWidget(0, 4) != nullptr);
+    QVERIFY(table->item(0, 1)->toolTip().contains(QDir(source).filePath(QStringLiteral("a"))));
+    QVERIFY(table->item(0, 1)->toolTip().contains(QDir(source).filePath(QStringLiteral("b"))));
 }
 
 void MainWindowTest::cancelsLocalCollisionAfterPartialSuccess()
@@ -2566,6 +2595,22 @@ void MainWindowTest::displaysQueuedOperationUntilWorkerStarts()
     operationB.state = rfm::core::OperationState::Running;
     panel.updateOperation(operationB);
     QCOMPARE(table->item(rowForId(table, 602), 3)->text(), QStringLiteral("Running"));
+}
+
+void MainWindowTest::displaysLocalSuccessWarning()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+    rfm::core::OperationProgress operation;
+    operation.id = 603;
+    operation.kind = rfm::core::OperationKind::LocalCopy;
+    operation.state = rfm::core::OperationState::Completed;
+    operation.error = QStringLiteral("The previous destination remains in a temporary backup.");
+    panel.updateOperation(operation);
+    const int row = rowForId(table, operation.id);
+    QCOMPARE(table->item(row, 3)->text(), QStringLiteral("Completed"));
+    QCOMPARE(table->item(row, 7)->text(), operation.error);
 }
 
 void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
