@@ -205,6 +205,53 @@ int rowNamed(QTableWidget* table, const QString& name)
     return -1;
 }
 
+void chooseCollisionButton(const QString& label)
+{
+    auto* const timer = new QTimer(qApp);
+    timer->setInterval(1);
+    QObject::connect(timer, &QTimer::timeout, timer, [timer, label] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        if (messageBox == nullptr) {
+            return;
+        }
+        timer->stop();
+        timer->deleteLater();
+        for (QAbstractButton* const button : messageBox->buttons()) {
+            if (button->text() == label) {
+                button->click();
+                return;
+            }
+        }
+        QFAIL("Requested collision button was not found");
+    });
+    timer->start();
+}
+
+void showLocalSplit(rfm::app::MainWindow& window, const QString& source, const QString& destination,
+                    const QList<rfm::core::RemoteEntry>& sourceEntries,
+                    const QList<rfm::core::RemoteEntry>& destinationEntries)
+{
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const primary = workspace->primaryPane();
+    workspace->setSplit(true);
+    auto* const secondary = workspace->otherVisiblePane();
+    QVERIFY(secondary != nullptr);
+    primary->showDirectory({rfm::core::FileSource::Local, rfm::core::LocalMachineId, source},
+                            source, sourceEntries, rfm::app::PaneNavigation::Initial);
+    secondary->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, destination}, destination,
+        destinationEntries, rfm::app::PaneNavigation::Initial);
+    primary->setInteractionEnabled(true);
+    secondary->setInteractionEnabled(true);
+    auto* const stack = window.findChild<QStackedWidget*>(QStringLiteral("centralStack"));
+    QVERIFY(stack != nullptr);
+    stack->setCurrentWidget(workspace);
+    QVERIFY(QMetaObject::invokeMethod(primary, "activated", Qt::DirectConnection));
+    window.show();
+    QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
+}
+
 QTreeWidgetItem* serverProfileItem(QTreeWidget* tree, int index)
 {
     if (tree == nullptr || tree->topLevelItemCount() < 2) {
@@ -380,6 +427,8 @@ class MainWindowTest final : public QObject
     void displaysTerminalTransferStatesAndErrors();
     void formatsTransferSizesAndSpeeds();
     void displaysSpeedOnlyForRunningTransfers();
+    void displaysQueuedOperationUntilWorkerStarts();
+    void displaysLocalSuccessWarning();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void refreshesAfterCompletedUpload();
     void appliesOnlyExpectedDirectoryResult();
@@ -409,6 +458,12 @@ class MainWindowTest final : public QObject
     void keyboardActionsExposeShortcutsAndTargetTheActivePane();
     void opensLocalDirectoryWithoutSshAndNavigatesAsynchronously();
     void mutatesLocalEntriesAndRefreshesMatchingPanes();
+    void preservesCutAfterIndependentLocalMove();
+    void consumesCutAfterSuccessfulLocalPaste();
+    void allowsCopyFromReadOnlyLocalDirectory();
+    void aggregatesLocalCollisionSkip();
+    void aggregatesLocalCollisionReplace();
+    void cancelsLocalCollisionAfterPartialSuccess();
     void keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect();
     void mainRefreshWorksWithoutConnectionAndUpdatesOpenTree();
     void mainRefreshRequestsRemoteDiscoveryAndCoalescesRequests();
@@ -917,16 +972,13 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
-
     workspace->activePane()->fileTable()->selectRow(0);
     QVERIFY(renameAction->isEnabled());
     QVERIFY(removeAction->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
 }
 
 void MainWindowTest::mutatesLocalEntriesAndRefreshesMatchingPanes()
@@ -1014,6 +1066,196 @@ void MainWindowTest::mutatesLocalEntriesAndRefreshesMatchingPanes()
     QTRY_VERIFY(childNamed(fixture, QStringLiteral("renamed")) == nullptr);
     QVERIFY(fixture->isExpanded());
     QCOMPARE(navigation->tree()->currentItem(), fixture);
+}
+
+void MainWindowTest::preservesCutAfterIndependentLocalMove()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString source = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destination = QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(destination));
+    for (const QString& name : {QStringLiteral("A"), QStringLiteral("B")}) {
+        QFile file(QDir(source).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write(name.toUtf8()) == name.size());
+        file.close();
+    }
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, destination, {{QStringLiteral("A"), 1, {}, false, false},
+                                                  {QStringLiteral("B"), 1, {}, false, false}}, {});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const primary = workspace->primaryPane();
+    primary->fileTable()->selectRow(0);
+    QCOMPARE(primary->selectedEntries().size(), 1);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+    window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->trigger();
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("cancelCutAction"))->isEnabled());
+    primary->fileTable()->selectRow(1);
+    window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"))->trigger();
+    QTRY_VERIFY(QFileInfo(QDir(destination).filePath(QStringLiteral("B"))).exists());
+    QTRY_VERIFY(window.findChild<QAction*>(QStringLiteral("cancelCutAction"))->isEnabled());
+}
+
+void MainWindowTest::consumesCutAfterSuccessfulLocalPaste()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString source = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destination = QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(destination));
+    QFile file(QDir(source).filePath(QStringLiteral("A")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QVERIFY(file.write("A") == 1);
+    file.close();
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, destination, {{QStringLiteral("A"), 1, {}, false, false}}, {});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const primary = workspace->primaryPane();
+    auto* const secondary = workspace->otherVisiblePane();
+    primary->fileTable()->selectRow(0);
+    QCOMPARE(primary->selectedEntries().size(), 1);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+    window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->trigger();
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("cancelCutAction"))->isEnabled());
+    QVERIFY(QMetaObject::invokeMethod(secondary, "activated", Qt::DirectConnection));
+    QTRY_VERIFY(window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
+    window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->trigger();
+    QTRY_VERIFY(QFileInfo(QDir(destination).filePath(QStringLiteral("A"))).exists());
+    QTRY_VERIFY(!QFileInfo(QDir(source).filePath(QStringLiteral("A"))).exists());
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QTRY_COMPARE(table->item(0, 3)->text(), QStringLiteral("Completed"));
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardPasteAction"))->isEnabled());
+}
+
+void MainWindowTest::allowsCopyFromReadOnlyLocalDirectory()
+{
+    const QString source = QStringLiteral("/sys");
+    if (!QFileInfo(source).isDir() || QFileInfo(source).isWritable()) {
+        QSKIP("No known read-only local directory is available.");
+    }
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, temporary.path(), {{QStringLiteral("kernel"), 0, {}, true, false}},
+                   {});
+    auto* const primary = window.findChild<rfm::app::PaneWorkspace*>()->primaryPane();
+    primary->fileTable()->selectRow(0);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("renameAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("removeAction"))->isEnabled());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("createDirectoryAction"))->isEnabled());
+}
+
+void MainWindowTest::aggregatesLocalCollisionSkip()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString source = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destination = QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(destination));
+    for (const QString& name : {QStringLiteral("a"), QStringLiteral("b")}) {
+        QFile file(QDir(source).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write(name.toUtf8()) == name.size());
+    }
+    QFile existing(QDir(destination).filePath(QStringLiteral("b")));
+    QVERIFY(existing.open(QIODevice::WriteOnly));
+    QVERIFY(existing.write("old") == 3);
+    existing.close();
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, destination,
+                   {{QStringLiteral("a"), 1, {}, false, false},
+                    {QStringLiteral("b"), 1, {}, false, false}},
+                   {{QStringLiteral("b"), 3, {}, false, false}});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    auto* const primary = workspace->primaryPane();
+    primary->fileTable()->selectAll();
+    QSignalSpy refreshes(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    chooseCollisionButton(QStringLiteral("Skip"));
+    window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->trigger();
+    QTRY_VERIFY(QFileInfo(QDir(destination).filePath(QStringLiteral("a"))).exists());
+    const auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    const int row = rowForId(const_cast<QTableWidget*>(table), topVisibleOperationId(const_cast<QTableWidget*>(table)));
+    QTRY_COMPARE(table->item(row, 3)->text(), QStringLiteral("Completed"));
+    QVERIFY(table->item(row, 4)->text().contains(QStringLiteral("1 / 2")) ||
+            table->cellWidget(row, 4) != nullptr);
+    QTRY_VERIFY(std::ranges::any_of(refreshes, [&](const auto& args) {
+        return args.at(1).toString() == destination;
+    }));
+}
+
+void MainWindowTest::aggregatesLocalCollisionReplace()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString source = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destination = QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(destination));
+    for (const QString& name : {QStringLiteral("a"), QStringLiteral("b")}) {
+        QFile file(QDir(source).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write(name.toUtf8()) == name.size());
+    }
+    QFile existing(QDir(destination).filePath(QStringLiteral("b")));
+    QVERIFY(existing.open(QIODevice::WriteOnly));
+    QVERIFY(existing.write("old") == 3);
+    existing.close();
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, destination,
+                   {{QStringLiteral("a"), 1, {}, false, false},
+                    {QStringLiteral("b"), 1, {}, false, false}},
+                   {{QStringLiteral("b"), 3, {}, false, false}});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    workspace->primaryPane()->fileTable()->selectAll();
+    chooseCollisionButton(QStringLiteral("Replace"));
+    window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->trigger();
+    QTRY_COMPARE(QFileInfo(QDir(destination).filePath(QStringLiteral("b"))).size(), qint64{1});
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QTRY_COMPARE(table->item(0, 3)->text(), QStringLiteral("Completed"));
+    QVERIFY(table->item(0, 4)->text().contains(QStringLiteral("2 / 2")) ||
+            table->cellWidget(0, 4) != nullptr);
+    QVERIFY(table->item(0, 1)->toolTip().contains(QDir(source).filePath(QStringLiteral("a"))));
+    QVERIFY(table->item(0, 1)->toolTip().contains(QDir(source).filePath(QStringLiteral("b"))));
+}
+
+void MainWindowTest::cancelsLocalCollisionAfterPartialSuccess()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString source = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destination = QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(destination));
+    for (const QString& name : {QStringLiteral("a"), QStringLiteral("b")}) {
+        QFile file(QDir(source).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write(name.toUtf8()) == name.size());
+    }
+    QFile existing(QDir(destination).filePath(QStringLiteral("b")));
+    QVERIFY(existing.open(QIODevice::WriteOnly));
+    QVERIFY(existing.write("old") == 3);
+    existing.close();
+    rfm::app::MainWindow window;
+    showLocalSplit(window, source, destination,
+                   {{QStringLiteral("a"), 1, {}, false, false},
+                    {QStringLiteral("b"), 1, {}, false, false}},
+                   {{QStringLiteral("b"), 3, {}, false, false}});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    workspace->primaryPane()->fileTable()->selectAll();
+    chooseCollisionButton(QStringLiteral("Cancel"));
+    window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->trigger();
+    QTRY_VERIFY(QFileInfo(QDir(destination).filePath(QStringLiteral("a"))).exists());
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QTRY_COMPARE(table->item(0, 3)->text(), QStringLiteral("Cancelled"));
+    QCOMPARE(QFileInfo(QDir(destination).filePath(QStringLiteral("b"))).size(), qint64{3});
 }
 
 void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect()
@@ -2331,6 +2573,46 @@ void MainWindowTest::displaysSpeedOnlyForRunningTransfers()
     updateAndVerifySpeed(505, rfm::core::TransferState::Completed, QStringLiteral("—"));
 }
 
+void MainWindowTest::displaysQueuedOperationUntilWorkerStarts()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    rfm::core::OperationProgress operationA;
+    operationA.id = 601;
+    operationA.kind = rfm::core::OperationKind::LocalCopy;
+    operationA.state = rfm::core::OperationState::Running;
+    operationA.totalItems = 1;
+    rfm::core::OperationProgress operationB = operationA;
+    operationB.id = 602;
+    operationB.kind = rfm::core::OperationKind::LocalMove;
+    operationB.state = rfm::core::OperationState::Queued;
+    panel.updateOperation(operationA);
+    panel.updateOperation(operationB);
+    QCOMPARE(table->item(rowForId(table, 602), 3)->text(), QStringLiteral("Queued"));
+
+    operationB.state = rfm::core::OperationState::Running;
+    panel.updateOperation(operationB);
+    QCOMPARE(table->item(rowForId(table, 602), 3)->text(), QStringLiteral("Running"));
+}
+
+void MainWindowTest::displaysLocalSuccessWarning()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+    rfm::core::OperationProgress operation;
+    operation.id = 603;
+    operation.kind = rfm::core::OperationKind::LocalCopy;
+    operation.state = rfm::core::OperationState::Completed;
+    operation.error = QStringLiteral("The previous destination remains in a temporary backup.");
+    panel.updateOperation(operation);
+    const int row = rowForId(table, operation.id);
+    QCOMPARE(table->item(row, 3)->text(), QStringLiteral("Completed"));
+    QCOMPARE(table->item(row, 7)->text(), operation.error);
+}
+
 void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
 {
     rfm::app::MainWindow window;
@@ -3086,12 +3368,12 @@ void MainWindowTest::remoteExecutorFailureShowsOnlyConnectionDialog()
                                          QStringLiteral("/destination")});
 
     coordinator->handleRemoteExecutorFailure(QStringLiteral("connection lost"));
-    auto failedProgress = rfm::core::operationProgress(
-        {901,
-         rfm::core::RemoteOperationKind::Copy,
-         {{QStringLiteral("/source/a.txt"), false}},
-         QStringLiteral("/destination")},
-        rfm::core::OperationState::Failed, QStringLiteral("connection lost"));
+    auto failedProgress = rfm::core::operationProgress({901,
+                                                        rfm::core::RemoteOperationKind::Copy,
+                                                        {{QStringLiteral("/source/a.txt"), false}},
+                                                        QStringLiteral("/destination")},
+                                                       rfm::core::OperationState::Failed,
+                                                       QStringLiteral("connection lost"));
     coordinator->handleRemoteExecutorProgress(failedProgress);
     coordinator->handleRemoteExecutorResult(
         {901,
@@ -3191,8 +3473,7 @@ void MainWindowTest::fileContextMenuOffersProperties()
                           QDateTime::fromSecsSinceEpoch(1'700'000'000), directory, false}});
     const QPoint position =
         pane->fileTable()->visualItemRect(pane->fileTable()->item(0, 0)).center();
-    QAction* const properties =
-        window.findChild<QAction*>(QStringLiteral("filePropertiesAction"));
+    QAction* const properties = window.findChild<QAction*>(QStringLiteral("filePropertiesAction"));
     QVERIFY(properties != nullptr);
 
     QTimer::singleShot(0, [&window, properties] {
@@ -3200,11 +3481,11 @@ void MainWindowTest::fileContextMenuOffersProperties()
         QVERIFY(menu != nullptr);
         const QList<QAction*> actions = menu->actions();
         QVERIFY(actions.contains(properties));
-        QVERIFY(actions.contains(
-            window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))));
+        QVERIFY(
+            actions.contains(window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))));
         QVERIFY(actions.contains(window.findChild<QAction*>(QStringLiteral("removeAction"))));
-        QVERIFY(actions.contains(
-            window.findChild<QAction*>(QStringLiteral("createDirectoryAction"))));
+        QVERIFY(
+            actions.contains(window.findChild<QAction*>(QStringLiteral("createDirectoryAction"))));
         QCOMPARE(actions.constLast(), properties);
         QVERIFY(actions.at(actions.size() - 2)->isSeparator());
         menu->close();

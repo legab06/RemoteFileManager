@@ -1,5 +1,6 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 
+#include "LocalCopyMove.hpp"
 #include "LocalStorageTopology.hpp"
 
 #include <QCryptographicHash>
@@ -7,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QMutexLocker>
 #include <QProcess>
 #include <QSet>
 #include <QStandardPaths>
@@ -443,16 +445,45 @@ QString removeLocalEntry(const QString& path)
 LocalFileOperationItemResult invalidRequestResult(const QString& source, const QString& destination,
                                                   const QString& error)
 {
-    return {source, destination, false, error};
+    return {source, destination, false, error, LocalFileOperationOutcome::Failed};
+}
+
+LocalFileOperationItemResult operationItemResult(const QString& source, const QString& destination,
+                                                 bool success, const QString& error)
+{
+    return {source, destination, success, error,
+            success ? LocalFileOperationOutcome::Succeeded : LocalFileOperationOutcome::Failed};
 }
 
 } // namespace
 
 bool LocalFileOperationResult::allSucceeded() const
 {
-    return !items.isEmpty() &&
+    return !cancelled && !items.isEmpty() &&
            std::ranges::all_of(
                items, [](const LocalFileOperationItemResult& item) { return item.success; });
+}
+
+qsizetype LocalFileOperationResult::succeededCount() const
+{
+    return std::ranges::count_if(items, [](const LocalFileOperationItemResult& item) {
+        return item.outcome == LocalFileOperationOutcome::Succeeded;
+    });
+}
+
+qsizetype LocalFileOperationResult::failedCount() const
+{
+    return std::ranges::count_if(items, [](const LocalFileOperationItemResult& item) {
+        return item.outcome == LocalFileOperationOutcome::Failed ||
+               item.outcome == LocalFileOperationOutcome::Collision;
+    });
+}
+
+qsizetype LocalFileOperationResult::skippedCount() const
+{
+    return std::ranges::count_if(items, [](const LocalFileOperationItemResult& item) {
+        return item.outcome == LocalFileOperationOutcome::Skipped;
+    });
 }
 
 bool LocalFileSystem::isValidName(const QString& name)
@@ -521,8 +552,15 @@ LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
     return {directory.absolutePath(), std::move(entries), {}};
 }
 
-LocalFileOperationResult LocalFileSystem::executeOperation(const LocalFileOperationRequest& request)
+LocalFileOperationResult
+LocalFileSystem::executeOperation(const LocalFileOperationRequest& request,
+                                  LocalFileOperationBackend* backend,
+                                  const std::function<bool()>& cancellationRequested)
 {
+    if (request.kind == LocalFileOperationKind::Copy ||
+        request.kind == LocalFileOperationKind::Move) {
+        return detail::executeLocalCopyMove(request, backend, cancellationRequested);
+    }
     LocalFileOperationResult result{request.id, request.kind, {}};
     const QString parentPath = validatedParentPath(request.parentPath);
     if (parentPath.isEmpty()) {
@@ -549,11 +587,9 @@ LocalFileOperationResult LocalFileSystem::executeOperation(const LocalFileOperat
             return result;
         }
         const bool created = QDir(parentPath).mkdir(request.newName);
-        result.items.push_back(
-            {{},
-             destination,
-             created,
-             created ? QString{} : QObject::tr("The local folder could not be created.")});
+        result.items.push_back(operationItemResult(
+            {}, destination, created,
+            created ? QString{} : QObject::tr("The local folder could not be created.")));
         return result;
     }
 
@@ -584,9 +620,9 @@ LocalFileOperationResult LocalFileSystem::executeOperation(const LocalFileOperat
             return result;
         }
         const bool renamed = QDir(parentPath).rename(QFileInfo(source).fileName(), request.newName);
-        result.items.push_back(
-            {source, destination, renamed,
-             renamed ? QString{} : QObject::tr("The local entry could not be renamed.")});
+        result.items.push_back(operationItemResult(
+            source, destination, renamed,
+            renamed ? QString{} : QObject::tr("The local entry could not be renamed.")));
         return result;
     }
 
@@ -605,7 +641,7 @@ LocalFileOperationResult LocalFileSystem::executeOperation(const LocalFileOperat
             continue;
         }
         const QString error = removeLocalEntry(source);
-        result.items.push_back({source, {}, error.isEmpty(), error});
+        result.items.push_back(operationItemResult(source, {}, error.isEmpty(), error));
     }
     return result;
 }
@@ -730,7 +766,23 @@ void LocalFileSystemWorker::probeVolumes(quint64 requestId)
 
 void LocalFileOperationWorker::execute(LocalFileOperationRequest request)
 {
-    emit finished(LocalFileSystem::executeOperation(request));
+    const quint64 operationId = request.id;
+    emit started(operationId);
+    emit finished(LocalFileSystem::executeOperation(
+        request, nullptr, [this, operationId] {
+            const QMutexLocker lock(&m_cancellationMutex);
+            return m_cancelledOperationIds.contains(operationId);
+        }));
+    const QMutexLocker lock(&m_cancellationMutex);
+    m_cancelledOperationIds.remove(operationId);
+}
+
+void LocalFileOperationWorker::requestCancellation(quint64 operationId) noexcept
+{
+    if (operationId != 0) {
+        const QMutexLocker lock(&m_cancellationMutex);
+        m_cancelledOperationIds.insert(operationId);
+    }
 }
 
 } // namespace rfm::core

@@ -2,6 +2,8 @@ add_library(
     rfm_core STATIC
     core/ConnectionProfile.cpp
     core/InternalTransfer.cpp
+    core/LocalCopyMove.cpp
+    core/LocalCopyMove.hpp
     core/LocalFileSystem.cpp
     core/LocalStorageTopology.hpp
     core/LocalDownloadPath.cpp

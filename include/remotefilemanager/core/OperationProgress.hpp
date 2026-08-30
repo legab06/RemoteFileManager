@@ -12,7 +12,7 @@
 namespace rfm::core
 {
 
-enum class OperationKind { Upload, Download, RemoteCopy, RemoteMove };
+enum class OperationKind { Upload, Download, RemoteCopy, RemoteMove, LocalCopy, LocalMove };
 
 enum class OperationState {
     Queued,

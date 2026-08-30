@@ -732,9 +732,12 @@ void FileBrowserPane::updateCutAppearance()
     const QColor cutColor = palette().color(QPalette::Disabled, QPalette::Text);
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
         const QTableWidgetItem* const name = m_fileTable->item(row, 0);
-        const QString path =
-            name == nullptr ? QString{}
-                            : rfm::core::RemotePath::join(m_currentLocation.path, name->text());
+        const QString path = name == nullptr
+                                 ? QString{}
+                                 : (m_currentLocation.source == rfm::core::FileSource::Local
+                                        ? QDir(m_currentLocation.path).filePath(name->text())
+                                        : rfm::core::RemotePath::join(m_currentLocation.path,
+                                                                       name->text()));
         const bool cut = m_cutPaths.contains(rfm::core::RemotePath::normalize(path));
         for (int column = 0; column < m_fileTable->columnCount(); ++column) {
             if (QTableWidgetItem* const item = m_fileTable->item(row, column)) {

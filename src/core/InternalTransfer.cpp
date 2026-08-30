@@ -50,9 +50,10 @@ bool RemoteConnectionIdentity::isValid() const
 
 bool InternalTransferPayload::isValid() const
 {
-    if (applicationInstanceId.isEmpty() || applicationInstanceId.size() > 128 ||
-        !connection.isValid() || sourcePaneId == 0 || sources.isEmpty() ||
-        sources.size() > MaximumSources) {
+    const bool localPayload = applicationInstanceId.isEmpty() && !connection.isValid();
+    if ((!localPayload && (applicationInstanceId.isEmpty() || applicationInstanceId.size() > 128 ||
+                           !connection.isValid())) ||
+        sourcePaneId == 0 || sources.isEmpty() || sources.size() > MaximumSources) {
         return false;
     }
     for (const RemoteSelection& source : sources) {
@@ -84,6 +85,11 @@ bool InternalClipboard::hasContent() const { return m_content.has_value(); }
 bool InternalClipboard::isCut() const
 {
     return m_content.has_value() && m_content->action == InternalTransferAction::Move;
+}
+
+bool InternalClipboard::matchesCutGeneration(quint64 generation) const
+{
+    return isCut() && m_generation == generation;
 }
 
 quint64 InternalClipboard::generation() const { return m_generation; }

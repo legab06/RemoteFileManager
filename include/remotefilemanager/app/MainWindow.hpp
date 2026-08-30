@@ -21,6 +21,7 @@
 #include <QStringList>
 
 #include <memory>
+#include <optional>
 
 class QAction;
 class QLabel;
@@ -169,6 +170,12 @@ class MainWindow final : public QMainWindow
     void updatePaneTransferContexts();
     void updateCutAppearance();
     void clearInternalClipboard();
+    bool startLocalOperation(
+        rfm::core::LocalFileOperationKind kind, quint64 sourcePaneId, quint64 destinationPaneId,
+        const QString& sourceDirectory, const QString& destinationDirectory,
+        const QList<rfm::core::RemoteSelection>& sources,
+        rfm::core::LocalCollisionPolicy collisionPolicy = rfm::core::LocalCollisionPolicy::Fail,
+        std::optional<quint64> clipboardGeneration = std::nullopt);
     [[nodiscard]] rfm::core::RemoteConnectionIdentity currentConnectionIdentity() const;
     [[nodiscard]] rfm::core::InternalTransferPayload
     transferPayload(quint64 paneId, const QList<rfm::core::RemoteSelection>& sources) const;
@@ -194,6 +201,7 @@ class MainWindow final : public QMainWindow
                                                       const QString& error);
     Q_INVOKABLE void
     handleLocalFileOperationResult(const rfm::core::LocalFileOperationResult& result);
+    Q_INVOKABLE void handleLocalFileOperationStarted(quint64 id);
     void openLocalLocation(const QString& path);
     void beginVolumeOperation(const rfm::core::StorageVolume& volume,
                               rfm::core::VolumeOperation operation);
@@ -328,6 +336,8 @@ class MainWindow final : public QMainWindow
     };
     QHash<quint64, OperationContext> m_operationContexts;
     QHash<quint64, OperationContext> m_localOperationContexts;
+    QHash<quint64, rfm::core::LocalFileOperationRequest> m_localOperationRequests;
+    QHash<quint64, QList<rfm::core::LocalFileOperationItemResult>> m_localOperationItems;
     QHash<quint64, rfm::core::VolumeOperationRequest> m_volumeOperations;
     QSet<quint64> m_volumeOperationsAwaitingRefresh;
     struct RemoteVolumeOperationContext {
@@ -345,6 +355,7 @@ class MainWindow final : public QMainWindow
     QHash<quint64, quint64> m_transferPanes;
     rfm::core::InternalClipboard m_internalClipboard;
     QHash<quint64, quint64> m_clipboardMoveOperations;
+    QHash<quint64, quint64> m_localClipboardMoveOperations;
     std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
     std::unique_ptr<rfm::core::ServerProfileStore> m_serverProfileStore;
     QList<rfm::core::ConnectionProfile> m_serverProfiles;

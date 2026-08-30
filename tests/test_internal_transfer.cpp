@@ -9,6 +9,7 @@ class InternalTransferTest final : public QObject
   private slots:
     void serializesOnlyBoundedInternalData();
     void clipboardReplacesAndClearsIntentions();
+    void newerCutDoesNotMatchAnOlderPasteGeneration();
     void validatesSessionAndRemoteDestinations();
 };
 
@@ -77,6 +78,23 @@ void InternalTransferTest::clipboardReplacesAndClearsIntentions()
     clipboard.clear();
     QVERIFY(!clipboard.hasContent());
     QVERIFY(clipboard.generation() != replacementGeneration);
+}
+
+void InternalTransferTest::newerCutDoesNotMatchAnOlderPasteGeneration()
+{
+    rfm::core::InternalClipboard clipboard;
+    clipboard.set(rfm::core::InternalTransferAction::Move, payload());
+    const quint64 pastedCutGeneration = clipboard.generation();
+
+    auto replacement = payload();
+    replacement.sources = {{QStringLiteral("/srv/newer-cut.txt"), false}};
+    clipboard.set(rfm::core::InternalTransferAction::Move, replacement);
+
+    QVERIFY(clipboard.isCut());
+    QVERIFY(!clipboard.matchesCutGeneration(pastedCutGeneration));
+    QVERIFY(clipboard.matchesCutGeneration(clipboard.generation()));
+    QCOMPARE(clipboard.content()->payload.sources.constFirst().path,
+             QStringLiteral("/srv/newer-cut.txt"));
 }
 
 void InternalTransferTest::validatesSessionAndRemoteDestinations()

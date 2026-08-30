@@ -53,6 +53,7 @@ class OperationHistoryTest final : public QObject
     void savesAndLoadsOnlyTerminalOperations();
     void appliesRetentionToNewestEntries();
     void serializesOnlyTheDocumentedFields();
+    void savesAndLoadsLocalOperationsWithoutServerIdentity();
 };
 
 void OperationHistoryTest::missingEmptyCorruptAndUnknownFilesAreIgnored()
@@ -187,6 +188,24 @@ void OperationHistoryTest::serializesOnlyTheDocumentedFields()
     QVERIFY(!contents.contains("token"));
     QVERIFY(contents.contains("\"server\":{\"host\":\"files.example.test\",\"port\":2222}"));
     QVERIFY(contents.contains("\"version\":1"));
+}
+
+void OperationHistoryTest::savesAndLoadsLocalOperationsWithoutServerIdentity()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const rfm::core::OperationHistoryStore store(directory.path());
+    auto local = operation(77, rfm::core::OperationKind::LocalCopy,
+                           rfm::core::OperationState::Completed, 77);
+    local.serverHost.clear();
+    local.serverPort = 0;
+
+    QVERIFY(store.save({local}));
+    const QList<rfm::core::OperationProgress> restored = store.load();
+    QCOMPARE(restored.size(), 1);
+    QCOMPARE(restored.constFirst().kind, rfm::core::OperationKind::LocalCopy);
+    QVERIFY(restored.constFirst().serverHost.isEmpty());
+    QCOMPARE(restored.constFirst().serverPort, quint16{0});
 }
 
 QTEST_MAIN(OperationHistoryTest)

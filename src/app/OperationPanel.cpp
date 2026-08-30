@@ -53,6 +53,10 @@ QString kindText(rfm::core::OperationKind kind)
         return OperationPanel::tr("Remote Copy");
     case rfm::core::OperationKind::RemoteMove:
         return OperationPanel::tr("Remote Move");
+    case rfm::core::OperationKind::LocalCopy:
+        return OperationPanel::tr("Copy");
+    case rfm::core::OperationKind::LocalMove:
+        return OperationPanel::tr("Move");
     }
     return {};
 }
