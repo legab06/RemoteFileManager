@@ -6,6 +6,7 @@
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QThread>
 
 #include <filesystem>
 #include <functional>
@@ -148,6 +149,7 @@ class LocalCopyMoveTest final : public QObject
     void reportsAndResolvesCollisionsExplicitly();
     void cancelsDuringLargeFileCopyAndCleansPartialData();
     void workerCancellationTargetsRequestedOperation();
+    void workerRetainsMultipleCancellationRequests();
     void continuesAfterAnItemError();
     void movesAcrossFilesystemsOnlyAfterValidatedCopy();
     void preservesSourceWhenCrossFilesystemValidationFails();
@@ -367,6 +369,47 @@ void LocalCopyMoveTest::workerCancellationTargetsRequestedOperation()
     QVERIFY(result.cancelled);
     QVERIFY(QFileInfo(source).exists());
     QVERIFY(!QFileInfo(root.filePath(QStringLiteral("destination/pending.bin"))).exists());
+}
+
+void LocalCopyMoveTest::workerRetainsMultipleCancellationRequests()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir root(temporary.path());
+    QVERIFY(root.mkdir(QStringLiteral("source")));
+    QVERIFY(root.mkdir(QStringLiteral("destination")));
+    const QString first = root.filePath(QStringLiteral("source/first.bin"));
+    const QString second = root.filePath(QStringLiteral("source/second.bin"));
+    QVERIFY(writeFile(first, QByteArray(32 * 1024 * 1024, 'a')));
+    QVERIFY(writeFile(second, QByteArrayLiteral("second")));
+    QThread thread;
+    auto* const worker = new rfm::core::LocalFileOperationWorker;
+    worker->moveToThread(&thread);
+    connect(&thread, &QThread::finished, worker, &QObject::deleteLater);
+    QSignalSpy started(worker, &rfm::core::LocalFileOperationWorker::started);
+    QSignalSpy finished(worker, &rfm::core::LocalFileOperationWorker::finished);
+    thread.start();
+    QVERIFY(QMetaObject::invokeMethod(
+        worker, "execute", Qt::QueuedConnection,
+        Q_ARG(rfm::core::LocalFileOperationRequest,
+              request(30, rfm::core::LocalFileOperationKind::Copy,
+                      root.filePath(QStringLiteral("source")), {first},
+                      root.filePath(QStringLiteral("destination"))))));
+    QVERIFY(QMetaObject::invokeMethod(
+        worker, "execute", Qt::QueuedConnection,
+        Q_ARG(rfm::core::LocalFileOperationRequest,
+              request(31, rfm::core::LocalFileOperationKind::Copy,
+                      root.filePath(QStringLiteral("source")), {second},
+                      root.filePath(QStringLiteral("destination"))))));
+    QTRY_COMPARE(started.size(), 1);
+    worker->requestCancellation(30);
+    worker->requestCancellation(31);
+    QTRY_COMPARE(finished.size(), 2);
+    thread.quit();
+    QVERIFY(thread.wait());
+    for (const auto& arguments : finished) {
+        QVERIFY(arguments.constFirst().value<rfm::core::LocalFileOperationResult>().cancelled);
+    }
 }
 
 void LocalCopyMoveTest::continuesAfterAnItemError()

@@ -248,6 +248,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &QObject::deleteLater);
     connect(this, &MainWindow::localFileOperationRequested, m_localFileOperationWorker,
             &rfm::core::LocalFileOperationWorker::execute);
+    connect(m_localFileOperationWorker, &rfm::core::LocalFileOperationWorker::started, this,
+            &MainWindow::handleLocalFileOperationStarted);
     connect(m_localFileOperationWorker, &rfm::core::LocalFileOperationWorker::finished, this,
             &MainWindow::handleLocalFileOperationResult);
     m_localOperationThread->start();
@@ -1172,7 +1174,7 @@ void MainWindow::showPropertiesDialog(const QString& title, const QString& text)
 {
     if (!title.isEmpty() && !text.isEmpty()) {
         QMessageBox dialog(QMessageBox::Information, tr("Properties — %1").arg(title), text,
-                            QMessageBox::Ok, this);
+                           QMessageBox::Ok, this);
         dialog.setTextFormat(Qt::PlainText);
         dialog.exec();
     }
@@ -1203,7 +1205,12 @@ void MainWindow::createOperationDock()
     connect(m_operationPanel, &OperationPanel::resumeRequested, this,
             &MainWindow::resumeTransferRequested);
     connect(m_operationPanel, &OperationPanel::cancelRequested, this, [this](quint64 id) {
-        if (m_remoteOperations.contains(id)) {
+        if (m_localOperationRequests.contains(id)) {
+            auto operation = m_operations.value(id);
+            operation.state = rfm::core::OperationState::Cancelling;
+            updateTrackedOperation(operation);
+            m_localFileOperationWorker->requestCancellation(id);
+        } else if (m_remoteOperations.contains(id)) {
             emit cancelRemoteOperationRequested(id);
         } else {
             emit cancelTransferRequested(id);
@@ -1659,12 +1666,24 @@ void MainWindow::moveSelectedEntries()
     if (selection.isEmpty()) {
         return;
     }
-    const QString destination = askDestination(tr("Move selected items"));
+    QString destination;
+    if (sourcePane->source() == rfm::core::FileSource::Local) {
+        destination =
+            QFileDialog::getExistingDirectory(this, tr("Select the move destination folder"),
+                                              sourcePane->currentPath(), QFileDialog::ShowDirsOnly);
+    } else {
+        destination = askDestination(tr("Move selected items"));
+    }
     if (destination.isEmpty()) {
         return;
     }
-    startRemoteTransfer(rfm::core::InternalTransferAction::Move,
-                        transferPayload(sourcePaneId, selection), 0, destination);
+    if (sourcePane->source() == rfm::core::FileSource::Local) {
+        startLocalOperation(rfm::core::LocalFileOperationKind::Move, sourcePaneId, sourcePaneId,
+                            sourcePane->currentPath(), destination, selection);
+    } else {
+        startRemoteTransfer(rfm::core::InternalTransferAction::Move,
+                            transferPayload(sourcePaneId, selection), 0, destination);
+    }
 }
 
 void MainWindow::copySelectedEntries()
@@ -1675,12 +1694,24 @@ void MainWindow::copySelectedEntries()
     if (selection.isEmpty()) {
         return;
     }
-    const QString destination = askDestination(tr("Copy selected items"));
+    QString destination;
+    if (sourcePane->source() == rfm::core::FileSource::Local) {
+        destination =
+            QFileDialog::getExistingDirectory(this, tr("Select the copy destination folder"),
+                                              sourcePane->currentPath(), QFileDialog::ShowDirsOnly);
+    } else {
+        destination = askDestination(tr("Copy selected items"));
+    }
     if (destination.isEmpty()) {
         return;
     }
-    startRemoteTransfer(rfm::core::InternalTransferAction::Copy,
-                        transferPayload(sourcePaneId, selection), 0, destination);
+    if (sourcePane->source() == rfm::core::FileSource::Local) {
+        startLocalOperation(rfm::core::LocalFileOperationKind::Copy, sourcePaneId, sourcePaneId,
+                            sourcePane->currentPath(), destination, selection);
+    } else {
+        startRemoteTransfer(rfm::core::InternalTransferAction::Copy,
+                            transferPayload(sourcePaneId, selection), 0, destination);
+    }
 }
 
 void MainWindow::moveSelectedToOtherPane()
@@ -1696,6 +1727,14 @@ void MainWindow::moveSelectedToOtherPane()
     if (selection.isEmpty() || sourcePaneId == 0 || destinationPaneId == 0 ||
         sourcePaneId == destinationPaneId || destinationPane == nullptr ||
         destinationPane->isHidden() || destination.isEmpty()) {
+        return;
+    }
+    if (sourcePane->source() == rfm::core::FileSource::Local) {
+        if (destinationPane->source() != rfm::core::FileSource::Local) {
+            return;
+        }
+        startLocalOperation(rfm::core::LocalFileOperationKind::Move, sourcePaneId,
+                            destinationPaneId, sourceDirectory, destination, selection);
         return;
     }
     if (rfm::core::RemotePath::normalize(sourceDirectory) ==
@@ -1730,6 +1769,14 @@ void MainWindow::copySelectedToOtherPane()
         destinationPane->isHidden() || destination.isEmpty()) {
         return;
     }
+    if (sourcePane->source() == rfm::core::FileSource::Local) {
+        if (destinationPane->source() != rfm::core::FileSource::Local) {
+            return;
+        }
+        startLocalOperation(rfm::core::LocalFileOperationKind::Copy, sourcePaneId,
+                            destinationPaneId, sourceDirectory, destination, selection);
+        return;
+    }
     if (rfm::core::RemotePath::normalize(sourceDirectory) ==
         rfm::core::RemotePath::normalize(destination)) {
         statusBar()->showMessage(tr("Source and destination folders are identical."), 8000);
@@ -1751,28 +1798,34 @@ void MainWindow::copySelectionToClipboard()
 {
     FileBrowserPane* const pane = m_paneWorkspace->activePane();
     const QList<rfm::core::RemoteSelection> selection = pane->selectedEntries();
-    if (!m_connected || selection.isEmpty()) {
+    if (selection.isEmpty() || pane->source() == rfm::core::FileSource::None) {
         return;
     }
+    const quint64 paneId = m_paneWorkspace->paneId(pane);
     m_internalClipboard.set(rfm::core::InternalTransferAction::Copy,
-                            transferPayload(m_paneWorkspace->paneId(pane), selection));
+                            pane->source() == rfm::core::FileSource::Local
+                                ? rfm::core::InternalTransferPayload{{}, {}, paneId, selection}
+                                : transferPayload(paneId, selection));
     updateCutAppearance();
     updateOperationActions();
-    statusBar()->showMessage(tr("%1 remote item(s) copied").arg(selection.size()), 3000);
+    statusBar()->showMessage(tr("%1 item(s) copied").arg(selection.size()), 3000);
 }
 
 void MainWindow::cutSelectionToClipboard()
 {
     FileBrowserPane* const pane = m_paneWorkspace->activePane();
     const QList<rfm::core::RemoteSelection> selection = pane->selectedEntries();
-    if (!m_connected || selection.isEmpty()) {
+    if (selection.isEmpty() || pane->source() == rfm::core::FileSource::None) {
         return;
     }
+    const quint64 paneId = m_paneWorkspace->paneId(pane);
     m_internalClipboard.set(rfm::core::InternalTransferAction::Move,
-                            transferPayload(m_paneWorkspace->paneId(pane), selection));
+                            pane->source() == rfm::core::FileSource::Local
+                                ? rfm::core::InternalTransferPayload{{}, {}, paneId, selection}
+                                : transferPayload(paneId, selection));
     updateCutAppearance();
     updateOperationActions();
-    statusBar()->showMessage(tr("%1 remote item(s) ready to move").arg(selection.size()), 3000);
+    statusBar()->showMessage(tr("%1 item(s) ready to move").arg(selection.size()), 3000);
 }
 
 void MainWindow::pasteClipboard()
@@ -1783,6 +1836,24 @@ void MainWindow::pasteClipboard()
     const rfm::core::ClipboardEntry entry = *m_internalClipboard.content();
     FileBrowserPane* const destinationPane = m_paneWorkspace->activePane();
     const quint64 destinationPaneId = m_paneWorkspace->paneId(destinationPane);
+    if (destinationPane->source() == rfm::core::FileSource::Local &&
+        entry.payload.connection == rfm::core::RemoteConnectionIdentity{} &&
+        m_paneWorkspace->pane(entry.payload.sourcePaneId) != nullptr &&
+        m_paneWorkspace->pane(entry.payload.sourcePaneId)->source() ==
+            rfm::core::FileSource::Local) {
+        const QString sourceDirectory =
+            QFileInfo(entry.payload.sources.constFirst().path).absolutePath();
+        startLocalOperation(entry.action == rfm::core::InternalTransferAction::Move
+                                ? rfm::core::LocalFileOperationKind::Move
+                                : rfm::core::LocalFileOperationKind::Copy,
+                            entry.payload.sourcePaneId, destinationPaneId, sourceDirectory,
+                            destinationPane->currentPath(), entry.payload.sources,
+                            rfm::core::LocalCollisionPolicy::Fail,
+                            entry.action == rfm::core::InternalTransferAction::Move
+                                ? std::optional<quint64>{m_internalClipboard.generation()}
+                                : std::nullopt);
+        return;
+    }
     startRemoteTransfer(entry.action, entry.payload, destinationPaneId,
                         destinationPane->currentPath(),
                         entry.action == rfm::core::InternalTransferAction::Move);
@@ -1795,6 +1866,55 @@ void MainWindow::cancelPendingCut()
     }
     clearInternalClipboard();
     statusBar()->showMessage(tr("Pending move cancelled"), 3000);
+}
+
+bool MainWindow::startLocalOperation(rfm::core::LocalFileOperationKind kind, quint64 sourcePaneId,
+                                     quint64 destinationPaneId, const QString& sourceDirectory,
+                                     const QString& destinationDirectory,
+                                     const QList<rfm::core::RemoteSelection>& sources,
+                                     rfm::core::LocalCollisionPolicy collisionPolicy,
+                                     std::optional<quint64> clipboardGeneration)
+{
+    FileBrowserPane* const sourcePane = m_paneWorkspace->pane(sourcePaneId);
+    FileBrowserPane* const destinationPane = m_paneWorkspace->pane(destinationPaneId);
+    if (sourcePane == nullptr || destinationPane == nullptr || sources.isEmpty() ||
+        sourcePane->source() != rfm::core::FileSource::Local ||
+        destinationPane->source() != rfm::core::FileSource::Local || sourceDirectory.isEmpty() ||
+        destinationDirectory.isEmpty() || !QFileInfo(sourceDirectory).isDir() ||
+        !QFileInfo(destinationDirectory).isDir() || !QFileInfo(destinationDirectory).isWritable()) {
+        statusBar()->showMessage(tr("The local destination folder is invalid."), 8000);
+        return false;
+    }
+    const quint64 id = nextOperationId();
+    QStringList paths;
+    for (const auto& source : sources) {
+        paths.push_back(source.path);
+    }
+    const rfm::core::LocalFileOperationRequest request{
+        id, kind, sourceDirectory, paths, {}, destinationDirectory, collisionPolicy};
+    m_localOperationContexts.insert(
+        id, {sourcePaneId, destinationPaneId, sourceDirectory, destinationDirectory});
+    m_localOperationRequests.insert(id, request);
+    rfm::core::OperationProgress progress;
+    progress.id = id;
+    progress.kind = kind == rfm::core::LocalFileOperationKind::Move
+                        ? rfm::core::OperationKind::LocalMove
+                        : rfm::core::OperationKind::LocalCopy;
+    progress.state = rfm::core::OperationState::Queued;
+    progress.sources = paths;
+    progress.destination = destinationDirectory;
+    progress.totalItems = static_cast<quint64>(paths.size());
+    progress.cancellationSupported = true;
+    updateTrackedOperation(progress);
+    if (clipboardGeneration.has_value()) {
+        m_localClipboardMoveOperations.insert(id, *clipboardGeneration);
+    }
+    setPaneBusy(sourcePaneId, true,
+                kind == rfm::core::LocalFileOperationKind::Move
+                    ? tr("Moving %1 item(s)…").arg(paths.size())
+                    : tr("Copying %1 item(s)…").arg(paths.size()));
+    emit localFileOperationRequested(request);
+    return true;
 }
 
 void MainWindow::selectAllInActivePane()
@@ -1963,14 +2083,20 @@ void MainWindow::queueDownloads(QString localDirectory)
 void MainWindow::updateTrackedOperation(rfm::core::OperationProgress operation)
 {
     const auto existing = m_operations.constFind(operation.id);
+    const bool localOperation = operation.kind == rfm::core::OperationKind::LocalCopy ||
+                                operation.kind == rfm::core::OperationKind::LocalMove;
+    if (localOperation) {
+        operation.serverHost.clear();
+        operation.serverPort = 0;
+    }
     operation.serverHost = operation.serverHost.trimmed();
-    if ((operation.serverHost.isEmpty() || operation.serverPort == 0) &&
+    if (!localOperation && (operation.serverHost.isEmpty() || operation.serverPort == 0) &&
         existing != m_operations.cend() && !existing->serverHost.isEmpty() &&
         existing->serverPort != 0) {
         operation.serverHost = existing->serverHost;
         operation.serverPort = existing->serverPort;
     }
-    if (operation.serverHost.isEmpty() || operation.serverPort == 0) {
+    if (!localOperation && (operation.serverHost.isEmpty() || operation.serverPort == 0)) {
         operation.serverHost = m_activeProfile.host.trimmed();
         operation.serverPort = m_activeProfile.port;
     }
@@ -2143,18 +2269,90 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
     }
 }
 
+void MainWindow::handleLocalFileOperationStarted(quint64 id)
+{
+    if (!m_localOperationRequests.contains(id)) {
+        return;
+    }
+    auto operation = m_operations.value(id);
+    operation.state = rfm::core::OperationState::Running;
+    updateTrackedOperation(operation);
+}
+
 void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperationResult& result)
 {
-    const OperationContext context = m_localOperationContexts.take(result.id);
+    const OperationContext context = m_localOperationContexts.value(result.id);
     if (context.sourcePaneId == 0) {
         return;
     }
+
+    const bool trackedCopyMove = m_localOperationRequests.contains(result.id);
+    QList<rfm::core::LocalFileOperationItemResult> collisions;
+    if (trackedCopyMove) {
+        QList<rfm::core::LocalFileOperationItemResult>& accumulated = m_localOperationItems[result.id];
+        for (const auto& item : result.items) {
+            for (auto iterator = accumulated.begin(); iterator != accumulated.end(); ++iterator) {
+                if (iterator->source == item.source &&
+                    iterator->outcome == rfm::core::LocalFileOperationOutcome::Collision) {
+                    iterator = accumulated.erase(iterator);
+                    break;
+                }
+            }
+            accumulated.push_back(item);
+        }
+        for (const auto& item : accumulated) {
+            if (item.outcome == rfm::core::LocalFileOperationOutcome::Collision) {
+                collisions.push_back(item);
+            }
+        }
+    }
+    if (!collisions.isEmpty()) {
+        QMessageBox choice(QMessageBox::Question, tr("Destination already exists"),
+                           tr("An item already exists at:\n%1\n\nChoose how to continue.")
+                               .arg(collisions.constFirst().destination),
+                           QMessageBox::NoButton, this);
+        QPushButton* const replace = choice.addButton(tr("Replace"), QMessageBox::DestructiveRole);
+        QPushButton* const skip = choice.addButton(tr("Skip"), QMessageBox::AcceptRole);
+        QPushButton* const cancel = choice.addButton(QMessageBox::Cancel);
+        choice.setDefaultButton(cancel);
+        choice.exec();
+        if (choice.clickedButton() != cancel) {
+            auto request = m_localOperationRequests.value(result.id);
+            request.sourcePaths.clear();
+            for (const auto& item : collisions) {
+                request.sourcePaths.push_back(item.source);
+            }
+            request.collisionPolicy =
+                choice.clickedButton() == replace
+                    ? rfm::core::LocalCollisionPolicy::Overwrite
+                    : (choice.clickedButton() == skip ? rfm::core::LocalCollisionPolicy::Skip
+                                                      : rfm::core::LocalCollisionPolicy::Cancel);
+            m_localOperationRequests.insert(result.id, request);
+            auto progress = m_operations.value(result.id);
+            progress.state = rfm::core::OperationState::Running;
+            progress.sources = request.sourcePaths;
+            progress.error.clear();
+            updateTrackedOperation(progress);
+            emit localFileOperationRequested(request);
+            return;
+        }
+        auto operation = m_operations.value(result.id);
+        operation.state = rfm::core::OperationState::Cancelled;
+        operation.cancellationSupported = false;
+        operation.error = tr("Collision resolution cancelled.");
+        updateTrackedOperation(operation);
+    }
+
+    m_localOperationContexts.remove(result.id);
+    m_localOperationRequests.remove(result.id);
+    const QList<rfm::core::LocalFileOperationItemResult> allItems =
+        trackedCopyMove ? m_localOperationItems.take(result.id) : result.items;
     setPaneBusy(context.sourcePaneId, false);
 
     QStringList failures;
     bool anySuccess = false;
     QStringList selectionNames;
-    for (const rfm::core::LocalFileOperationItemResult& item : result.items) {
+    for (const rfm::core::LocalFileOperationItemResult& item : allItems) {
         if (item.success) {
             anySuccess = true;
             if (!item.destination.isEmpty() &&
@@ -2164,13 +2362,35 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
             }
             continue;
         }
+        if (item.outcome == rfm::core::LocalFileOperationOutcome::Skipped) {
+            continue;
+        }
         const QString label = !item.source.isEmpty() && !item.destination.isEmpty()
                                   ? tr("%1 → %2").arg(item.source, item.destination)
                                   : (item.source.isEmpty() ? item.destination : item.source);
         failures.push_back(label.isEmpty() ? item.error : tr("%1: %2").arg(label, item.error));
     }
-    if (!failures.isEmpty()) {
-        QMessageBox::warning(this, tr("Local operation incomplete"), failures.join(QChar{'\n'}));
+    if (trackedCopyMove) {
+        rfm::core::OperationProgress operation = m_operations.value(result.id);
+        const bool collisionCancelled = operation.state == rfm::core::OperationState::Cancelled;
+        operation.state = (result.cancelled || collisionCancelled)
+                              ? rfm::core::OperationState::Cancelled
+                              : (failures.isEmpty() ? rfm::core::OperationState::Completed
+                                                    : rfm::core::OperationState::Failed);
+        operation.completedItems = static_cast<quint64>(
+            std::ranges::count(allItems, true, &rfm::core::LocalFileOperationItemResult::success));
+        operation.totalItems = static_cast<quint64>(allItems.size());
+        operation.error = failures.join(QChar{'\n'});
+        operation.cancellationSupported = false;
+        updateTrackedOperation(operation);
+        const auto clipboardMove = m_localClipboardMoveOperations.find(result.id);
+        const bool consumedClipboard = clipboardMove != m_localClipboardMoveOperations.end() &&
+                                       operation.state == rfm::core::OperationState::Completed &&
+                                       m_internalClipboard.isCut();
+        m_localClipboardMoveOperations.remove(result.id);
+        if (consumedClipboard) {
+            clearInternalClipboard();
+        }
     }
     statusBar()->showMessage(failures.isEmpty() ? tr("Local operation completed")
                                                 : tr("Local operation completed with errors"),
@@ -2180,11 +2400,19 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
     }
 
     requestLocalTreeDirectoryRefresh(context.sourceDirectory);
+    if (context.destinationDirectory != context.sourceDirectory) {
+        requestLocalTreeDirectoryRefresh(context.destinationDirectory);
+    }
+    QSet<QString> directories{context.sourceDirectory, context.destinationDirectory};
     for (const quint64 paneId : m_paneWorkspace->visiblePaneIds()) {
         FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
-        if (pane->source() != rfm::core::FileSource::Local ||
-            !rfm::core::localPathIsAtOrBelow(pane->currentPath(), context.sourceDirectory) ||
-            !rfm::core::localPathIsAtOrBelow(context.sourceDirectory, pane->currentPath())) {
+        bool affected = false;
+        for (const QString& directory : directories) {
+            affected =
+                affected || (rfm::core::localPathIsAtOrBelow(pane->currentPath(), directory) &&
+                             rfm::core::localPathIsAtOrBelow(directory, pane->currentPath()));
+        }
+        if (pane->source() != rfm::core::FileSource::Local || !affected) {
             continue;
         }
         if (!selectionNames.isEmpty()) {
@@ -2352,16 +2580,18 @@ void MainWindow::updateCutAppearance()
         return;
     }
     const rfm::core::InternalTransferPayload& payload = m_internalClipboard.content()->payload;
-    if (payload.connection != currentConnectionIdentity()) {
+    FileBrowserPane* const sourcePane = m_paneWorkspace->pane(payload.sourcePaneId);
+    if (sourcePane == nullptr ||
+        (sourcePane->source() == rfm::core::FileSource::Ssh &&
+         payload.connection != currentConnectionIdentity()) ||
+        sourcePane->source() == rfm::core::FileSource::None) {
         return;
     }
     QSet<QString> paths;
     for (const rfm::core::RemoteSelection& source : payload.sources) {
         paths.insert(source.path);
     }
-    if (FileBrowserPane* const pane = m_paneWorkspace->pane(payload.sourcePaneId)) {
-        pane->setCutPaths(std::move(paths));
-    }
+    sourcePane->setCutPaths(std::move(paths));
 }
 
 void MainWindow::clearInternalClipboard()
@@ -3003,8 +3233,8 @@ void MainWindow::updateOperationActions()
     const bool mutationAvailable = localOperationAvailable || remoteOperationAvailable;
     m_createDirectoryAction->setEnabled(mutationAvailable);
     m_renameAction->setEnabled(mutationAvailable && count == 1);
-    m_moveAction->setEnabled(remoteOperationAvailable && count > 0);
-    m_copyAction->setEnabled(remoteOperationAvailable && count > 0);
+    m_moveAction->setEnabled((remoteOperationAvailable || localOperationAvailable) && count > 0);
+    m_copyAction->setEnabled((remoteOperationAvailable || localOperationAvailable) && count > 0);
     FileBrowserPane* const otherPane = m_paneWorkspace->otherVisiblePane(paneId);
     const quint64 otherPaneId = m_paneWorkspace->paneId(otherPane);
     const bool distinctDirectories =
@@ -3015,24 +3245,36 @@ void MainWindow::updateOperationActions()
         otherPane != nullptr && pathsUseSameConvention(m_paneWorkspace->activePane()->currentPath(),
                                                        otherPane->currentPath());
     const bool otherPaneAvailable =
-        remoteOperationAvailable && count > 0 && otherPane != nullptr &&
-        !otherPane->currentPath().isEmpty() && otherPane->source() == rfm::core::FileSource::Ssh &&
-        otherPane->currentLocation().machineId == activeRemoteMachineId() &&
+        (remoteOperationAvailable || localOperationAvailable) && count > 0 &&
+        otherPane != nullptr && !otherPane->currentPath().isEmpty() &&
+        ((remoteOperationAvailable &&
+          otherPane->currentLocation().machineId == activeRemoteMachineId()) ||
+         (localOperationAvailable && otherPane->source() == rfm::core::FileSource::Local)) &&
         !m_busyPanes.contains(otherPaneId) && distinctDirectories && compatiblePathConventions;
     m_moveToOtherPaneAction->setEnabled(otherPaneAvailable);
     m_copyToOtherPaneAction->setEnabled(otherPaneAvailable);
     m_removeAction->setEnabled(mutationAvailable && count > 0);
     m_uploadAction->setEnabled(remoteOperationAvailable);
     m_downloadAction->setEnabled(remoteOperationAvailable && count > 0);
-    m_clipboardCopyAction->setEnabled(remoteOperationAvailable && count > 0);
-    m_clipboardCutAction->setEnabled(remoteOperationAvailable && count > 0);
+    m_clipboardCopyAction->setEnabled((remoteOperationAvailable || localOperationAvailable) &&
+                                      count > 0);
+    m_clipboardCutAction->setEnabled((remoteOperationAvailable || localOperationAvailable) &&
+                                     count > 0);
     bool pasteAvailable = false;
-    if (remoteOperationAvailable && m_internalClipboard.content().has_value()) {
-        pasteAvailable =
-            rfm::core::validateInternalTransfer(
-                m_internalClipboard.content()->payload, m_applicationInstanceId,
-                currentConnectionIdentity(), m_paneWorkspace->activePane()->currentPath())
-                .accepted();
+    if (m_internalClipboard.content().has_value()) {
+        const auto& clipboard = *m_internalClipboard.content();
+        if (remoteOperationAvailable) {
+            pasteAvailable = rfm::core::validateInternalTransfer(
+                                 clipboard.payload, m_applicationInstanceId,
+                                 currentConnectionIdentity(), activePane->currentPath())
+                                 .accepted();
+        } else if (localOperationAvailable &&
+                   clipboard.payload.connection == rfm::core::RemoteConnectionIdentity{}) {
+            const FileBrowserPane* const sourcePane =
+                m_paneWorkspace->pane(clipboard.payload.sourcePaneId);
+            pasteAvailable =
+                sourcePane != nullptr && sourcePane->source() == rfm::core::FileSource::Local;
+        }
     }
     m_clipboardPasteAction->setEnabled(pasteAvailable);
     m_selectAllAction->setEnabled(locationAvailable);

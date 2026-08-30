@@ -32,6 +32,10 @@ QString kindName(OperationKind kind)
         return QStringLiteral("remote-copy");
     case OperationKind::RemoteMove:
         return QStringLiteral("remote-move");
+    case OperationKind::LocalCopy:
+        return QStringLiteral("local-copy");
+    case OperationKind::LocalMove:
+        return QStringLiteral("local-move");
     }
     return {};
 }
@@ -49,6 +53,12 @@ std::optional<OperationKind> parseKind(const QString& name)
     }
     if (name == QStringLiteral("remote-move")) {
         return OperationKind::RemoteMove;
+    }
+    if (name == QStringLiteral("local-copy")) {
+        return OperationKind::LocalCopy;
+    }
+    if (name == QStringLiteral("local-move")) {
+        return OperationKind::LocalMove;
     }
     return std::nullopt;
 }
@@ -81,10 +91,7 @@ std::optional<OperationState> parseTerminalState(const QString& name)
     return std::nullopt;
 }
 
-QString numberString(quint64 value)
-{
-    return QString::number(value);
-}
+QString numberString(quint64 value) { return QString::number(value); }
 
 std::optional<quint64> parseNumber(const QJsonValue& value)
 {
@@ -101,28 +108,36 @@ bool hasValidServerIdentity(const OperationProgress& operation)
     return !operation.serverHost.trimmed().isEmpty() && operation.serverPort != 0;
 }
 
+bool isLocalOperation(const OperationProgress& operation)
+{
+    return operation.kind == OperationKind::LocalCopy || operation.kind == OperationKind::LocalMove;
+}
+
 QJsonObject serialize(const OperationProgress& operation)
 {
     QJsonArray sources;
     for (const QString& source : operation.sources) {
         sources.push_back(source);
     }
-    const QJsonObject server{{QStringLiteral("host"), operation.serverHost.trimmed()},
-                             {QStringLiteral("port"),
-                              static_cast<int>(operation.serverPort)}};
-    return {{QStringLiteral("id"), numberString(operation.id)},
-            {QStringLiteral("kind"), kindName(operation.kind)},
-            {QStringLiteral("server"), server},
-            {QStringLiteral("sources"), sources},
-            {QStringLiteral("destination"), operation.destination},
-            {QStringLiteral("state"), stateName(operation.state)},
-            {QStringLiteral("error"), operation.error},
-            {QStringLiteral("transferredBytes"), numberString(operation.transferredBytes)},
-            {QStringLiteral("totalBytes"), numberString(operation.totalBytes)},
-            {QStringLiteral("completedItems"), numberString(operation.completedItems)},
-            {QStringLiteral("totalItems"), numberString(operation.totalItems)},
-            {QStringLiteral("finishedAt"),
-             operation.finishedAt.toUTC().toString(Qt::ISODateWithMs)}};
+    QJsonObject serialized{
+        {QStringLiteral("id"), numberString(operation.id)},
+        {QStringLiteral("kind"), kindName(operation.kind)},
+        {QStringLiteral("sources"), sources},
+        {QStringLiteral("destination"), operation.destination},
+        {QStringLiteral("state"), stateName(operation.state)},
+        {QStringLiteral("error"), operation.error},
+        {QStringLiteral("transferredBytes"), numberString(operation.transferredBytes)},
+        {QStringLiteral("totalBytes"), numberString(operation.totalBytes)},
+        {QStringLiteral("completedItems"), numberString(operation.completedItems)},
+        {QStringLiteral("totalItems"), numberString(operation.totalItems)},
+        {QStringLiteral("finishedAt"), operation.finishedAt.toUTC().toString(Qt::ISODateWithMs)}};
+    if (!isLocalOperation(operation)) {
+        serialized.insert(QStringLiteral("server"),
+                          QJsonObject{{QStringLiteral("host"), operation.serverHost.trimmed()},
+                                      {QStringLiteral("port"),
+                                       static_cast<int>(operation.serverPort)}});
+    }
+    return serialized;
 }
 
 std::optional<OperationProgress> deserialize(const QJsonValue& value)
@@ -133,15 +148,16 @@ std::optional<OperationProgress> deserialize(const QJsonValue& value)
     const QJsonObject object = value.toObject();
     const auto id = parseNumber(object.value(QStringLiteral("id")));
     const auto kind = parseKind(object.value(QStringLiteral("kind")).toString());
-    const auto state =
-        parseTerminalState(object.value(QStringLiteral("state")).toString());
+    const auto state = parseTerminalState(object.value(QStringLiteral("state")).toString());
     const QJsonObject server = object.value(QStringLiteral("server")).toObject();
     const QString serverHost = server.value(QStringLiteral("host")).toString().trimmed();
     const int serverPort = server.value(QStringLiteral("port")).toInt(0);
     const QDateTime finishedAt = QDateTime::fromString(
         object.value(QStringLiteral("finishedAt")).toString(), Qt::ISODateWithMs);
+    const bool local = kind.has_value() &&
+                       (*kind == OperationKind::LocalCopy || *kind == OperationKind::LocalMove);
     if (!id.has_value() || *id == 0 || !kind.has_value() || !state.has_value() ||
-        serverHost.isEmpty() || serverPort <= 0 ||
+        (!local && (serverHost.isEmpty() || serverPort <= 0)) ||
         serverPort > std::numeric_limits<quint16>::max() || !finishedAt.isValid()) {
         return std::nullopt;
     }
@@ -162,15 +178,13 @@ std::optional<OperationProgress> deserialize(const QJsonValue& value)
     operation.error = object.value(QStringLiteral("error")).toString();
     operation.transferredBytes =
         parseNumber(object.value(QStringLiteral("transferredBytes"))).value_or(0);
-    operation.totalBytes =
-        parseNumber(object.value(QStringLiteral("totalBytes"))).value_or(0);
+    operation.totalBytes = parseNumber(object.value(QStringLiteral("totalBytes"))).value_or(0);
     operation.completedItems =
         parseNumber(object.value(QStringLiteral("completedItems"))).value_or(0);
-    operation.totalItems =
-        parseNumber(object.value(QStringLiteral("totalItems"))).value_or(0);
+    operation.totalItems = parseNumber(object.value(QStringLiteral("totalItems"))).value_or(0);
     operation.finishedAt = finishedAt.toUTC();
-    const bool transfer = operation.kind == OperationKind::Upload ||
-                          operation.kind == OperationKind::Download;
+    const bool transfer =
+        operation.kind == OperationKind::Upload || operation.kind == OperationKind::Download;
     operation.byteProgressAvailable = transfer;
     operation.pauseResumeSupported = transfer;
     operation.cancellationSupported = transfer;
@@ -183,8 +197,7 @@ OperationHistoryStore::OperationHistoryStore(QString storageDirectory)
     : m_storageDirectory(storageDirectory.isEmpty()
                              ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
                              : std::move(storageDirectory))
-{
-}
+{}
 
 QString OperationHistoryStore::filePath() const
 {
@@ -234,9 +247,8 @@ bool OperationHistoryStore::save(const QList<OperationProgress>& operations, QSt
         }
         serialized.push_back(serialize(operation));
     }
-    const QJsonDocument document(
-        QJsonObject{{QStringLiteral("version"), formatVersion},
-                    {QStringLiteral("operations"), serialized}});
+    const QJsonDocument document(QJsonObject{{QStringLiteral("version"), formatVersion},
+                                             {QStringLiteral("operations"), serialized}});
     const QByteArray contents = document.toJson(QJsonDocument::Compact);
 
     QSaveFile file(filePath());
@@ -250,13 +262,13 @@ bool OperationHistoryStore::save(const QList<OperationProgress>& operations, QSt
     return true;
 }
 
-QList<OperationProgress> OperationHistoryStore::retainedTerminalOperations(
-    const QList<OperationProgress>& operations)
+QList<OperationProgress>
+OperationHistoryStore::retainedTerminalOperations(const QList<OperationProgress>& operations)
 {
     QList<OperationProgress> retained;
     for (const OperationProgress& operation : operations) {
         if (operation.id != 0 && isTerminal(operation.state) &&
-            hasValidServerIdentity(operation)) {
+            (isLocalOperation(operation) || hasValidServerIdentity(operation))) {
             retained.push_back(operation);
         }
     }

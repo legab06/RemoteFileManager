@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
+#include <QMutexLocker>
 #include <QProcess>
 #include <QSet>
 #include <QStandardPaths>
@@ -766,17 +767,21 @@ void LocalFileSystemWorker::probeVolumes(quint64 requestId)
 void LocalFileOperationWorker::execute(LocalFileOperationRequest request)
 {
     const quint64 operationId = request.id;
+    emit started(operationId);
     emit finished(LocalFileSystem::executeOperation(
-        request, nullptr,
-        [this, operationId] { return m_cancelledOperationId.load() == operationId; }));
-    quint64 expected = operationId;
-    static_cast<void>(m_cancelledOperationId.compare_exchange_strong(expected, 0));
+        request, nullptr, [this, operationId] {
+            const QMutexLocker lock(&m_cancellationMutex);
+            return m_cancelledOperationIds.contains(operationId);
+        }));
+    const QMutexLocker lock(&m_cancellationMutex);
+    m_cancelledOperationIds.remove(operationId);
 }
 
 void LocalFileOperationWorker::requestCancellation(quint64 operationId) noexcept
 {
     if (operationId != 0) {
-        m_cancelledOperationId.store(operationId);
+        const QMutexLocker lock(&m_cancellationMutex);
+        m_cancelledOperationIds.insert(operationId);
     }
 }
 

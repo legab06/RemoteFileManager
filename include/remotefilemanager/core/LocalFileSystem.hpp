@@ -6,7 +6,9 @@
 #include <QByteArray>
 #include <QList>
 #include <QMetaType>
+#include <QMutex>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -177,10 +179,12 @@ class LocalFileOperationWorker final : public QObject
     void execute(rfm::core::LocalFileOperationRequest request);
 
   signals:
+    void started(quint64 operationId);
     void finished(rfm::core::LocalFileOperationResult result);
 
   private:
-    std::atomic<quint64> m_cancelledOperationId{0};
+    mutable QMutex m_cancellationMutex;
+    QSet<quint64> m_cancelledOperationIds;
 };
 
 } // namespace rfm::core
