@@ -427,9 +427,13 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     QVERIFY(!displayedType(properties).isEmpty());
     QVERIFY(displayedType(properties) != QStringLiteral("File"));
     QVERIFY(properties.text.contains(QStringLiteral("Extension: mkv")));
-    QVERIFY(properties.text.contains(QStringLiteral("Size: 2.00 KiB")));
+
+    const QString expectedSize = QLocale{}.formattedDataSize(2048);
+    QVERIFY(properties.text.contains(QStringLiteral("Size: %1").arg(expectedSize)));
+
     QVERIFY(properties.text.contains(
         QDir(temporary.path()).filePath(QStringLiteral("Avatar.hevc.mkv"))));
+
     QVERIFY(!properties.text.contains(QStringLiteral("first.txt")));
 
     QStringList localTypes;
