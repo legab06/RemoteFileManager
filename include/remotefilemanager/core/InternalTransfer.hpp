@@ -1,5 +1,6 @@
 #pragma once
 
+#include "remotefilemanager/core/BrowserLocation.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 
 #include <QByteArray>
@@ -13,7 +14,7 @@ namespace rfm::core
 {
 
 inline constexpr auto InternalTransferMimeType =
-    "application/x-remotefilemanager-internal-transfer-v1";
+    "application/x-remotefilemanager-internal-transfer-v2";
 
 enum class InternalTransferAction { Copy, Move };
 
@@ -27,6 +28,8 @@ struct RemoteConnectionIdentity {
 };
 
 struct InternalTransferPayload {
+    FileSource source{FileSource::None};
+    QString sourceMachineId;
     QString applicationInstanceId;
     RemoteConnectionIdentity connection;
     quint64 sourcePaneId{0};
@@ -60,7 +63,9 @@ class InternalClipboard final
 enum class InternalTransferValidationError {
     None,
     InvalidPayload,
+    InvalidSource,
     ForeignApplication,
+    IncompatibleSource,
     IncompatibleConnection,
     InvalidDestination,
     IncompatiblePathConvention,
@@ -71,18 +76,15 @@ enum class InternalTransferValidationError {
 struct InternalTransferValidation {
     InternalTransferValidationError error{InternalTransferValidationError::None};
 
-    [[nodiscard]] bool accepted() const
-    {
-        return error == InternalTransferValidationError::None;
-    }
+    [[nodiscard]] bool accepted() const { return error == InternalTransferValidationError::None; }
 };
 
 [[nodiscard]] QByteArray encodeInternalTransfer(const InternalTransferPayload& payload);
-[[nodiscard]] std::optional<InternalTransferPayload>
-decodeInternalTransfer(const QByteArray& data);
-[[nodiscard]] InternalTransferValidation validateInternalTransfer(
-    const InternalTransferPayload& payload, const QString& applicationInstanceId,
-    const RemoteConnectionIdentity& destinationConnection, const QString& destinationDirectory);
+[[nodiscard]] std::optional<InternalTransferPayload> decodeInternalTransfer(const QByteArray& data);
+[[nodiscard]] InternalTransferValidation
+validateInternalTransfer(const InternalTransferPayload& payload,
+                         const QString& applicationInstanceId, const BrowserLocation& destination,
+                         const RemoteConnectionIdentity& destinationConnection = {});
 
 } // namespace rfm::core
 

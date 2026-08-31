@@ -82,6 +82,24 @@ ni requête SFTP. Le type utilisateur d'un fichier est déduit uniquement de son
 avec la base MIME Qt en mode extension ; un type absent ou technique retombe sur
 `File`.
 
+## Transferts internes
+
+`InternalTransferPayload` est commun au clipboard logique et au Drag & Drop. Son
+schéma MIME v2 distingue explicitement `Local` et `Ssh`, porte l'identité de la
+machine source et n'ajoute une `RemoteConnectionIdentity` que pour SSH. Un payload
+local utilise `LocalMachineId` ; aucune fausse connexion SSH n'est construite. Le
+décodage est strict et refuse les versions, champs ou combinaisons d'identité non
+reconnus.
+
+`FileBrowserPane` fige la sélection multiple au démarrage du drag, résout la cible
+avec `QDir` pour un emplacement local et `RemotePath` pour SSH, puis émet uniquement
+une intention. La validation refuse les transferts Local ↔ SSH. Un drop Local → Local
+lance exclusivement une copie par le pipeline `LocalFileOperationWorker` existant ;
+ses collisions, sa progression, son annulation et ses erreurs rejoignent donc la même
+entrée Operations que Copy, Copy to, Copy to other pane et Paste. Le moteur local
+reste l'autorité finale pour les alias, liens, mountpoints et récursions. Le DnD
+SSH → SSH conserve son choix explicite Copy/Move/Cancel et son moteur distant.
+
 ## Opérations distantes
 
 - Remote Copy et Remote Move partagent une voie FIFO du `TransferCoordinator`. Une requête queued peut

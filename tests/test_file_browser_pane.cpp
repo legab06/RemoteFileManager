@@ -6,6 +6,7 @@
 #include <QDragEnterEvent>
 #include <QDir>
 #include <QDropEvent>
+#include <QFile>
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QLocale>
@@ -44,6 +45,8 @@ class FileBrowserPaneTest final : public QObject
     void workspaceHistoriesAreIndependent();
     void constructsAndAcceptsOnlyInternalDragPayloads();
     void resolvesDropOnCurrentDirectoryAndSubfolder();
+    void constructsLocalPayloadAndResolvesLocalDropDestinations();
+    void rejectsCrossSourceDropsWithInvalidFeedback();
     void cutAppearanceSurvivesRefreshAndClearsCleanly();
     void focusesLocationAndSwitchesVisiblePane();
     void navigatesLocalDirectoriesWithSourceAwareHistory();
@@ -69,7 +72,17 @@ void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
                        {{QStringLiteral("child"), 0, {}, true, false}},
                        rfm::app::PaneNavigation::Initial);
     QCOMPARE(pane.source(), rfm::core::FileSource::Local);
+    QVERIFY(pane.fileTable()->dragEnabled());
+    QVERIFY(pane.fileTable()->acceptDrops());
     QVERIFY(pane.createInternalDragData().isEmpty());
+
+    pane.setTransferContext(QStringLiteral("instance"), {}, 5);
+    pane.fileTable()->selectRow(0);
+    const auto localPayload = rfm::core::decodeInternalTransfer(pane.createInternalDragData());
+    QVERIFY(localPayload.has_value());
+    QCOMPARE(localPayload->source, rfm::core::FileSource::Local);
+    QCOMPARE(localPayload->sourceMachineId, QString::fromLatin1(rfm::core::LocalMachineId));
+    QCOMPARE(localPayload->connection, rfm::core::RemoteConnectionIdentity{});
 
     pane.navigateTo(childLocation.path);
     QCOMPARE(navigation.size(), 1);
@@ -150,8 +163,8 @@ void FileBrowserPaneTest::rubberBandSelectsMultipleLocalRows()
     QTableWidget* const table = pane.fileTable();
     QCOMPARE(table->selectionMode(), QAbstractItemView::ExtendedSelection);
     QCOMPARE(table->selectionBehavior(), QAbstractItemView::SelectRows);
-    QVERIFY(!table->dragEnabled());
-    QVERIFY(!table->acceptDrops());
+    QVERIFY(table->dragEnabled());
+    QVERIFY(table->acceptDrops());
     table->selectionModel()->select(table->model()->index(0, 0),
                                     QItemSelectionModel::Select | QItemSelectionModel::Rows);
     table->selectionModel()->select(table->model()->index(1, 0),
@@ -747,6 +760,8 @@ void FileBrowserPaneTest::constructsAndAcceptsOnlyInternalDragPayloads()
     const QByteArray data = pane.createInternalDragData();
     const auto decoded = rfm::core::decodeInternalTransfer(data);
     QVERIFY(decoded.has_value());
+    QCOMPARE(decoded->source, rfm::core::FileSource::Ssh);
+    QCOMPARE(decoded->sourceMachineId, QStringLiteral("ssh"));
     QCOMPARE(decoded->sourcePaneId, quint64{9});
     QCOMPARE(decoded->sources.size(), 2);
 
@@ -789,12 +804,26 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
                                Qt::NoModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &childEnter);
     QVERIFY(childEnter.isAccepted());
+    QCOMPARE(destination.fileTable()->property("dropState").toString(), QStringLiteral("valid"));
     QDropEvent childDrop(QPointF(childPosition), Qt::CopyAction, &mime, Qt::LeftButton,
                          Qt::NoModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &childDrop);
     QVERIFY(childDrop.isAccepted());
+    QCOMPARE(destination.fileTable()->property("dropState").toString(), QStringLiteral("none"));
     QCOMPARE(drops.size(), 1);
     QCOMPARE(drops.takeFirst().at(1).toString(), QStringLiteral("/target/child"));
+
+    const QPoint filePosition =
+        destination.fileTable()->visualItemRect(destination.fileTable()->item(1, 0)).center();
+    QDragEnterEvent fileEnter(filePosition, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(destination.fileTable()->viewport(), &fileEnter);
+    QVERIFY(fileEnter.isAccepted());
+    QDropEvent fileDrop(QPointF(filePosition), Qt::CopyAction, &mime, Qt::LeftButton,
+                        Qt::NoModifier);
+    QApplication::sendEvent(destination.fileTable()->viewport(), &fileDrop);
+    QVERIFY(fileDrop.isAccepted());
+    QCOMPARE(drops.size(), 1);
+    QCOMPARE(drops.takeFirst().at(1).toString(), QStringLiteral("/target"));
 
     const QPoint emptyPosition(10, destination.fileTable()->viewport()->height() - 2);
     QDragEnterEvent emptyEnter(emptyPosition, Qt::CopyAction, &mime, Qt::LeftButton,
@@ -809,11 +838,142 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QCOMPARE(drops.takeFirst().at(1).toString(), QStringLiteral("/target"));
 }
 
+void FileBrowserPaneTest::constructsLocalPayloadAndResolvesLocalDropDestinations()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir root(temporary.path());
+    QVERIFY(root.mkdir(QStringLiteral("source")));
+    QVERIFY(root.mkpath(QStringLiteral("target/child")));
+    QFile sourceFile(root.filePath(QStringLiteral("source/a.txt")));
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    sourceFile.close();
+    QVERIFY(QDir(root.filePath(QStringLiteral("source"))).mkdir(QStringLiteral("folder")));
+    QFile targetFile(root.filePath(QStringLiteral("target/plain.txt")));
+    QVERIFY(targetFile.open(QIODevice::WriteOnly));
+    targetFile.close();
+
+    const auto localLocation = [](const QString& path) {
+        return rfm::core::BrowserLocation{rfm::core::FileSource::Local,
+                                          QString::fromLatin1(rfm::core::LocalMachineId), path};
+    };
+    rfm::app::FileBrowserPane source;
+    source.setTransferContext(QStringLiteral("instance"), {}, 1);
+    source.showDirectory(localLocation(root.filePath(QStringLiteral("source"))),
+                         QStringLiteral("source"),
+                         {{QStringLiteral("a.txt"), 1, {}, false, false},
+                          {QStringLiteral("folder"), 0, {}, true, false}});
+    QVERIFY(source.fileTable()->dragEnabled());
+    source.fileTable()->selectAll();
+    const QByteArray data = source.createInternalDragData();
+    const auto decoded = rfm::core::decodeInternalTransfer(data);
+    QVERIFY(decoded.has_value());
+    QCOMPARE(decoded->source, rfm::core::FileSource::Local);
+    QCOMPARE(decoded->sources.size(), 2);
+    QCOMPARE(decoded->sources.at(0).path, sourceFile.fileName());
+    QCOMPARE(decoded->sources.at(1).path, root.filePath(QStringLiteral("source/folder")));
+
+    rfm::app::FileBrowserPane destination;
+    destination.resize(640, 320);
+    destination.show();
+    destination.setTransferContext(QStringLiteral("instance"), {}, 2);
+    destination.showDirectory(localLocation(root.filePath(QStringLiteral("target"))),
+                              QStringLiteral("target"),
+                              {{QStringLiteral("child"), 0, {}, true, false},
+                               {QStringLiteral("plain.txt"), 1, {}, false, false}});
+    QApplication::processEvents();
+    QVERIFY(destination.fileTable()->dragEnabled());
+    QVERIFY(destination.fileTable()->acceptDrops());
+
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, data);
+    QSignalSpy drops(&destination, &rfm::app::FileBrowserPane::internalDropRequested);
+    const auto sendDrop = [&destination, &mime, &drops](const QPoint& position,
+                                                        const QString& expected) {
+        QDragEnterEvent enter(position, Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(destination.fileTable()->viewport(), &enter);
+        QVERIFY(enter.isAccepted());
+        QCOMPARE(destination.fileTable()->property("dropState").toString(),
+                 QStringLiteral("valid"));
+        QDropEvent drop(QPointF(position), Qt::CopyAction, &mime, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(destination.fileTable()->viewport(), &drop);
+        QVERIFY(drop.isAccepted());
+        QCOMPARE(drops.size(), 1);
+        QCOMPARE(drops.takeFirst().at(1).toString(), expected);
+    };
+
+    const QPoint childPosition =
+        destination.fileTable()->visualItemRect(destination.fileTable()->item(0, 0)).center();
+    sendDrop(childPosition, root.filePath(QStringLiteral("target/child")));
+    const QPoint filePosition =
+        destination.fileTable()->visualItemRect(destination.fileTable()->item(1, 0)).center();
+    sendDrop(filePosition, root.filePath(QStringLiteral("target")));
+    const QPoint backgroundPosition(10, destination.fileTable()->viewport()->height() - 2);
+    QVERIFY(!destination.fileTable()->indexAt(backgroundPosition).isValid());
+    sendDrop(backgroundPosition, root.filePath(QStringLiteral("target")));
+}
+
+void FileBrowserPaneTest::rejectsCrossSourceDropsWithInvalidFeedback()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir root(temporary.path());
+    QVERIFY(root.mkdir(QStringLiteral("source")));
+    QVERIFY(root.mkdir(QStringLiteral("target")));
+    QFile sourceFile(root.filePath(QStringLiteral("source/a.txt")));
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    sourceFile.close();
+
+    rfm::app::FileBrowserPane local;
+    local.setTransferContext(QStringLiteral("instance"), {}, 1);
+    local.showDirectory({rfm::core::FileSource::Local,
+                         QString::fromLatin1(rfm::core::LocalMachineId),
+                         root.filePath(QStringLiteral("source"))},
+                        QStringLiteral("source"), {{QStringLiteral("a.txt"), 1, {}, false, false}});
+    local.fileTable()->selectRow(0);
+    const QByteArray localData = local.createInternalDragData();
+
+    const rfm::core::RemoteConnectionIdentity connection{QStringLiteral("server.example.test"), 22,
+                                                         4};
+    rfm::app::FileBrowserPane ssh;
+    ssh.resize(640, 320);
+    ssh.show();
+    ssh.setTransferContext(QStringLiteral("instance"), connection, 2);
+    ssh.showDirectory(QStringLiteral("/target"), QStringLiteral("/target"), {});
+    QApplication::processEvents();
+
+    QMimeData localMime;
+    localMime.setData(rfm::core::InternalTransferMimeType, localData);
+    const QPoint background(10, ssh.fileTable()->viewport()->height() - 2);
+    QDragEnterEvent localToSsh(background, Qt::CopyAction, &localMime, Qt::LeftButton,
+                               Qt::NoModifier);
+    QApplication::sendEvent(ssh.fileTable()->viewport(), &localToSsh);
+    QVERIFY(localToSsh.isAccepted());
+    QCOMPARE(localToSsh.dropAction(), Qt::IgnoreAction);
+    QCOMPARE(ssh.fileTable()->property("dropState").toString(), QStringLiteral("invalid"));
+
+    ssh.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"),
+                      {{QStringLiteral("remote.txt"), 1, {}, false, false}});
+    ssh.fileTable()->selectRow(0);
+    const QByteArray sshData = ssh.createInternalDragData();
+    local.showDirectory({rfm::core::FileSource::Local,
+                         QString::fromLatin1(rfm::core::LocalMachineId),
+                         root.filePath(QStringLiteral("target"))},
+                        QStringLiteral("target"), {});
+    QMimeData sshMime;
+    sshMime.setData(rfm::core::InternalTransferMimeType, sshData);
+    QDragEnterEvent sshToLocal(background, Qt::CopyAction, &sshMime, Qt::LeftButton,
+                               Qt::NoModifier);
+    QApplication::sendEvent(local.fileTable()->viewport(), &sshToLocal);
+    QVERIFY(sshToLocal.isAccepted());
+    QCOMPARE(sshToLocal.dropAction(), Qt::IgnoreAction);
+    QCOMPARE(local.fileTable()->property("dropState").toString(), QStringLiteral("invalid"));
+}
+
 void FileBrowserPaneTest::cutAppearanceSurvivesRefreshAndClearsCleanly()
 {
     rfm::app::FileBrowserPane pane;
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("file.txt"), 1, {}, false, false}};
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("file.txt"), 1, {}, false, false}};
     pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
     pane.setCutPaths({QStringLiteral("/srv/file.txt")});
     QVERIFY(pane.fileTable()->item(0, 0)->font().italic());

@@ -449,11 +449,15 @@ bool FileBrowserPane::canGoForward() const { return !m_forwardHistory.isEmpty();
 
 QByteArray FileBrowserPane::createInternalDragData() const
 {
-    if (m_currentLocation.source != rfm::core::FileSource::Ssh) {
+    if (m_currentLocation.source == rfm::core::FileSource::None) {
         return {};
     }
-    return rfm::core::encodeInternalTransfer(
-        {m_applicationInstanceId, m_connectionIdentity, m_paneId, selectedEntries()});
+    return rfm::core::encodeInternalTransfer({m_currentLocation.source, m_currentLocation.machineId,
+                                              m_applicationInstanceId,
+                                              m_currentLocation.source == rfm::core::FileSource::Ssh
+                                                  ? m_connectionIdentity
+                                                  : rfm::core::RemoteConnectionIdentity{},
+                                              m_paneId, selectedEntries()});
 }
 
 std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() const
@@ -639,9 +643,10 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     }
     m_currentLocation = normalizedLocation;
     m_contextMenuRow = -1;
-    m_fileTable->setDragEnabled(m_currentLocation.source == rfm::core::FileSource::Ssh);
-    m_fileTable->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
-    m_fileTable->viewport()->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
+    const bool internalTransferEnabled = m_currentLocation.source != rfm::core::FileSource::None;
+    m_fileTable->setDragEnabled(internalTransferEnabled);
+    m_fileTable->setAcceptDrops(internalTransferEnabled);
+    m_fileTable->viewport()->setAcceptDrops(internalTransferEnabled);
     m_fileTable->setRowCount(static_cast<int>(entries.size()));
     QFileIconProvider icons;
     for (qsizetype row = 0; row < entries.size(); ++row) {
@@ -911,11 +916,17 @@ void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
     painter.setPen(Qt::NoPen);
     painter.drawRoundedRect(pixmap.rect().adjusted(0, 0, -1, -1), 5, 5);
     painter.setPen(palette().color(QPalette::HighlightedText));
-    painter.drawText(pixmap.rect(), Qt::AlignCenter,
-                     tr("%1 remote item(s)").arg(selectedEntries().size()));
+    const QString itemKind = m_currentLocation.source == rfm::core::FileSource::Local
+                                 ? tr("%1 local item(s)")
+                                 : tr("%1 remote item(s)");
+    painter.drawText(pixmap.rect(), Qt::AlignCenter, itemKind.arg(selectedEntries().size()));
     drag.setPixmap(pixmap);
     drag.setHotSpot(QPoint(12, 12));
-    drag.exec(supportedActions & (Qt::CopyAction | Qt::MoveAction), Qt::CopyAction);
+    const Qt::DropActions allowedActions =
+        m_currentLocation.source == rfm::core::FileSource::Local
+            ? Qt::CopyAction
+            : supportedActions & (Qt::CopyAction | Qt::MoveAction);
+    drag.exec(allowedActions, Qt::CopyAction);
 }
 
 QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRow) const
@@ -934,7 +945,9 @@ QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRo
     if (folderRow != nullptr) {
         *folderRow = hit->row();
     }
-    return rfm::core::RemotePath::join(m_currentLocation.path, name->text());
+    return m_currentLocation.source == rfm::core::FileSource::Local
+               ? QDir(m_currentLocation.path).filePath(name->text())
+               : rfm::core::RemotePath::join(m_currentLocation.path, name->text());
 }
 
 QString FileBrowserPane::normalizedPath(const rfm::core::BrowserLocation& location) const
@@ -958,8 +971,10 @@ rfm::core::InternalTransferValidation
 FileBrowserPane::validateDrop(const rfm::core::InternalTransferPayload& payload,
                               const QString& destination) const
 {
+    rfm::core::BrowserLocation destinationLocation = m_currentLocation;
+    destinationLocation.path = destination;
     return rfm::core::validateInternalTransfer(payload, m_applicationInstanceId,
-                                               m_connectionIdentity, destination);
+                                               destinationLocation, m_connectionIdentity);
 }
 
 void FileBrowserPane::updateDropAppearance(bool active, bool valid, int folderRow)

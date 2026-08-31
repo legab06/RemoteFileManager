@@ -598,7 +598,9 @@ void MainWindow::createPaneWorkspace()
                 }
                 connectBrowserPane(paneId);
                 FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
-                if (m_connected && pane->source() == rfm::core::FileSource::Ssh) {
+                if (pane->source() == rfm::core::FileSource::Local) {
+                    pane->setTransferContext(m_applicationInstanceId, {}, paneId);
+                } else if (m_connected && pane->source() == rfm::core::FileSource::Ssh) {
                     pane->setTransferContext(m_applicationInstanceId, currentConnectionIdentity(),
                                              paneId);
                 }
@@ -623,6 +625,7 @@ void MainWindow::connectBrowserPane(quint64 paneId)
                 requestLocationListing(paneId, location, true, navigation);
             });
     connect(pane, &FileBrowserPane::historyChanged, this, [this, paneId, pane] {
+        updatePaneTransferContexts();
         if (pane == m_paneWorkspace->activePane()) {
             updateNavigationActions();
         }
@@ -1810,9 +1813,7 @@ void MainWindow::copySelectionToClipboard()
     }
     const quint64 paneId = m_paneWorkspace->paneId(pane);
     m_internalClipboard.set(rfm::core::InternalTransferAction::Copy,
-                            pane->source() == rfm::core::FileSource::Local
-                                ? rfm::core::InternalTransferPayload{{}, {}, paneId, selection}
-                                : transferPayload(paneId, selection));
+                            transferPayload(paneId, selection));
     updateCutAppearance();
     updateOperationActions();
     statusBar()->showMessage(tr("%1 item(s) copied").arg(selection.size()), 3000);
@@ -1827,9 +1828,7 @@ void MainWindow::cutSelectionToClipboard()
     }
     const quint64 paneId = m_paneWorkspace->paneId(pane);
     m_internalClipboard.set(rfm::core::InternalTransferAction::Move,
-                            pane->source() == rfm::core::FileSource::Local
-                                ? rfm::core::InternalTransferPayload{{}, {}, paneId, selection}
-                                : transferPayload(paneId, selection));
+                            transferPayload(paneId, selection));
     updateCutAppearance();
     updateOperationActions();
     statusBar()->showMessage(tr("%1 item(s) ready to move").arg(selection.size()), 3000);
@@ -1843,17 +1842,29 @@ void MainWindow::pasteClipboard()
     const rfm::core::ClipboardEntry entry = *m_internalClipboard.content();
     FileBrowserPane* const destinationPane = m_paneWorkspace->activePane();
     const quint64 destinationPaneId = m_paneWorkspace->paneId(destinationPane);
-    if (destinationPane->source() == rfm::core::FileSource::Local &&
-        entry.payload.connection == rfm::core::RemoteConnectionIdentity{} &&
-        m_paneWorkspace->pane(entry.payload.sourcePaneId) != nullptr &&
-        m_paneWorkspace->pane(entry.payload.sourcePaneId)->source() ==
-            rfm::core::FileSource::Local) {
-        const QString sourceDirectory =
-            QFileInfo(entry.payload.sources.constFirst().path).absolutePath();
+    const rfm::core::InternalTransferValidation validation = rfm::core::validateInternalTransfer(
+        entry.payload, m_applicationInstanceId, destinationPane->currentLocation(),
+        destinationPane->source() == rfm::core::FileSource::Ssh
+            ? currentConnectionIdentity()
+            : rfm::core::RemoteConnectionIdentity{});
+    FileBrowserPane* const sourcePane = m_paneWorkspace->pane(entry.payload.sourcePaneId);
+    const bool panesMatchPayload =
+        sourcePane != nullptr && sourcePane->source() == entry.payload.source &&
+        sourcePane->currentLocation().machineId == entry.payload.sourceMachineId;
+    if (!validation.accepted() || !panesMatchPayload) {
+        statusBar()->showMessage(transferValidationMessage(
+                                     !panesMatchPayload
+                                         ? rfm::core::InternalTransferValidationError::InvalidSource
+                                         : validation.error),
+                                 8000);
+        return;
+    }
+    if (entry.payload.source == rfm::core::FileSource::Local) {
         startLocalOperation(entry.action == rfm::core::InternalTransferAction::Move
                                 ? rfm::core::LocalFileOperationKind::Move
                                 : rfm::core::LocalFileOperationKind::Copy,
-                            entry.payload.sourcePaneId, destinationPaneId, sourceDirectory,
+                            entry.payload.sourcePaneId, destinationPaneId,
+                            QFileInfo(entry.payload.sources.constFirst().path).absolutePath(),
                             destinationPane->currentPath(), entry.payload.sources,
                             rfm::core::LocalCollisionPolicy::Fail,
                             entry.action == rfm::core::InternalTransferAction::Move
@@ -1941,21 +1952,44 @@ void MainWindow::focusActiveLocation()
 void MainWindow::handleInternalDrop(rfm::core::InternalTransferPayload payload,
                                     quint64 destinationPaneId, QString destinationDirectory)
 {
-    const rfm::core::InternalTransferValidation validation = rfm::core::validateInternalTransfer(
-        payload, m_applicationInstanceId, currentConnectionIdentity(), destinationDirectory);
     FileBrowserPane* const destinationPane = m_paneWorkspace->pane(destinationPaneId);
-    if (!validation.accepted() || destinationPane == nullptr || destinationPane->isHidden()) {
-        const QString message = transferValidationMessage(
-            validation.accepted() ? rfm::core::InternalTransferValidationError::InvalidDestination
-                                  : validation.error);
-        statusBar()->showMessage(message, 8000);
+    FileBrowserPane* const sourcePane = m_paneWorkspace->pane(payload.sourcePaneId);
+    rfm::core::BrowserLocation destinationLocation = destinationPane == nullptr
+                                                         ? rfm::core::BrowserLocation{}
+                                                         : destinationPane->currentLocation();
+    destinationLocation.path = std::move(destinationDirectory);
+    const rfm::core::RemoteConnectionIdentity destinationConnection =
+        destinationLocation.source == rfm::core::FileSource::Ssh
+            ? currentConnectionIdentity()
+            : rfm::core::RemoteConnectionIdentity{};
+    const rfm::core::InternalTransferValidation validation = rfm::core::validateInternalTransfer(
+        payload, m_applicationInstanceId, destinationLocation, destinationConnection);
+    const bool panesMatchPayload =
+        sourcePane != nullptr && sourcePane->source() == payload.source &&
+        sourcePane->currentLocation().machineId == payload.sourceMachineId;
+    if (!validation.accepted() || !panesMatchPayload || destinationPane == nullptr ||
+        destinationPane->isHidden()) {
+        rfm::core::InternalTransferValidationError error = validation.error;
+        if (validation.accepted()) {
+            error = !panesMatchPayload
+                        ? rfm::core::InternalTransferValidationError::InvalidSource
+                        : rfm::core::InternalTransferValidationError::InvalidDestination;
+        }
+        statusBar()->showMessage(transferValidationMessage(error), 8000);
+        return;
+    }
+
+    if (payload.source == rfm::core::FileSource::Local) {
+        startLocalOperation(rfm::core::LocalFileOperationKind::Copy, payload.sourcePaneId,
+                            destinationPaneId, sourcePane->currentPath(), destinationLocation.path,
+                            payload.sources);
         return;
     }
 
     QMessageBox choice(QMessageBox::Question, tr("Remote file operation"),
                        tr("%1 remote item(s)\nDestination: %2")
                            .arg(payload.sources.size())
-                           .arg(destinationDirectory),
+                           .arg(destinationLocation.path),
                        QMessageBox::NoButton, this);
     QPushButton* const copyButton = choice.addButton(tr("Copy"), QMessageBox::AcceptRole);
     copyButton->setObjectName(QStringLiteral("dropCopyButton"));
@@ -1967,10 +2001,10 @@ void MainWindow::handleInternalDrop(rfm::core::InternalTransferPayload payload,
     choice.exec();
     if (choice.clickedButton() == copyButton) {
         startRemoteTransfer(rfm::core::InternalTransferAction::Copy, payload, destinationPaneId,
-                            destinationDirectory);
+                            destinationLocation.path);
     } else if (choice.clickedButton() == moveButton) {
         startRemoteTransfer(rfm::core::InternalTransferAction::Move, payload, destinationPaneId,
-                            destinationDirectory);
+                            destinationLocation.path);
     }
 }
 
@@ -2493,7 +2527,18 @@ rfm::core::RemoteConnectionIdentity MainWindow::currentConnectionIdentity() cons
 rfm::core::InternalTransferPayload
 MainWindow::transferPayload(quint64 paneId, const QList<rfm::core::RemoteSelection>& sources) const
 {
-    return {m_applicationInstanceId, currentConnectionIdentity(), paneId, sources};
+    const FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+    if (pane == nullptr) {
+        return {};
+    }
+    const rfm::core::BrowserLocation location = pane->currentLocation();
+    return {location.source,
+            location.machineId,
+            m_applicationInstanceId,
+            location.source == rfm::core::FileSource::Ssh ? currentConnectionIdentity()
+                                                          : rfm::core::RemoteConnectionIdentity{},
+            paneId,
+            sources};
 }
 
 bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
@@ -2501,8 +2546,10 @@ bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
                                      quint64 destinationPaneId, const QString& destinationDirectory,
                                      bool clipboardMove)
 {
+    const rfm::core::BrowserLocation destinationLocation{
+        rfm::core::FileSource::Ssh, payload.sourceMachineId, destinationDirectory};
     const rfm::core::InternalTransferValidation validation = rfm::core::validateInternalTransfer(
-        payload, m_applicationInstanceId, currentConnectionIdentity(), destinationDirectory);
+        payload, m_applicationInstanceId, destinationLocation, currentConnectionIdentity());
     FileBrowserPane* const sourcePane = m_paneWorkspace->pane(payload.sourcePaneId);
     FileBrowserPane* const destinationPane =
         destinationPaneId == 0 ? nullptr : m_paneWorkspace->pane(destinationPaneId);
@@ -2552,10 +2599,14 @@ MainWindow::transferValidationMessage(rfm::core::InternalTransferValidationError
     case Error::ForeignApplication:
     case Error::InvalidPayload:
         return tr("Only internal RemoteFileManager drags are accepted.");
+    case Error::InvalidSource:
+        return tr("The source selection is no longer valid.");
+    case Error::IncompatibleSource:
+        return tr("The source and destination locations are incompatible.");
     case Error::IncompatibleConnection:
         return tr("The source belongs to a different or expired server session.");
     case Error::InvalidDestination:
-        return tr("The remote destination is invalid.");
+        return tr("The destination folder is invalid.");
     case Error::IncompatiblePathConvention:
         return tr("Source and destination use incompatible remote path conventions.");
     case Error::IdenticalSourceAndDestination:
@@ -2565,7 +2616,7 @@ MainWindow::transferValidationMessage(rfm::core::InternalTransferValidationError
     case Error::None:
         return {};
     }
-    return tr("The remote destination is invalid.");
+    return tr("The destination folder is invalid.");
 }
 
 void MainWindow::updatePaneTransferContexts()
@@ -2573,8 +2624,11 @@ void MainWindow::updatePaneTransferContexts()
     const rfm::core::RemoteConnectionIdentity identity = currentConnectionIdentity();
     for (const quint64 paneId : m_paneWorkspace->paneIds()) {
         FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
-        if (identity.isValid() && pane->source() == rfm::core::FileSource::Ssh &&
-            pane->currentLocation().machineId == activeRemoteMachineId()) {
+        if (pane->source() == rfm::core::FileSource::Local &&
+            pane->currentLocation().machineId == QString::fromLatin1(rfm::core::LocalMachineId)) {
+            pane->setTransferContext(m_applicationInstanceId, {}, paneId);
+        } else if (identity.isValid() && pane->source() == rfm::core::FileSource::Ssh &&
+                   pane->currentLocation().machineId == activeRemoteMachineId()) {
             pane->setTransferContext(m_applicationInstanceId, identity, paneId);
         } else {
             pane->clearTransferContext();
@@ -2592,7 +2646,8 @@ void MainWindow::updateCutAppearance()
     }
     const rfm::core::InternalTransferPayload& payload = m_internalClipboard.content()->payload;
     FileBrowserPane* const sourcePane = m_paneWorkspace->pane(payload.sourcePaneId);
-    if (sourcePane == nullptr ||
+    if (sourcePane == nullptr || sourcePane->source() != payload.source ||
+        sourcePane->currentLocation().machineId != payload.sourceMachineId ||
         (sourcePane->source() == rfm::core::FileSource::Ssh &&
          payload.connection != currentConnectionIdentity()) ||
         sourcePane->source() == rfm::core::FileSource::None) {
@@ -2770,7 +2825,7 @@ void MainWindow::handleLocalDirectoryListed(quint64 requestId, const QString& pa
                                               QString::fromLatin1(rfm::core::LocalMachineId), path};
     pane->showDirectory(location, QUrl::fromLocalFile(path).toDisplayString(), entries,
                         request.navigation);
-    pane->clearTransferContext();
+    pane->setTransferContext(m_applicationInstanceId, {}, request.paneId);
     setPaneBusy(request.paneId, false);
     m_centralStack->setCurrentWidget(m_paneWorkspace);
     updateNavigationActions();
@@ -3277,18 +3332,21 @@ void MainWindow::updateOperationActions()
     bool pasteAvailable = false;
     if (m_internalClipboard.content().has_value()) {
         const auto& clipboard = *m_internalClipboard.content();
-        if (remoteOperationAvailable) {
-            pasteAvailable = rfm::core::validateInternalTransfer(
-                                 clipboard.payload, m_applicationInstanceId,
-                                 currentConnectionIdentity(), activePane->currentPath())
-                                 .accepted();
-        } else if (localMutationAvailable &&
-                   clipboard.payload.connection == rfm::core::RemoteConnectionIdentity{}) {
-            const FileBrowserPane* const sourcePane =
-                m_paneWorkspace->pane(clipboard.payload.sourcePaneId);
-            pasteAvailable =
-                sourcePane != nullptr && sourcePane->source() == rfm::core::FileSource::Local;
-        }
+        const FileBrowserPane* const sourcePane =
+            m_paneWorkspace->pane(clipboard.payload.sourcePaneId);
+        const bool panesMatchPayload =
+            sourcePane != nullptr && sourcePane->source() == clipboard.payload.source &&
+            sourcePane->currentLocation().machineId == clipboard.payload.sourceMachineId;
+        const rfm::core::RemoteConnectionIdentity destinationConnection =
+            activePane->source() == rfm::core::FileSource::Ssh
+                ? currentConnectionIdentity()
+                : rfm::core::RemoteConnectionIdentity{};
+        pasteAvailable =
+            (remoteOperationAvailable || localMutationAvailable) && panesMatchPayload &&
+            rfm::core::validateInternalTransfer(clipboard.payload, m_applicationInstanceId,
+                                                activePane->currentLocation(),
+                                                destinationConnection)
+                .accepted();
     }
     m_clipboardPasteAction->setEnabled(pasteAvailable);
     m_selectAllAction->setEnabled(locationAvailable);
