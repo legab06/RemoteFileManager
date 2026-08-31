@@ -10,11 +10,13 @@
 #include <QLineEdit>
 #include <QLocale>
 #include <QMimeData>
+#include <QRubberBand>
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -24,6 +26,9 @@ class FileBrowserPaneTest final : public QObject
 
   private slots:
     void displaysDirectoryAndBuildsRemoteSelection();
+    void rubberBandSelectsMultipleLocalRows();
+    void controlRubberBandTogglesRemoteRows();
+    void dragFromSelectedRowPreservesSelectionAndStartsInternalDrag();
     void emitsNavigationIntentions();
     void preparesContextSelectionBeforeEmittingIntent();
     void buildsPropertiesForTheEntryUnderTheContextClick();
@@ -110,6 +115,7 @@ void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
     QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("file.txt"));
     QCOMPARE(pane.fileTable()->item(0, 1)->text(), QLocale{}.formattedDataSize(1536));
     QCOMPARE(pane.fileTable()->selectionMode(), QAbstractItemView::ExtendedSelection);
+    QCOMPARE(pane.fileTable()->selectionBehavior(), QAbstractItemView::SelectRows);
 
     pane.fileTable()->selectionModel()->select(
         pane.fileTable()->model()->index(0, 0),
@@ -123,6 +129,137 @@ void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
     QVERIFY(!selection.at(0).directory);
     QCOMPARE(selection.at(1).path, QStringLiteral("/srv/folder"));
     QVERIFY(selection.at(1).directory);
+}
+
+void FileBrowserPaneTest::rubberBandSelectsMultipleLocalRows()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 400);
+    pane.show();
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), temporary.path()},
+                       temporary.path(),
+                       {{QStringLiteral("zero.txt"), 1, {}, false, false},
+                        {QStringLiteral("one.txt"), 1, {}, false, false},
+                        {QStringLiteral("two.txt"), 1, {}, false, false},
+                        {QStringLiteral("three.txt"), 1, {}, false, false}});
+    QApplication::processEvents();
+
+    QTableWidget* const table = pane.fileTable();
+    QCOMPARE(table->selectionMode(), QAbstractItemView::ExtendedSelection);
+    QCOMPARE(table->selectionBehavior(), QAbstractItemView::SelectRows);
+    QVERIFY(!table->dragEnabled());
+    QVERIFY(!table->acceptDrops());
+    table->selectionModel()->select(table->model()->index(0, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    table->selectionModel()->select(table->model()->index(1, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    QCOMPARE(pane.selectedEntries().size(), 2);
+
+    const QRect lastRow = table->visualItemRect(table->item(3, 0));
+    const QPoint origin(table->viewport()->width() / 2, lastRow.bottom() + 20);
+    const QPoint destination(origin.x(), table->visualItemRect(table->item(2, 0)).center().y());
+    QVERIFY(table->viewport()->rect().contains(origin));
+    QVERIFY(!table->indexAt(origin).isValid());
+
+    QTest::mousePress(table->viewport(), Qt::LeftButton, Qt::NoModifier, origin);
+    QTest::mouseMove(table->viewport(), destination);
+
+    auto* const rubberBand =
+        table->viewport()->findChild<QRubberBand*>(QStringLiteral("fileSelectionRubberBand"));
+    QVERIFY(rubberBand != nullptr);
+    QVERIFY(rubberBand->isVisible());
+    QTest::mouseRelease(table->viewport(), Qt::LeftButton, Qt::NoModifier, destination);
+    QVERIFY(!rubberBand->isVisible());
+
+    const QList<rfm::core::RemoteSelection> selection = pane.selectedEntries();
+    QCOMPARE(selection.size(), 2);
+    QCOMPARE(selection.at(0).path, QDir(temporary.path()).filePath(QStringLiteral("two.txt")));
+    QCOMPARE(selection.at(1).path, QDir(temporary.path()).filePath(QStringLiteral("three.txt")));
+    QCOMPARE(table->selectionModel()->selectedIndexes().size(),
+             selection.size() * table->columnCount());
+}
+
+void FileBrowserPaneTest::controlRubberBandTogglesRemoteRows()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 400);
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+                       {{QStringLiteral("zero.txt"), 1, {}, false, false},
+                        {QStringLiteral("one.txt"), 1, {}, false, false},
+                        {QStringLiteral("two.txt"), 1, {}, false, false},
+                        {QStringLiteral("three.txt"), 1, {}, false, false}});
+    QApplication::processEvents();
+
+    QTableWidget* const table = pane.fileTable();
+    table->selectionModel()->select(table->model()->index(0, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    table->selectionModel()->select(table->model()->index(2, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    const QRect lastRow = table->visualItemRect(table->item(3, 0));
+    const QPoint origin(table->viewport()->width() / 2, lastRow.bottom() + 20);
+    const QPoint destination(origin.x(), table->visualItemRect(table->item(2, 0)).center().y());
+    QVERIFY(!table->indexAt(origin).isValid());
+
+    QTest::mousePress(table->viewport(), Qt::LeftButton, Qt::ControlModifier, origin);
+    QTest::mouseMove(table->viewport(), destination);
+    QTest::mouseRelease(table->viewport(), Qt::LeftButton, Qt::ControlModifier, destination);
+
+    const QList<rfm::core::RemoteSelection> selection = pane.selectedEntries();
+    QCOMPARE(selection.size(), 2);
+    QCOMPARE(selection.at(0).path, QStringLiteral("/srv/zero.txt"));
+    QCOMPARE(selection.at(1).path, QStringLiteral("/srv/three.txt"));
+    QCOMPARE(table->selectionModel()->selectedIndexes().size(),
+             selection.size() * table->columnCount());
+}
+
+void FileBrowserPaneTest::dragFromSelectedRowPreservesSelectionAndStartsInternalDrag()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 400);
+    pane.show();
+    pane.setTransferContext(QStringLiteral("instance"),
+                            {QStringLiteral("server.example.test"), 22, 4}, 7);
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+                       {{QStringLiteral("zero.txt"), 1, {}, false, false},
+                        {QStringLiteral("one.txt"), 1, {}, false, false},
+                        {QStringLiteral("two.txt"), 1, {}, false, false},
+                        {QStringLiteral("three.txt"), 1, {}, false, false},
+                        {QStringLiteral("four.txt"), 1, {}, false, false}});
+    QApplication::processEvents();
+
+    QTableWidget* const table = pane.fileTable();
+    table->selectionModel()->select(table->model()->index(0, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    table->selectionModel()->select(table->model()->index(2, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    QSignalSpy dragStarts(&pane, &rfm::app::FileBrowserPane::internalDragStarted);
+    const QPoint pressPosition = table->visualItemRect(table->item(2, 0)).center();
+    const QPoint destination = table->visualItemRect(table->item(4, 0)).center();
+    QVERIFY((destination - pressPosition).manhattanLength() >= QApplication::startDragDistance());
+
+    QTest::mousePress(table->viewport(), Qt::LeftButton, Qt::NoModifier, pressPosition);
+    QCOMPARE(pane.selectedEntries().size(), 2);
+    QTimer::singleShot(0, table->viewport(), [table, destination]() {
+        QTest::mouseRelease(table->viewport(), Qt::LeftButton, Qt::NoModifier, destination);
+    });
+    QTest::mouseMove(table->viewport(), destination);
+
+    QCOMPARE(dragStarts.size(), 1);
+    const QList<rfm::core::RemoteSelection> selection = pane.selectedEntries();
+    QCOMPARE(selection.size(), 2);
+    QCOMPARE(selection.at(0).path, QStringLiteral("/srv/zero.txt"));
+    QCOMPARE(selection.at(1).path, QStringLiteral("/srv/two.txt"));
+    auto* const rubberBand =
+        table->viewport()->findChild<QRubberBand*>(QStringLiteral("fileSelectionRubberBand"));
+    QVERIFY(rubberBand == nullptr || !rubberBand->isVisible());
+
+    QTest::mouseClick(table->viewport(), Qt::LeftButton, Qt::NoModifier, pressPosition);
+    QCOMPARE(pane.selectedEntries().size(), 1);
+    QCOMPARE(pane.selectedEntries().constFirst().path, QStringLiteral("/srv/two.txt"));
 }
 
 void FileBrowserPaneTest::emitsNavigationIntentions()
@@ -599,6 +736,12 @@ void FileBrowserPaneTest::constructsAndAcceptsOnlyInternalDragPayloads()
     pane.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"),
                        {{QStringLiteral("a.txt"), 1, {}, false, false},
                         {QStringLiteral("folder"), 0, {}, true, false}});
+    QCOMPARE(pane.fileTable()->selectionMode(), QAbstractItemView::ExtendedSelection);
+    QCOMPARE(pane.fileTable()->selectionBehavior(), QAbstractItemView::SelectRows);
+    QCOMPARE(pane.fileTable()->dragDropMode(), QAbstractItemView::DragDrop);
+    QVERIFY(pane.fileTable()->dragEnabled());
+    QVERIFY(pane.fileTable()->acceptDrops());
+    QVERIFY(pane.fileTable()->viewport()->acceptDrops());
     pane.fileTable()->selectAll();
 
     const QByteArray data = pane.createInternalDragData();

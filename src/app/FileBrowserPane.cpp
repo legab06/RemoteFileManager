@@ -23,12 +23,15 @@
 #include <QMimeDatabase>
 #include <QMimeData>
 #include <QMimeType>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QRubberBand>
 #include <QScrollBar>
 #include <QSizePolicy>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <functional>
@@ -84,7 +87,21 @@ std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
 class InternalDragTable final : public QTableWidget
 {
   public:
-    using QTableWidget::QTableWidget;
+    explicit InternalDragTable(QWidget* parent = nullptr) : QTableWidget(parent)
+    {
+        m_autoScrollTimer.setInterval(50);
+        connect(&m_autoScrollTimer, &QTimer::timeout, this, [this]() {
+            QScrollBar* const scrollBar = verticalScrollBar();
+            const int previousValue = scrollBar->value();
+            scrollBar->setValue(previousValue + m_autoScrollDirection * scrollBar->singleStep());
+            if (scrollBar->value() == previousValue) {
+                m_autoScrollTimer.stop();
+                return;
+            }
+            updateRubberBandSelection(m_lastViewportPosition);
+        });
+    }
+
     std::function<void(Qt::DropActions)> startDragHandler;
 
   protected:
@@ -94,6 +111,256 @@ class InternalDragTable final : public QTableWidget
             startDragHandler(supportedActions);
         }
     }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            QTableWidget::mousePressEvent(event);
+            return;
+        }
+
+        const QModelIndex pressedIndex = indexAt(event->position().toPoint());
+        if (pressedIndex.isValid()) {
+            finishRubberBand();
+            m_itemInteractionActive = true;
+            m_itemDragAttempted = false;
+            m_itemPressViewportPosition = event->position().toPoint();
+            m_itemPressedRow = pressedIndex.row();
+            m_itemInitialSelectedRows = selectedRowSet();
+            m_preserveItemSelectionForDrag =
+                selectionModel()->isSelected(pressedIndex) && m_itemInitialSelectedRows.size() > 1 &&
+                !event->modifiers().testAnyFlags(Qt::ControlModifier | Qt::ShiftModifier);
+            QTableWidget::mousePressEvent(event);
+            if (m_preserveItemSelectionForDrag &&
+                selectedRowSet() != m_itemInitialSelectedRows) {
+                setSelectedRows(m_itemInitialSelectedRows);
+            }
+            return;
+        }
+
+        finishItemInteraction();
+        setFocus(Qt::MouseFocusReason);
+        m_rubberBandPending = true;
+        m_rubberBandActive = false;
+        m_pressViewportPosition = event->position().toPoint();
+        m_originContentPosition = contentPosition(m_pressViewportPosition);
+        m_lastViewportPosition = m_pressViewportPosition;
+        m_controlSelection = event->modifiers().testFlag(Qt::ControlModifier);
+        m_initialSelectedRows.clear();
+        for (const QModelIndex& index : selectionModel()->selectedRows(0)) {
+            m_initialSelectedRows.insert(index.row());
+        }
+        if (!m_controlSelection) {
+            clearSelection();
+        }
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (m_itemInteractionActive) {
+            if (!event->buttons().testFlag(Qt::LeftButton)) {
+                finishItemInteraction();
+                event->accept();
+                return;
+            }
+            const QPoint position = event->position().toPoint();
+            if (!m_itemDragAttempted &&
+                (position - m_itemPressViewportPosition).manhattanLength() >=
+                    QApplication::startDragDistance()) {
+                m_itemDragAttempted = true;
+                setState(QAbstractItemView::DraggingState);
+                if (dragEnabled()) {
+                    startDrag(model()->supportedDragActions());
+                }
+                if (m_itemInteractionActive) {
+                    setState(QAbstractItemView::NoState);
+                }
+            }
+            event->accept();
+            return;
+        }
+
+        if (!m_rubberBandPending) {
+            QTableWidget::mouseMoveEvent(event);
+            return;
+        }
+        if (!event->buttons().testFlag(Qt::LeftButton)) {
+            finishRubberBand();
+            QTableWidget::mouseMoveEvent(event);
+            return;
+        }
+
+        const QPoint position = event->position().toPoint();
+        if (!m_rubberBandActive && (position - m_pressViewportPosition).manhattanLength() <
+                                       QApplication::startDragDistance()) {
+            event->accept();
+            return;
+        }
+
+        if (!m_rubberBandActive) {
+            m_rubberBandActive = true;
+            if (m_rubberBand == nullptr) {
+                m_rubberBand = new QRubberBand(QRubberBand::Rectangle, viewport());
+                m_rubberBand->setObjectName(QStringLiteral("fileSelectionRubberBand"));
+            }
+            m_rubberBand->show();
+        }
+        updateRubberBandSelection(position);
+        updateAutoScroll(position);
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (m_itemInteractionActive && event->button() == Qt::LeftButton) {
+            if (!m_itemDragAttempted) {
+                QTableWidget::mouseReleaseEvent(event);
+                if (m_preserveItemSelectionForDrag && selectedRowSet().size() > 1) {
+                    setSelectedRows({m_itemPressedRow});
+                    setCurrentIndex(model()->index(m_itemPressedRow, 0));
+                }
+            } else {
+                event->accept();
+            }
+            finishItemInteraction();
+            return;
+        }
+        if (m_rubberBandPending && event->button() == Qt::LeftButton) {
+            finishRubberBand();
+            event->accept();
+            return;
+        }
+        QTableWidget::mouseReleaseEvent(event);
+    }
+
+    void focusOutEvent(QFocusEvent* event) override
+    {
+        finishRubberBand();
+        finishItemInteraction();
+        QTableWidget::focusOutEvent(event);
+    }
+
+  private:
+    [[nodiscard]] QSet<int> selectedRowSet() const
+    {
+        QSet<int> rows;
+        for (const QModelIndex& index : selectionModel()->selectedRows(0)) {
+            rows.insert(index.row());
+        }
+        return rows;
+    }
+
+    void setSelectedRows(const QSet<int>& rows)
+    {
+        QItemSelection selection;
+        const int columns = model()->columnCount();
+        for (int row = 0; row < model()->rowCount(); ++row) {
+            if (rows.contains(row)) {
+                selection.select(model()->index(row, 0), model()->index(row, columns - 1));
+            }
+        }
+        selectionModel()->select(selection,
+                                 QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    }
+
+    [[nodiscard]] QPoint contentPosition(const QPoint& viewportPosition) const
+    {
+        const QRect bounds = viewport()->rect();
+        const QPoint boundedPosition{qBound(bounds.left(), viewportPosition.x(), bounds.right()),
+                                     qBound(bounds.top(), viewportPosition.y(), bounds.bottom())};
+        return boundedPosition + QPoint(horizontalOffset(), verticalOffset());
+    }
+
+    void updateRubberBandSelection(const QPoint& viewportPosition)
+    {
+        m_lastViewportPosition = viewportPosition;
+        const QPoint currentContentPosition = contentPosition(viewportPosition);
+        const QRect contentRectangle =
+            QRect(m_originContentPosition, currentContentPosition).normalized();
+        const QRect viewportRectangle =
+            contentRectangle.translated(-horizontalOffset(), -verticalOffset());
+        m_rubberBand->setGeometry(viewportRectangle);
+
+        QSet<int> intersectingRows;
+        const int columns = model()->columnCount();
+        for (int row = 0; row < model()->rowCount(); ++row) {
+            QRect rowRectangle;
+            for (int column = 0; column < columns; ++column) {
+                rowRectangle = rowRectangle.united(visualRect(model()->index(row, column)));
+            }
+            rowRectangle.translate(horizontalOffset(), verticalOffset());
+            if (!rowRectangle.isEmpty() && rowRectangle.intersects(contentRectangle)) {
+                intersectingRows.insert(row);
+            }
+        }
+
+        QSet<int> selectedRows = m_controlSelection ? m_initialSelectedRows : QSet<int>{};
+        for (const int row : std::as_const(intersectingRows)) {
+            if (m_controlSelection && selectedRows.contains(row)) {
+                selectedRows.remove(row);
+            } else {
+                selectedRows.insert(row);
+            }
+        }
+
+        setSelectedRows(selectedRows);
+    }
+
+    void updateAutoScroll(const QPoint& viewportPosition)
+    {
+        constexpr int AutoScrollMargin = 24;
+        if (viewportPosition.y() < AutoScrollMargin) {
+            m_autoScrollDirection = -1;
+        } else if (viewportPosition.y() >= viewport()->height() - AutoScrollMargin) {
+            m_autoScrollDirection = 1;
+        } else {
+            m_autoScrollDirection = 0;
+        }
+        if (m_autoScrollDirection == 0) {
+            m_autoScrollTimer.stop();
+        } else if (!m_autoScrollTimer.isActive()) {
+            m_autoScrollTimer.start();
+        }
+    }
+
+    void finishRubberBand()
+    {
+        m_autoScrollTimer.stop();
+        m_autoScrollDirection = 0;
+        m_rubberBandPending = false;
+        m_rubberBandActive = false;
+        if (m_rubberBand != nullptr) {
+            m_rubberBand->hide();
+        }
+    }
+
+    void finishItemInteraction()
+    {
+        m_itemInteractionActive = false;
+        m_itemDragAttempted = false;
+        m_preserveItemSelectionForDrag = false;
+        m_itemPressedRow = -1;
+        m_itemInitialSelectedRows.clear();
+        setState(QAbstractItemView::NoState);
+    }
+
+    QRubberBand* m_rubberBand{nullptr};
+    QTimer m_autoScrollTimer;
+    QPoint m_pressViewportPosition;
+    QPoint m_originContentPosition;
+    QPoint m_lastViewportPosition;
+    QPoint m_itemPressViewportPosition;
+    QSet<int> m_initialSelectedRows;
+    QSet<int> m_itemInitialSelectedRows;
+    int m_autoScrollDirection{0};
+    int m_itemPressedRow{-1};
+    bool m_rubberBandPending{false};
+    bool m_rubberBandActive{false};
+    bool m_controlSelection{false};
+    bool m_itemInteractionActive{false};
+    bool m_itemDragAttempted{false};
+    bool m_preserveItemSelectionForDrag{false};
 };
 
 } // namespace
@@ -630,6 +897,7 @@ void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
     if (data.isEmpty()) {
         return;
     }
+    emit internalDragStarted();
     auto* const mimeData = new QMimeData;
     mimeData->setData(rfm::core::InternalTransferMimeType, data);
     QDrag drag(m_fileTable);

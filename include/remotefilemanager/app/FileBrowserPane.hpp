@@ -78,6 +78,7 @@ class FileBrowserPane final : public QWidget
     void historyChanged();
     void selectionChanged();
     void contextMenuRequested(QPoint globalPosition);
+    void internalDragStarted();
     void internalDropRequested(rfm::core::InternalTransferPayload payload,
                                QString destinationDirectory);
 
