@@ -489,6 +489,9 @@ class RemoteFileOperationsTest final : public QObject
     void movesSelectionAndReportsPartialFailure();
     void copiesOnServerOrReportsUnsupported();
     void serverSideCopyPollingPreservesSharedSessionBlockingMode();
+    void remoteCopyPathUsesSftpOnly();
+    void remoteCopyStagingCleanupIsSftpBounded();
+    void remoteCopyHandlesSymlinksConservatively();
     void copyStatusProtocolIsDeterministic();
     void copyStatusWrapperForwardsTermination();
     void activeStagingOwnershipIsExactAndTemporary();
@@ -815,6 +818,67 @@ void RemoteFileOperationsTest::serverSideCopyPollingPreservesSharedSessionBlocki
     QVERIFY(implementation.contains("ssh_set_channel_callbacks"));
     QVERIFY(implementation.contains("CommandKind::MoveStagingCopy"));
     QVERIFY(implementation.contains("parseCopyStatus(m_standardOutput)"));
+}
+
+void RemoteFileOperationsTest::remoteCopyPathUsesSftpOnly()
+{
+    QFile source(QStringLiteral(RFM_SOURCE_DIR "/src/ssh/SshSession.cpp"));
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    const QByteArray implementation = source.readAll();
+    const qsizetype start = implementation.indexOf("startCopy(const QString& source");
+    const qsizetype end = implementation.indexOf("reserveStaging", start);
+    QVERIFY(start >= 0);
+    QVERIFY(end > start);
+    const QByteArray copyPath = implementation.sliced(start, end - start);
+
+    QVERIFY(implementation.contains("pollSftpCopy"));
+    QVERIFY(implementation.contains("sftp_open"));
+    QVERIFY(implementation.contains("sftp_read"));
+    QVERIFY(implementation.contains("sftp_write"));
+    QVERIFY(implementation.contains("sftp_mkdir"));
+    QVERIFY(implementation.contains("65'536"));
+    QVERIFY(implementation.contains("m_copyBufferOffset"));
+    QVERIFY(implementation.contains("written > remaining"));
+    QVERIFY(implementation.contains("SSH_FILEXFER_TYPE_DIRECTORY"));
+    QVERIFY(!copyPath.contains("RemoteCopyCommand::build"));
+    QVERIFY(!copyPath.contains("ssh_channel_request_exec"));
+    QVERIFY(!copyPath.contains("cp "));
+    QVERIFY(!copyPath.contains("rm "));
+}
+
+void RemoteFileOperationsTest::remoteCopyStagingCleanupIsSftpBounded()
+{
+    QFile source(QStringLiteral(RFM_SOURCE_DIR "/src/ssh/SshSession.cpp"));
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    const QByteArray implementation = source.readAll();
+    const qsizetype start = implementation.indexOf("startRemove(const QString& path");
+    const qsizetype end = implementation.indexOf("startCommand(const QString& command", start);
+    QVERIFY(start >= 0);
+    QVERIFY(end > start);
+    const QByteArray cleanupPath = implementation.sliced(start, end - start);
+
+    QVERIFY(cleanupPath.contains("startsWith(QStringLiteral(\".rfm-copy-\"))"));
+    QVERIFY(cleanupPath.contains("m_removeRoot"));
+    QVERIFY(implementation.contains("pollSftpRemove"));
+    QVERIFY(implementation.contains("sftp_lstat"));
+    QVERIFY(implementation.contains("sftp_unlink"));
+    QVERIFY(implementation.contains("sftp_rmdir"));
+    QVERIFY(implementation.contains("task.removeDirectory"));
+    QVERIFY(implementation.contains("SSH_FILEXFER_TYPE_SYMLINK"));
+    const qsizetype shellFallback = cleanupPath.indexOf("RemoteCopyCommand::buildRemove");
+    QVERIFY(shellFallback > 0);
+    QVERIFY(!cleanupPath.left(shellFallback).contains("RemoteCopyCommand::buildRemove"));
+}
+
+void RemoteFileOperationsTest::remoteCopyHandlesSymlinksConservatively()
+{
+    QFile source(QStringLiteral(RFM_SOURCE_DIR "/src/ssh/SshSession.cpp"));
+    QVERIFY(source.open(QIODevice::ReadOnly));
+    const QByteArray implementation = source.readAll();
+    QVERIFY(implementation.contains("SSH_FILEXFER_TYPE_SYMLINK"));
+    QVERIFY(implementation.contains("Symbolic links are not supported by remote "));
+    QVERIFY(implementation.contains("SFTP copy."));
+    QVERIFY(implementation.contains("sftp_lstat"));
 }
 
 void RemoteFileOperationsTest::copyStatusProtocolIsDeterministic()
