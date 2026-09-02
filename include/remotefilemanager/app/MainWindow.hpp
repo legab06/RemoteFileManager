@@ -7,6 +7,7 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
+#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
@@ -79,6 +80,8 @@ class MainWindow final : public QMainWindow
     void remoteVolumeAuthenticationCancelled(quint64 operationId, quint64 authenticationToken);
     void remoteStorageRequested(quint64 requestId);
     void remoteStorageProbeRequested(quint64 requestId);
+    void remoteFilesystemRelationRequested(quint64 requestId, QString sourceDirectory,
+                                            QString destinationDirectory);
     void createDirectoryRequested(quint64 id, QString parent, QString name);
     void renameRequested(quint64 id, QString source, QString newName);
     void moveRequested(quint64 id, QList<rfm::core::RemoteSelection> sources,
@@ -151,7 +154,10 @@ class MainWindow final : public QMainWindow
     void focusActiveLocation();
     Q_INVOKABLE void handleInternalDrop(rfm::core::InternalTransferPayload payload,
                                         rfm::core::InternalTransferAction action,
-                                        quint64 destinationPaneId, QString destinationDirectory);
+                                        quint64 destinationPaneId, QString destinationDirectory,
+                                        bool actionWasExplicitlyRequested);
+    Q_INVOKABLE void handleRemoteFilesystemRelation(
+        quint64 requestId, rfm::core::RemoteFilesystemRelation relation);
     void removeSelectedEntries();
     void chooseUploads();
     void chooseDownloadDirectory();
@@ -184,6 +190,10 @@ class MainWindow final : public QMainWindow
                              const rfm::core::InternalTransferPayload& payload,
                              quint64 destinationPaneId, const QString& destinationDirectory,
                              bool clipboardMove = false);
+    void startRemoteFilesystemPreflight(rfm::core::InternalTransferPayload payload,
+                                        quint64 destinationPaneId, QString destinationDirectory);
+    [[nodiscard]] std::optional<rfm::core::InternalTransferAction>
+    chooseCrossFilesystemTransferAction();
     [[nodiscard]] QString
     transferValidationMessage(rfm::core::InternalTransferValidationError error) const;
     void requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
@@ -316,6 +326,13 @@ class MainWindow final : public QMainWindow
     QHash<quint64, DirectoryRequest> m_directoryRequests;
     QQueue<quint64> m_directoryQueue;
     QHash<quint64, quint64> m_expectedDirectoryRequests;
+    struct PendingRemoteFilesystemPreflight {
+        rfm::core::InternalTransferPayload payload;
+        quint64 destinationPaneId{0};
+        QString destinationDirectory;
+        rfm::core::RemoteConnectionIdentity connection;
+    };
+    QHash<quint64, PendingRemoteFilesystemPreflight> m_pendingRemoteFilesystemPreflights;
     QSet<quint64> m_busyPanes;
     struct LocalDirectoryRequest {
         quint64 paneId{0};

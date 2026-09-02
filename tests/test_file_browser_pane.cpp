@@ -865,19 +865,20 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
                                Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &childEnter);
     QVERIFY(childEnter.isAccepted());
-    QCOMPARE(childEnter.dropAction(), Qt::MoveAction);
+    QCOMPARE(childEnter.dropAction(), Qt::CopyAction);
     QCOMPARE(destination.fileTable()->property("dropState").toString(), QStringLiteral("valid"));
     QDropEvent childDrop(QPointF(childPosition), Qt::CopyAction | Qt::MoveAction, &mime,
                          Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &childDrop);
     QVERIFY(childDrop.isAccepted());
-    QCOMPARE(childDrop.dropAction(), Qt::MoveAction);
+    QCOMPARE(childDrop.dropAction(), Qt::CopyAction);
     QCOMPARE(destination.fileTable()->property("dropState").toString(), QStringLiteral("none"));
     QCOMPARE(drops.size(), 1);
     const QList<QVariant> childArguments = drops.takeFirst();
     QCOMPARE(childArguments.at(1).value<rfm::core::InternalTransferAction>(),
-             rfm::core::InternalTransferAction::Move);
+             rfm::core::InternalTransferAction::Copy);
     QCOMPARE(childArguments.at(2).toString(), QStringLiteral("/target/child"));
+    QVERIFY(!childArguments.at(3).toBool());
 
     const QPoint filePosition =
         destination.fileTable()->visualItemRect(destination.fileTable()->item(1, 0)).center();
@@ -896,6 +897,7 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QCOMPARE(fileArguments.at(1).value<rfm::core::InternalTransferAction>(),
              rfm::core::InternalTransferAction::Copy);
     QCOMPARE(fileArguments.at(2).toString(), QStringLiteral("/target"));
+    QVERIFY(fileArguments.at(3).toBool());
 
     const QPoint emptyPosition(10, destination.fileTable()->viewport()->height() - 2);
     QDragEnterEvent shiftedEmptyEnter(emptyPosition, Qt::CopyAction | Qt::MoveAction, &mime,
@@ -913,6 +915,7 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QCOMPARE(emptyArguments.at(1).value<rfm::core::InternalTransferAction>(),
              rfm::core::InternalTransferAction::Move);
     QCOMPARE(emptyArguments.at(2).toString(), QStringLiteral("/target"));
+    QVERIFY(emptyArguments.at(3).toBool());
 
     QDragEnterEvent priorityEnter(emptyPosition, Qt::CopyAction | Qt::MoveAction, &mime,
                                   Qt::LeftButton, Qt::ControlModifier | Qt::ShiftModifier);
@@ -929,6 +932,7 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QCOMPARE(priorityArguments.at(1).value<rfm::core::InternalTransferAction>(),
              rfm::core::InternalTransferAction::Copy);
     QCOMPARE(priorityArguments.at(2).toString(), QStringLiteral("/target"));
+    QVERIFY(priorityArguments.at(3).toBool());
 
     destination.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"), {});
     QDragEnterEvent invalidEnter(emptyPosition, Qt::CopyAction | Qt::MoveAction, &mime,
@@ -1018,11 +1022,13 @@ void FileBrowserPaneTest::constructsLocalPayloadAndResolvesLocalDropDestinations
         const QList<QVariant> arguments = drops.takeFirst();
         QCOMPARE(arguments.at(1).value<rfm::core::InternalTransferAction>(), expectedAction);
         QCOMPARE(arguments.at(2).toString(), expectedDestination);
+        QCOMPARE(arguments.at(3).toBool(), modifiers.testFlag(Qt::ControlModifier) ||
+                                             modifiers.testFlag(Qt::ShiftModifier));
     };
 
     const QPoint childPosition =
         destination.fileTable()->visualItemRect(destination.fileTable()->item(0, 0)).center();
-    sendDrop(childPosition, Qt::NoModifier, rfm::core::InternalTransferAction::Move,
+    sendDrop(childPosition, Qt::NoModifier, rfm::core::InternalTransferAction::Copy,
              root.filePath(QStringLiteral("target/child")));
     const QPoint filePosition =
         destination.fileTable()->visualItemRect(destination.fileTable()->item(1, 0)).center();

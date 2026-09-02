@@ -134,6 +134,10 @@ class LocalFileSystem final
 {
   public:
     [[nodiscard]] static bool isValidName(const QString& name);
+    // Returns true only when both parent filesystems can be identified reliably and differ.
+    // A false result also covers unavailable filesystem metadata.
+    [[nodiscard]] static bool pathsUseDifferentFileSystems(const QString& source,
+                                                           const QString& destination);
     [[nodiscard]] static LocalDirectoryResult listDirectory(const QString& path);
     [[nodiscard]] static LocalFileOperationResult
     executeOperation(const LocalFileOperationRequest& request,

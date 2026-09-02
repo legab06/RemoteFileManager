@@ -86,8 +86,14 @@ std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
 
 rfm::core::InternalTransferAction requestedTransferAction(Qt::KeyboardModifiers modifiers)
 {
-    return modifiers.testFlag(Qt::ControlModifier) ? rfm::core::InternalTransferAction::Copy
-                                                   : rfm::core::InternalTransferAction::Move;
+    return modifiers.testFlag(Qt::ControlModifier) || !modifiers.testFlag(Qt::ShiftModifier)
+               ? rfm::core::InternalTransferAction::Copy
+               : rfm::core::InternalTransferAction::Move;
+}
+
+bool transferActionWasExplicitlyRequested(Qt::KeyboardModifiers modifiers)
+{
+    return modifiers.testFlag(Qt::ControlModifier) || modifiers.testFlag(Qt::ShiftModifier);
 }
 
 Qt::DropAction qtDropAction(rfm::core::InternalTransferAction action)
@@ -590,7 +596,9 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             dropEvent->setDropAction(dropAction);
             dropEvent->accept();
             emit activated();
-            emit internalDropRequested(*payload, action, destination);
+            emit internalDropRequested(*payload, action, destination,
+                                       transferActionWasExplicitlyRequested(
+                                           dropEvent->modifiers()));
             return true;
         }
     }
