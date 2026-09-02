@@ -206,6 +206,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
     qRegisterMetaType<rfm::core::InternalTransferPayload>();
+    qRegisterMetaType<rfm::core::InternalTransferAction>();
     qRegisterMetaType<rfm::core::RemoteOperationResult>();
     qRegisterMetaType<rfm::core::OperationProgress>();
     qRegisterMetaType<rfm::core::RemoteOperationRequest>();
@@ -637,8 +638,9 @@ void MainWindow::connectBrowserPane(quint64 paneId)
     });
     connect(pane, &FileBrowserPane::contextMenuRequested, this, &MainWindow::showFileContextMenu);
     connect(pane, &FileBrowserPane::internalDropRequested, this,
-            [this, paneId](rfm::core::InternalTransferPayload payload, const QString& destination) {
-                handleInternalDrop(std::move(payload), paneId, destination);
+            [this, paneId](rfm::core::InternalTransferPayload payload,
+                           rfm::core::InternalTransferAction action, const QString& destination) {
+                handleInternalDrop(std::move(payload), action, paneId, destination);
             });
 }
 
@@ -1950,6 +1952,7 @@ void MainWindow::focusActiveLocation()
 }
 
 void MainWindow::handleInternalDrop(rfm::core::InternalTransferPayload payload,
+                                    rfm::core::InternalTransferAction action,
                                     quint64 destinationPaneId, QString destinationDirectory)
 {
     FileBrowserPane* const destinationPane = m_paneWorkspace->pane(destinationPaneId);
@@ -1980,32 +1983,14 @@ void MainWindow::handleInternalDrop(rfm::core::InternalTransferPayload payload,
     }
 
     if (payload.source == rfm::core::FileSource::Local) {
-        startLocalOperation(rfm::core::LocalFileOperationKind::Copy, payload.sourcePaneId,
-                            destinationPaneId, sourcePane->currentPath(), destinationLocation.path,
-                            payload.sources);
+        startLocalOperation(action == rfm::core::InternalTransferAction::Move
+                                ? rfm::core::LocalFileOperationKind::Move
+                                : rfm::core::LocalFileOperationKind::Copy,
+                            payload.sourcePaneId, destinationPaneId, sourcePane->currentPath(),
+                            destinationLocation.path, payload.sources);
         return;
     }
-
-    QMessageBox choice(QMessageBox::Question, tr("Remote file operation"),
-                       tr("%1 remote item(s)\nDestination: %2")
-                           .arg(payload.sources.size())
-                           .arg(destinationLocation.path),
-                       QMessageBox::NoButton, this);
-    QPushButton* const copyButton = choice.addButton(tr("Copy"), QMessageBox::AcceptRole);
-    copyButton->setObjectName(QStringLiteral("dropCopyButton"));
-    QPushButton* const moveButton = choice.addButton(tr("Move"), QMessageBox::DestructiveRole);
-    moveButton->setObjectName(QStringLiteral("dropMoveButton"));
-    QPushButton* const cancelButton = choice.addButton(QMessageBox::Cancel);
-    cancelButton->setObjectName(QStringLiteral("dropCancelButton"));
-    choice.setDefaultButton(cancelButton);
-    choice.exec();
-    if (choice.clickedButton() == copyButton) {
-        startRemoteTransfer(rfm::core::InternalTransferAction::Copy, payload, destinationPaneId,
-                            destinationLocation.path);
-    } else if (choice.clickedButton() == moveButton) {
-        startRemoteTransfer(rfm::core::InternalTransferAction::Move, payload, destinationPaneId,
-                            destinationLocation.path);
-    }
+    startRemoteTransfer(action, payload, destinationPaneId, destinationLocation.path);
 }
 
 void MainWindow::removeSelectedEntries()

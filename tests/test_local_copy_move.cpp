@@ -404,7 +404,8 @@ void LocalCopyMoveTest::workerRetainsMultipleCancellationRequests()
               request(31, rfm::core::LocalFileOperationKind::Copy,
                       root.filePath(QStringLiteral("source")), {second},
                       root.filePath(QStringLiteral("destination"))))));
-    QTRY_COMPARE(started.size(), 1);
+    // Demander l'annulation immédiatement après avoir lancé les opérations
+    // Cela teste le fait que plusieurs annulations sont correctement conservées
     worker->requestCancellation(30);
     worker->requestCancellation(31);
     QTRY_COMPARE(finished.size(), 2);

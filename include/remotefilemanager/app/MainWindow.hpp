@@ -150,6 +150,7 @@ class MainWindow final : public QMainWindow
     void selectAllInActivePane();
     void focusActiveLocation();
     Q_INVOKABLE void handleInternalDrop(rfm::core::InternalTransferPayload payload,
+                                        rfm::core::InternalTransferAction action,
                                         quint64 destinationPaneId, QString destinationDirectory);
     void removeSelectedEntries();
     void chooseUploads();

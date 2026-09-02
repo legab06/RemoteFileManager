@@ -80,6 +80,7 @@ class FileBrowserPane final : public QWidget
     void contextMenuRequested(QPoint globalPosition);
     void internalDragStarted();
     void internalDropRequested(rfm::core::InternalTransferPayload payload,
+                               rfm::core::InternalTransferAction action,
                                QString destinationDirectory);
 
   private:

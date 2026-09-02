@@ -93,12 +93,16 @@ reconnus.
 
 `FileBrowserPane` fige la sélection multiple au démarrage du drag, résout la cible
 avec `QDir` pour un emplacement local et `RemotePath` pour SSH, puis émet uniquement
-une intention. La validation refuse les transferts Local ↔ SSH. Un drop Local → Local
-lance exclusivement une copie par le pipeline `LocalFileOperationWorker` existant ;
-ses collisions, sa progression, son annulation et ses erreurs rejoignent donc la même
-entrée Operations que Copy, Copy to, Copy to other pane et Paste. Le moteur local
-reste l'autorité finale pour les alias, liens, mountpoints et récursions. Le DnD
-SSH → SSH conserve son choix explicite Copy/Move/Cancel et son moteur distant.
+une intention Copy/Move. La validation refuse les transferts Local ↔ SSH. Pour les
+drops Local → Local et SSH → SSH, un drag sans modificateur ou avec Shift demande un
+Move ; Ctrl demande un Copy et reste prioritaire si plusieurs modificateurs sont
+présents. L'action de drop annoncée à Qt est la même que l'intention transmise.
+
+`MainWindow` route cette intention exclusivement vers les pipelines Copy/Move
+existants : `LocalFileOperationWorker` pour Local et `TransferCoordinator` pour SSH.
+Collisions, progression, annulation et erreurs rejoignent donc les mêmes entrées
+Operations que les actions et raccourcis existants. Les moteurs restent l'autorité
+finale pour les alias, liens, mountpoints, récursions et validations distantes.
 
 ## Opérations distantes
 

@@ -89,3 +89,4 @@ validateInternalTransfer(const InternalTransferPayload& payload,
 } // namespace rfm::core
 
 Q_DECLARE_METATYPE(rfm::core::InternalTransferPayload)
+Q_DECLARE_METATYPE(rfm::core::InternalTransferAction)

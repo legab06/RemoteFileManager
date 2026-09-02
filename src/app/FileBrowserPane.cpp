@@ -84,6 +84,17 @@ std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
     return description;
 }
 
+rfm::core::InternalTransferAction requestedTransferAction(Qt::KeyboardModifiers modifiers)
+{
+    return modifiers.testFlag(Qt::ControlModifier) ? rfm::core::InternalTransferAction::Copy
+                                                   : rfm::core::InternalTransferAction::Move;
+}
+
+Qt::DropAction qtDropAction(rfm::core::InternalTransferAction action)
+{
+    return action == rfm::core::InternalTransferAction::Copy ? Qt::CopyAction : Qt::MoveAction;
+}
+
 class InternalDragTable final : public QTableWidget
 {
   public:
@@ -125,14 +136,20 @@ class InternalDragTable final : public QTableWidget
             m_itemInteractionActive = true;
             m_itemDragAttempted = false;
             m_itemPressViewportPosition = event->position().toPoint();
-            m_itemPressedRow = pressedIndex.row();
             m_itemInitialSelectedRows = selectedRowSet();
             m_preserveItemSelectionForDrag =
-                selectionModel()->isSelected(pressedIndex) && m_itemInitialSelectedRows.size() > 1 &&
-                !event->modifiers().testAnyFlags(Qt::ControlModifier | Qt::ShiftModifier);
+                selectionModel()->isSelected(pressedIndex) && m_itemInitialSelectedRows.size() > 1;
             QTableWidget::mousePressEvent(event);
-            if (m_preserveItemSelectionForDrag &&
-                selectedRowSet() != m_itemInitialSelectedRows) {
+            if (m_preserveItemSelectionForDrag) {
+                m_itemClickSelectedRows = selectedRowSet();
+                const bool control = event->modifiers().testFlag(Qt::ControlModifier);
+                const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+                if (control && !shift) {
+                    m_itemClickSelectedRows = m_itemInitialSelectedRows;
+                    m_itemClickSelectedRows.remove(pressedIndex.row());
+                } else if (!control && !shift) {
+                    m_itemClickSelectedRows = {pressedIndex.row()};
+                }
                 setSelectedRows(m_itemInitialSelectedRows);
             }
             return;
@@ -216,9 +233,8 @@ class InternalDragTable final : public QTableWidget
         if (m_itemInteractionActive && event->button() == Qt::LeftButton) {
             if (!m_itemDragAttempted) {
                 QTableWidget::mouseReleaseEvent(event);
-                if (m_preserveItemSelectionForDrag && selectedRowSet().size() > 1) {
-                    setSelectedRows({m_itemPressedRow});
-                    setCurrentIndex(model()->index(m_itemPressedRow, 0));
+                if (m_preserveItemSelectionForDrag) {
+                    setSelectedRows(m_itemClickSelectedRows);
                 }
             } else {
                 event->accept();
@@ -340,8 +356,8 @@ class InternalDragTable final : public QTableWidget
         m_itemInteractionActive = false;
         m_itemDragAttempted = false;
         m_preserveItemSelectionForDrag = false;
-        m_itemPressedRow = -1;
         m_itemInitialSelectedRows.clear();
+        m_itemClickSelectedRows.clear();
         setState(QAbstractItemView::NoState);
     }
 
@@ -353,8 +369,8 @@ class InternalDragTable final : public QTableWidget
     QPoint m_itemPressViewportPosition;
     QSet<int> m_initialSelectedRows;
     QSet<int> m_itemInitialSelectedRows;
+    QSet<int> m_itemClickSelectedRows;
     int m_autoScrollDirection{0};
-    int m_itemPressedRow{-1};
     bool m_rubberBandPending{false};
     bool m_rubberBandActive{false};
     bool m_controlSelection{false};
@@ -527,11 +543,15 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             const QPoint position = dragEvent->position().toPoint();
             int folderRow = -1;
             const QString destination = dropDestinationAt(position, &folderRow);
-            const bool valid =
-                payload.has_value() && validateDrop(*payload, destination).accepted();
+            const rfm::core::InternalTransferAction action =
+                requestedTransferAction(dragEvent->modifiers());
+            const Qt::DropAction dropAction = qtDropAction(action);
+            const bool valid = payload.has_value() &&
+                               dragEvent->possibleActions().testFlag(dropAction) &&
+                               validateDrop(*payload, destination).accepted();
             updateDropAppearance(payload.has_value(), valid, valid ? folderRow : -1);
             if (valid) {
-                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->setDropAction(dropAction);
                 dragEvent->accept();
             } else if (payload.has_value()) {
                 dragEvent->setDropAction(Qt::IgnoreAction);
@@ -555,17 +575,22 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
                           mimeData->data(rfm::core::InternalTransferMimeType))
                     : std::nullopt;
             const QString destination = dropDestinationAt(dropEvent->position().toPoint());
-            const bool valid =
-                payload.has_value() && validateDrop(*payload, destination).accepted();
+            const rfm::core::InternalTransferAction action =
+                requestedTransferAction(dropEvent->modifiers());
+            const Qt::DropAction dropAction = qtDropAction(action);
+            const bool valid = payload.has_value() &&
+                               dropEvent->possibleActions().testFlag(dropAction) &&
+                               validateDrop(*payload, destination).accepted();
             updateDropAppearance(false, false);
             if (!valid) {
+                dropEvent->setDropAction(Qt::IgnoreAction);
                 dropEvent->ignore();
                 return true;
             }
-            dropEvent->setDropAction(Qt::CopyAction);
+            dropEvent->setDropAction(dropAction);
             dropEvent->accept();
             emit activated();
-            emit internalDropRequested(*payload, destination);
+            emit internalDropRequested(*payload, action, destination);
             return true;
         }
     }
@@ -898,6 +923,7 @@ void FileBrowserPane::prepareContextMenu(const QPoint& position)
 
 void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
 {
+    Q_UNUSED(supportedActions)
     const QByteArray data = createInternalDragData();
     if (data.isEmpty()) {
         return;
@@ -922,11 +948,9 @@ void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
     painter.drawText(pixmap.rect(), Qt::AlignCenter, itemKind.arg(selectedEntries().size()));
     drag.setPixmap(pixmap);
     drag.setHotSpot(QPoint(12, 12));
-    const Qt::DropActions allowedActions =
-        m_currentLocation.source == rfm::core::FileSource::Local
-            ? Qt::CopyAction
-            : supportedActions & (Qt::CopyAction | Qt::MoveAction);
-    drag.exec(allowedActions, Qt::CopyAction);
+    const Qt::DropActions allowedActions = Qt::CopyAction | Qt::MoveAction;
+    drag.exec(allowedActions,
+              qtDropAction(requestedTransferAction(QApplication::keyboardModifiers())));
 }
 
 QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRow) const
