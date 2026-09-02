@@ -159,6 +159,30 @@ InternalTransferValidation validateLocalTransfer(const InternalTransferPayload& 
     return {};
 }
 
+InternalTransferValidation validateLocalSources(const InternalTransferPayload& payload)
+{
+    for (const RemoteSelection& source : payload.sources) {
+        const QString sourcePath = normalizedLocalPath(source.path);
+        const QFileInfo sourceInfo(sourcePath);
+        if (sourcePath.isEmpty() || !localEntryExists(sourceInfo) ||
+            source.directory != sourceInfo.isDir()) {
+            return {InternalTransferValidationError::InvalidSource};
+        }
+    }
+    return {};
+}
+
+InternalTransferValidation validateLocalDestination(const BrowserLocation& destination)
+{
+    const QString destinationPath = normalizedLocalPath(destination.path);
+    const QFileInfo destinationInfo(destinationPath);
+    if (destinationPath.isEmpty() || !destinationInfo.exists() || !destinationInfo.isDir() ||
+        !destinationInfo.isWritable() || destinationInfo.canonicalFilePath().isEmpty()) {
+        return {InternalTransferValidationError::InvalidDestination};
+    }
+    return {};
+}
+
 } // namespace
 
 bool RemoteConnectionIdentity::isValid() const
@@ -330,7 +354,8 @@ std::optional<InternalTransferPayload> decodeInternalTransfer(const QByteArray& 
 InternalTransferValidation
 validateInternalTransfer(const InternalTransferPayload& payload,
                          const QString& applicationInstanceId, const BrowserLocation& destination,
-                         const RemoteConnectionIdentity& destinationConnection)
+                         const RemoteConnectionIdentity& destinationConnection,
+                         InternalTransferCompatibility compatibility)
 {
     if (!payload.isValid()) {
         return {InternalTransferValidationError::InvalidPayload};
@@ -341,7 +366,28 @@ validateInternalTransfer(const InternalTransferPayload& payload,
     if (!destination.isValid()) {
         return {InternalTransferValidationError::InvalidDestination};
     }
-    if (payload.source != destination.source || payload.sourceMachineId != destination.machineId) {
+    const bool sameSource =
+        payload.source == destination.source && payload.sourceMachineId == destination.machineId;
+    if (!sameSource && compatibility != InternalTransferCompatibility::AllowLocalAndSsh) {
+        return {InternalTransferValidationError::IncompatibleSource};
+    }
+    if (!sameSource) {
+        if (payload.source == FileSource::Local && destination.source == FileSource::Ssh) {
+            if (!destinationConnection.isValid()) {
+                return {InternalTransferValidationError::IncompatibleConnection};
+            }
+            const QString destinationPath = RemotePath::normalize(destination.path);
+            if (!validRemotePath(destinationPath)) {
+                return {InternalTransferValidationError::InvalidDestination};
+            }
+            return validateLocalSources(payload);
+        }
+        if (payload.source == FileSource::Ssh && destination.source == FileSource::Local) {
+            if (!destinationConnection.isValid() || payload.connection != destinationConnection) {
+                return {InternalTransferValidationError::IncompatibleConnection};
+            }
+            return validateLocalDestination(destination);
+        }
         return {InternalTransferValidationError::IncompatibleSource};
     }
     if (payload.source == FileSource::Local) {

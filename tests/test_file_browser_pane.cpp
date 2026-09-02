@@ -48,7 +48,7 @@ class FileBrowserPaneTest final : public QObject
     void constructsAndAcceptsOnlyInternalDragPayloads();
     void resolvesDropOnCurrentDirectoryAndSubfolder();
     void constructsLocalPayloadAndResolvesLocalDropDestinations();
-    void rejectsCrossSourceDropsWithInvalidFeedback();
+    void acceptsCrossSourceCopyIntentionsAndPreservesPayload();
     void cutAppearanceSurvivesRefreshAndClearsCleanly();
     void focusesLocationAndSwitchesVisiblePane();
     void navigatesLocalDirectoriesWithSourceAwareHistory();
@@ -1042,25 +1042,31 @@ void FileBrowserPaneTest::constructsLocalPayloadAndResolvesLocalDropDestinations
              rfm::core::InternalTransferAction::Copy, root.filePath(QStringLiteral("target")));
 }
 
-void FileBrowserPaneTest::rejectsCrossSourceDropsWithInvalidFeedback()
+void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
 {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     QDir root(temporary.path());
     QVERIFY(root.mkdir(QStringLiteral("source")));
     QVERIFY(root.mkdir(QStringLiteral("target")));
-    QFile sourceFile(root.filePath(QStringLiteral("source/a.txt")));
-    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
-    sourceFile.close();
+    for (const QString& name : {QStringLiteral("a.txt"), QStringLiteral("b.txt")}) {
+        QFile sourceFile(root.filePath(QStringLiteral("source/") + name));
+        QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    }
 
     rfm::app::FileBrowserPane local;
     local.setTransferContext(QStringLiteral("instance"), {}, 1);
     local.showDirectory({rfm::core::FileSource::Local,
                          QString::fromLatin1(rfm::core::LocalMachineId),
                          root.filePath(QStringLiteral("source"))},
-                        QStringLiteral("source"), {{QStringLiteral("a.txt"), 1, {}, false, false}});
-    local.fileTable()->selectRow(0);
+                        QStringLiteral("source"),
+                        {{QStringLiteral("a.txt"), 1, {}, false, false},
+                         {QStringLiteral("b.txt"), 1, {}, false, false}});
+    local.fileTable()->selectAll();
     const QByteArray localData = local.createInternalDragData();
+    const auto localPayload = rfm::core::decodeInternalTransfer(localData);
+    QVERIFY(localPayload.has_value());
+    QCOMPARE(localPayload->sources.size(), 2);
 
     const rfm::core::RemoteConnectionIdentity connection{QStringLiteral("server.example.test"), 22,
                                                          4};
@@ -1073,29 +1079,73 @@ void FileBrowserPaneTest::rejectsCrossSourceDropsWithInvalidFeedback()
 
     QMimeData localMime;
     localMime.setData(rfm::core::InternalTransferMimeType, localData);
-    const QPoint background(10, ssh.fileTable()->viewport()->height() - 2);
-    QDragEnterEvent localToSsh(background, Qt::CopyAction | Qt::MoveAction, &localMime,
-                               Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(ssh.fileTable()->viewport(), &localToSsh);
-    QVERIFY(localToSsh.isAccepted());
-    QCOMPARE(localToSsh.dropAction(), Qt::IgnoreAction);
-    QCOMPARE(ssh.fileTable()->property("dropState").toString(), QStringLiteral("invalid"));
+    const auto sendDrop = [](rfm::app::FileBrowserPane& destination, const QMimeData& mime,
+                             Qt::KeyboardModifiers modifiers, Qt::DropAction expectedAction,
+                             rfm::core::InternalTransferAction expectedIntent, bool accepted) {
+        const QPoint background(10, destination.fileTable()->viewport()->height() - 2);
+        QSignalSpy drops(&destination, &rfm::app::FileBrowserPane::internalDropRequested);
+        QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                              modifiers);
+        QApplication::sendEvent(destination.fileTable()->viewport(), &enter);
+        QVERIFY(enter.isAccepted());
+        QCOMPARE(enter.dropAction(), expectedAction);
+        QCOMPARE(destination.fileTable()->property("dropState").toString(),
+                 accepted ? QStringLiteral("valid") : QStringLiteral("invalid"));
+        QDropEvent drop(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                        modifiers);
+        QApplication::sendEvent(destination.fileTable()->viewport(), &drop);
+        QCOMPARE(drop.isAccepted(), accepted);
+        QCOMPARE(drop.dropAction(), expectedAction);
+        QCOMPARE(drops.size(), accepted ? 1 : 0);
+        if (accepted) {
+            QCOMPARE(drops.constFirst().at(1).value<rfm::core::InternalTransferAction>(),
+                     expectedIntent);
+        }
+    };
+
+    sendDrop(ssh, localMime, Qt::NoModifier, Qt::CopyAction,
+             rfm::core::InternalTransferAction::Copy, true);
+    sendDrop(ssh, localMime, Qt::ControlModifier, Qt::CopyAction,
+             rfm::core::InternalTransferAction::Copy, true);
+    sendDrop(ssh, localMime, Qt::ShiftModifier, Qt::IgnoreAction,
+             rfm::core::InternalTransferAction::Move, false);
+    sendDrop(ssh, localMime, Qt::ControlModifier | Qt::ShiftModifier, Qt::CopyAction,
+             rfm::core::InternalTransferAction::Copy, true);
 
     ssh.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"),
-                      {{QStringLiteral("remote.txt"), 1, {}, false, false}});
-    ssh.fileTable()->selectRow(0);
+                      {{QStringLiteral("remote.txt"), 1, {}, false, false},
+                       {QStringLiteral("remote-folder"), 0, {}, true, false}});
+    ssh.fileTable()->selectAll();
     const QByteArray sshData = ssh.createInternalDragData();
+    const auto sshPayload = rfm::core::decodeInternalTransfer(sshData);
+    QVERIFY(sshPayload.has_value());
+    QCOMPARE(sshPayload->sources.size(), 2);
     local.showDirectory({rfm::core::FileSource::Local,
                          QString::fromLatin1(rfm::core::LocalMachineId),
                          root.filePath(QStringLiteral("target"))},
                         QStringLiteral("target"), {});
+    local.setTransferContext(QStringLiteral("instance"), connection, 1);
+    local.resize(640, 320);
+    local.show();
+    QApplication::processEvents();
     QMimeData sshMime;
     sshMime.setData(rfm::core::InternalTransferMimeType, sshData);
-    QDragEnterEvent sshToLocal(background, Qt::CopyAction | Qt::MoveAction, &sshMime,
-                               Qt::LeftButton, Qt::NoModifier);
-    QApplication::sendEvent(local.fileTable()->viewport(), &sshToLocal);
-    QVERIFY(sshToLocal.isAccepted());
-    QCOMPARE(sshToLocal.dropAction(), Qt::IgnoreAction);
+    sendDrop(local, sshMime, Qt::NoModifier, Qt::CopyAction,
+             rfm::core::InternalTransferAction::Copy, true);
+    sendDrop(local, sshMime, Qt::ControlModifier, Qt::CopyAction,
+             rfm::core::InternalTransferAction::Copy, true);
+    sendDrop(local, sshMime, Qt::ShiftModifier, Qt::IgnoreAction,
+             rfm::core::InternalTransferAction::Move, false);
+    sendDrop(local, sshMime, Qt::ControlModifier | Qt::ShiftModifier, Qt::CopyAction,
+             rfm::core::InternalTransferAction::Copy, true);
+
+    local.setTransferContext(QStringLiteral("instance"), {}, 1);
+    QDragEnterEvent staleConnection(QPoint(10, local.fileTable()->viewport()->height() - 2),
+                                    Qt::CopyAction | Qt::MoveAction, &sshMime, Qt::LeftButton,
+                                    Qt::NoModifier);
+    QApplication::sendEvent(local.fileTable()->viewport(), &staleConnection);
+    QVERIFY(staleConnection.isAccepted());
+    QCOMPARE(staleConnection.dropAction(), Qt::IgnoreAction);
     QCOMPARE(local.fileTable()->property("dropState").toString(), QStringLiteral("invalid"));
 }
 

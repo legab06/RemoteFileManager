@@ -552,9 +552,12 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             const rfm::core::InternalTransferAction action =
                 requestedTransferAction(dragEvent->modifiers());
             const Qt::DropAction dropAction = qtDropAction(action);
-            const bool valid = payload.has_value() &&
-                               dragEvent->possibleActions().testFlag(dropAction) &&
-                               validateDrop(*payload, destination).accepted();
+            const bool unsupportedCrossSourceMove =
+                payload.has_value() && action == rfm::core::InternalTransferAction::Move &&
+                payload->source != m_currentLocation.source;
+            const bool valid =
+                payload.has_value() && dragEvent->possibleActions().testFlag(dropAction) &&
+                !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
             updateDropAppearance(payload.has_value(), valid, valid ? folderRow : -1);
             if (valid) {
                 dragEvent->setDropAction(dropAction);
@@ -584,11 +587,17 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             const rfm::core::InternalTransferAction action =
                 requestedTransferAction(dropEvent->modifiers());
             const Qt::DropAction dropAction = qtDropAction(action);
-            const bool valid = payload.has_value() &&
-                               dropEvent->possibleActions().testFlag(dropAction) &&
-                               validateDrop(*payload, destination).accepted();
+            const bool unsupportedCrossSourceMove =
+                payload.has_value() && action == rfm::core::InternalTransferAction::Move &&
+                payload->source != m_currentLocation.source;
+            const bool valid =
+                payload.has_value() && dropEvent->possibleActions().testFlag(dropAction) &&
+                !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
             updateDropAppearance(false, false);
             if (!valid) {
+                if (unsupportedCrossSourceMove) {
+                    emit crossSourceMoveUnsupported();
+                }
                 dropEvent->setDropAction(Qt::IgnoreAction);
                 dropEvent->ignore();
                 return true;
@@ -1005,8 +1014,9 @@ FileBrowserPane::validateDrop(const rfm::core::InternalTransferPayload& payload,
 {
     rfm::core::BrowserLocation destinationLocation = m_currentLocation;
     destinationLocation.path = destination;
-    return rfm::core::validateInternalTransfer(payload, m_applicationInstanceId,
-                                               destinationLocation, m_connectionIdentity);
+    return rfm::core::validateInternalTransfer(
+        payload, m_applicationInstanceId, destinationLocation, m_connectionIdentity,
+        rfm::core::InternalTransferCompatibility::AllowLocalAndSsh);
 }
 
 void FileBrowserPane::updateDropAppearance(bool active, bool valid, int folderRow)

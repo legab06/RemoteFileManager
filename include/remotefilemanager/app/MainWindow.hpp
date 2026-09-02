@@ -190,6 +190,10 @@ class MainWindow final : public QMainWindow
                              const rfm::core::InternalTransferPayload& payload,
                              quint64 destinationPaneId, const QString& destinationDirectory,
                              bool clipboardMove = false);
+    bool startCrossSourceTransfer(rfm::core::InternalTransferAction action,
+                                  const rfm::core::InternalTransferPayload& payload,
+                                  quint64 destinationPaneId, const QString& destinationDirectory);
+    void queueTransferRequest(const rfm::core::TransferRequest& request, quint64 paneId);
     void startRemoteFilesystemPreflight(rfm::core::InternalTransferPayload payload,
                                         quint64 destinationPaneId, QString destinationDirectory);
     [[nodiscard]] std::optional<rfm::core::InternalTransferAction>

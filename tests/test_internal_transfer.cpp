@@ -272,6 +272,21 @@ void InternalTransferTest::validatesLocalDestinationsAndSourceCompatibility()
                  .error,
              Error::IncompatibleSource);
 
+    const auto crossCompatibility = rfm::core::InternalTransferCompatibility::AllowLocalAndSsh;
+    QVERIFY(rfm::core::validateInternalTransfer(local, QString::fromLatin1(ApplicationInstance),
+                                                sshDestination(QStringLiteral("/destination")),
+                                                sshConnection(), crossCompatibility)
+                .accepted());
+    QVERIFY(rfm::core::validateInternalTransfer(sshPayload(),
+                                                QString::fromLatin1(ApplicationInstance),
+                                                destination, sshConnection(), crossCompatibility)
+                .accepted());
+    QCOMPARE(rfm::core::validateInternalTransfer(
+                 sshPayload(), QString::fromLatin1(ApplicationInstance), destination,
+                 {QStringLiteral("server.example.test"), 22, 8}, crossCompatibility)
+                 .error,
+             Error::IncompatibleConnection);
+
     auto missing = local;
     missing.sources = {{root.filePath(QStringLiteral("source/missing.txt")), false}};
     QCOMPARE(rfm::core::validateInternalTransfer(missing, QString::fromLatin1(ApplicationInstance),

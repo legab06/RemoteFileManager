@@ -82,6 +82,7 @@ class FileBrowserPane final : public QWidget
     void internalDropRequested(rfm::core::InternalTransferPayload payload,
                                rfm::core::InternalTransferAction action,
                                QString destinationDirectory, bool actionWasExplicitlyRequested);
+    void crossSourceMoveUnsupported();
 
   private:
     bool eventFilter(QObject* watched, QEvent* event) override;

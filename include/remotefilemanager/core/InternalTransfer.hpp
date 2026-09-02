@@ -18,6 +18,11 @@ inline constexpr auto InternalTransferMimeType =
 
 enum class InternalTransferAction { Copy, Move };
 
+enum class InternalTransferCompatibility {
+    SameSourceOnly,
+    AllowLocalAndSsh,
+};
+
 struct RemoteConnectionIdentity {
     QString host;
     quint16 port{0};
@@ -81,10 +86,10 @@ struct InternalTransferValidation {
 
 [[nodiscard]] QByteArray encodeInternalTransfer(const InternalTransferPayload& payload);
 [[nodiscard]] std::optional<InternalTransferPayload> decodeInternalTransfer(const QByteArray& data);
-[[nodiscard]] InternalTransferValidation
-validateInternalTransfer(const InternalTransferPayload& payload,
-                         const QString& applicationInstanceId, const BrowserLocation& destination,
-                         const RemoteConnectionIdentity& destinationConnection = {});
+[[nodiscard]] InternalTransferValidation validateInternalTransfer(
+    const InternalTransferPayload& payload, const QString& applicationInstanceId,
+    const BrowserLocation& destination, const RemoteConnectionIdentity& destinationConnection = {},
+    InternalTransferCompatibility compatibility = InternalTransferCompatibility::SameSourceOnly);
 
 } // namespace rfm::core
 
