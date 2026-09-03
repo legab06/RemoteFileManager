@@ -6,6 +6,7 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QSet>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -51,6 +52,7 @@ class LocalFileSystemTest final : public QObject
 
   private slots:
     void listsOnlyImmediateEntriesFromTemporaryDirectory();
+    void countsOnlyImmediateDirectoryEntries();
     void rejectsMissingDirectory();
     void createsLocalFoldersWithValidation();
     void renamesLocalFilesAndFoldersWithValidation();
@@ -100,12 +102,41 @@ void LocalFileSystemTest::listsOnlyImmediateEntriesFromTemporaryDirectory()
     QCOMPARE(result.entries.size(), 2);
     QCOMPARE(result.entries.at(0).name, QStringLiteral("folder"));
     QVERIFY(result.entries.at(0).directory);
+    QVERIFY(result.entries.at(0).modifiedAt.isValid());
     QCOMPARE(result.entries.at(1).name, QStringLiteral("sample.txt"));
     QVERIFY(!result.entries.at(1).directory);
     QCOMPARE(result.entries.at(1).size, quint64{7});
+    QVERIFY(result.entries.at(1).modifiedAt.isValid());
     QVERIFY(std::ranges::none_of(result.entries, [](const rfm::core::RemoteEntry& entry) {
         return entry.name == QStringLiteral("nested");
     }));
+}
+
+void LocalFileSystemTest::countsOnlyImmediateDirectoryEntries()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir root(temporary.path());
+    QVERIFY(root.mkdir(QStringLiteral("folder")));
+    QVERIFY(root.mkdir(QStringLiteral("other")));
+    QFile file(root.filePath(QStringLiteral("file.txt")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    QVERIFY(QDir(root.filePath(QStringLiteral("folder"))).mkdir(QStringLiteral("nested")));
+
+    rfm::core::LocalFileSystemWorker worker;
+    QSignalSpy counted(&worker, &rfm::core::LocalFileSystemWorker::directoryCounted);
+    QSignalSpy failed(&worker, &rfm::core::LocalFileSystemWorker::directoryCountFailed);
+    worker.countDirectoryEntries(41, temporary.path());
+    QCOMPARE(counted.size(), 1);
+    QCOMPARE(counted.constFirst().at(0).toULongLong(), quint64{41});
+    QCOMPARE(counted.constFirst().at(1).toString(), temporary.path());
+    QCOMPARE(counted.constFirst().at(2).toULongLong(), quint64{3});
+    QCOMPARE(failed.size(), 0);
+
+    worker.countDirectoryEntries(42, root.filePath(QStringLiteral("missing")));
+    QCOMPARE(failed.size(), 1);
+    QCOMPARE(failed.constFirst().at(0).toULongLong(), quint64{42});
 }
 
 void LocalFileSystemTest::rejectsMissingDirectory()

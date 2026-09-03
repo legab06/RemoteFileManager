@@ -72,6 +72,8 @@ class MainWindow final : public QMainWindow
     void hostKeyDecision(bool accepted);
     void directoryRequested(quint64 requestId, QString path);
     void localDirectoryRequested(quint64 requestId, QString path);
+    void remoteDirectoryCountRequested(quint64 requestId, QString path);
+    void localDirectoryCountRequested(quint64 requestId, QString path);
     void localFileOperationRequested(rfm::core::LocalFileOperationRequest request);
     void localVolumesRequested();
     void localStorageProbeRequested(quint64 requestId);
@@ -121,6 +123,10 @@ class MainWindow final : public QMainWindow
                                            const QList<rfm::core::RemoteEntry>& entries);
     Q_INVOKABLE void handleDirectoryListingError(quint64 requestId, const QString& path,
                                                  const QString& error);
+    void requestDirectoryItemCount(quint64 paneId, const rfm::core::BrowserLocation& location,
+                                   quint64 generation, const QString& name);
+    Q_INVOKABLE void handleDirectoryCounted(quint64 requestId, const QString& path, quint64 count);
+    Q_INVOKABLE void handleDirectoryCountFailed(quint64 requestId, const QString& path);
     Q_INVOKABLE void showConnectionError(const QString& message);
     void loadServerProfiles();
     void refreshServerProfileViews();
@@ -336,6 +342,14 @@ class MainWindow final : public QMainWindow
     QHash<quint64, DirectoryRequest> m_directoryRequests;
     QQueue<quint64> m_directoryQueue;
     QHash<quint64, quint64> m_expectedDirectoryRequests;
+    struct DirectoryCountRequest {
+        quint64 paneId{0};
+        rfm::core::BrowserLocation location;
+        quint64 generation{0};
+        QString name;
+        QString path;
+    };
+    QHash<quint64, DirectoryCountRequest> m_directoryCountRequests;
     struct PendingRemoteFilesystemPreflight {
         rfm::core::InternalTransferPayload payload;
         quint64 destinationPaneId{0};

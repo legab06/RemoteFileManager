@@ -161,12 +161,15 @@ class LocalFileSystemWorker final : public QObject
 
   public slots:
     void listDirectory(quint64 requestId, QString path);
+    void countDirectoryEntries(quint64 requestId, QString path);
     void listVolumes();
     void probeVolumes(quint64 requestId);
 
   signals:
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
+    void directoryCounted(quint64 requestId, QString path, quint64 count);
+    void directoryCountFailed(quint64 requestId, QString path);
     void volumesListed(QList<rfm::core::StorageVolume> volumes, QByteArray fingerprint);
     void volumesProbed(quint64 requestId, QByteArray fingerprint);
 };

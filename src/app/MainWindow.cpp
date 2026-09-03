@@ -243,6 +243,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     connect(m_localThread, &QThread::finished, m_localFileSystem, &QObject::deleteLater);
     connect(this, &MainWindow::localDirectoryRequested, m_localFileSystem,
             &rfm::core::LocalFileSystemWorker::listDirectory);
+    connect(this, &MainWindow::localDirectoryCountRequested, m_localFileSystem,
+            &rfm::core::LocalFileSystemWorker::countDirectoryEntries);
     connect(this, &MainWindow::localVolumesRequested, m_localFileSystem,
             &rfm::core::LocalFileSystemWorker::listVolumes);
     connect(this, &MainWindow::localStorageProbeRequested, m_localFileSystem,
@@ -251,6 +253,10 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleLocalDirectoryListed);
     connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::directoryListingFailed, this,
             &MainWindow::handleLocalDirectoryListingError);
+    connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::directoryCounted, this,
+            &MainWindow::handleDirectoryCounted);
+    connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::directoryCountFailed, this,
+            &MainWindow::handleDirectoryCountFailed);
     connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::volumesListed, this,
             [this](const QList<rfm::core::StorageVolume>& volumes, const QByteArray& fingerprint) {
                 m_localStorageFingerprint = fingerprint;
@@ -297,6 +303,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::ssh::SshSession::confirmUnknownHost);
     connect(this, &MainWindow::directoryRequested, m_sshSession,
             &rfm::ssh::SshSession::listDirectory);
+    connect(this, &MainWindow::remoteDirectoryCountRequested, m_sshSession,
+            &rfm::ssh::SshSession::countDirectoryEntries);
     connect(this, &MainWindow::remoteStorageRequested, m_sshSession,
             &rfm::ssh::SshSession::listStorageVolumes);
     connect(this, &MainWindow::remoteStorageProbeRequested, m_sshSession,
@@ -351,6 +359,10 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleDirectoryListed);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListingFailed, this,
             &MainWindow::handleDirectoryListingError);
+    connect(m_sshSession, &rfm::ssh::SshSession::directoryCounted, this,
+            &MainWindow::handleDirectoryCounted);
+    connect(m_sshSession, &rfm::ssh::SshSession::directoryCountFailed, this,
+            &MainWindow::handleDirectoryCountFailed);
     connect(m_sshSession, &rfm::ssh::SshSession::remoteFilesystemsCompared, this,
             &MainWindow::handleRemoteFilesystemRelation);
     connect(m_sshSession, &rfm::ssh::SshSession::storageVolumesListed, this,
@@ -660,6 +672,11 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         }
     });
     connect(pane, &FileBrowserPane::contextMenuRequested, this, &MainWindow::showFileContextMenu);
+    connect(pane, &FileBrowserPane::directoryItemCountRequested, this,
+            [this, paneId](const rfm::core::BrowserLocation& location, quint64 generation,
+                           const QString& name) {
+                requestDirectoryItemCount(paneId, location, generation, name);
+            });
     connect(pane, &FileBrowserPane::internalDropRequested, this,
             [this, paneId](rfm::core::InternalTransferPayload payload,
                            rfm::core::InternalTransferAction action, const QString& destination,
@@ -671,6 +688,74 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         statusBar()->showMessage(tr("Moving between local and SSH locations is not supported yet."),
                                  8000);
     });
+}
+
+void MainWindow::requestDirectoryItemCount(quint64 paneId,
+                                           const rfm::core::BrowserLocation& location,
+                                           quint64 generation, const QString& name)
+{
+    FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+    if (pane == nullptr || pane->currentLocation() != location || name.isEmpty()) {
+        return;
+    }
+
+    QString path;
+    if (location.source == rfm::core::FileSource::Local &&
+        location.machineId == QString::fromLatin1(rfm::core::LocalMachineId)) {
+        if (!rfm::core::LocalFileSystem::isValidName(name)) {
+            pane->setDirectoryItemCount(location, generation, name, std::nullopt);
+            return;
+        }
+        path = QDir(location.path).filePath(name);
+    } else if (location.source == rfm::core::FileSource::Ssh && m_connected &&
+               location.machineId == activeRemoteMachineId()) {
+        if (!rfm::core::RemotePath::isValidName(name)) {
+            pane->setDirectoryItemCount(location, generation, name, std::nullopt);
+            return;
+        }
+        path = rfm::core::RemotePath::join(location.path, name);
+    } else {
+        pane->setDirectoryItemCount(location, generation, name, std::nullopt);
+        return;
+    }
+
+    const quint64 requestId = nextOperationId();
+    m_directoryCountRequests.insert(requestId, {paneId, location, generation, name, path});
+    if (location.source == rfm::core::FileSource::Local) {
+        emit localDirectoryCountRequested(requestId, path);
+    } else {
+        emit remoteDirectoryCountRequested(requestId, path);
+    }
+}
+
+void MainWindow::handleDirectoryCounted(quint64 requestId, const QString& path, quint64 count)
+{
+    const auto iterator = m_directoryCountRequests.find(requestId);
+    if (iterator == m_directoryCountRequests.end()) {
+        return;
+    }
+    const DirectoryCountRequest request = iterator.value();
+    m_directoryCountRequests.erase(iterator);
+    if (FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId); pane != nullptr) {
+        pane->setDirectoryItemCount(request.location, request.generation, request.name,
+                                    path == request.path ? std::optional<quint64>{count}
+                                                         : std::nullopt);
+    }
+}
+
+void MainWindow::handleDirectoryCountFailed(quint64 requestId, const QString& path)
+{
+    Q_UNUSED(path)
+    const auto iterator = m_directoryCountRequests.find(requestId);
+    if (iterator == m_directoryCountRequests.end()) {
+        return;
+    }
+    const DirectoryCountRequest request = iterator.value();
+    m_directoryCountRequests.erase(iterator);
+    if (FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId); pane != nullptr) {
+        pane->setDirectoryItemCount(request.location, request.generation, request.name,
+                                    std::nullopt);
+    }
 }
 
 void MainWindow::createNavigationBar()
@@ -3513,6 +3598,13 @@ void MainWindow::stopAutomaticRefresh()
     m_directoryRequests.clear();
     m_directoryQueue.clear();
     m_expectedDirectoryRequests.clear();
+    for (const DirectoryCountRequest& request : std::as_const(m_directoryCountRequests)) {
+        if (FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId); pane != nullptr) {
+            pane->setDirectoryItemCount(request.location, request.generation, request.name,
+                                        std::nullopt);
+        }
+    }
+    m_directoryCountRequests.clear();
     m_expectedLocalDirectoryRequests.clear();
     m_paneNavigationGenerations.clear();
     m_expectedPaneSources.clear();

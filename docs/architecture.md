@@ -80,7 +80,31 @@ Le navigateur principal conserve aussi le `RemoteEntry` déjà reçu sur chaque 
 son action `Properties` présente cet instantané sans nouveau parcours local récursif
 ni requête SFTP. Le type utilisateur d'un fichier est déduit uniquement de son nom
 avec la base MIME Qt en mode extension ; un type absent ou technique retombe sur
-`File`.
+`File`. Cette même présentation alimente la colonne `Type` et l'icône dans les vues
+Local et SSH. Les dossiers et liens symboliques restent traités explicitement avant
+la détection MIME, sans lecture de contenu ni résolution implicite d'une cible
+distante. La colonne `Modified` formate le `QDateTime` fourni par le backend et affiche
+un tiret lorsque cette métadonnée n'est pas disponible ; elle ne synthétise aucune
+date. Les sections du tableau utilisent le redimensionnement et le déplacement natifs
+de `QHeaderView`, sans section étirée. Le tri conserve ses clés brutes dans les items :
+taille numérique et `QDateTime` ne sont jamais comparés à partir de leur texte formaté.
+Les dossiers restent en tête dans chaque sens de tri et une date absente est ordonnée
+de façon déterministe après les dates valides. L'état courant du header reste propre à
+chaque panneau et survit aux changements de dossier et aux actualisations de la session.
+Le nombre affiché pour un dossier est chargé après son listing principal. Le panneau
+émet au plus une demande de comptage à la fois et rend la main à la boucle d'événements
+avant la suivante ; les workers Local et SSH ne parcourent que les enfants immédiats.
+Une génération associe chaque réponse à l'affichage qui l'a demandée. Une réponse
+obsolète est ignorée, un refus ou une erreur laisse un tiret, et un refresh recrée les
+placeholders puis relance naturellement les comptages. La clé de tri `Size` représente
+donc des octets pour un fichier et un nombre d'enfants pour un dossier, les deux groupes
+restant séparés par la règle « dossiers d'abord ».
+Lors d'un refresh du même emplacement SSH, le panneau réinjecte dans le nouveau listing
+les comptes valides de l'affichage précédent pour les seuls noms encore présents. Ces
+valeurs éphémères restent visibles et continuent d'alimenter le tri pendant le recount ;
+une réponse identique ne modifie pas la cellule et un échec temporaire ne remplace pas
+une ancienne valeur valide. Cette conservation visuelle n'est appliquée ni à Local, ni
+à un autre emplacement, ni après un redémarrage.
 
 ## Transferts internes
 

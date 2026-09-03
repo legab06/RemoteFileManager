@@ -57,6 +57,8 @@ class FileBrowserPane final : public QWidget
     void removeHistoryUnderPath(rfm::core::FileSource source, const QString& machineId,
                                 const QString& rootPath);
     void setPendingSelectionNames(QStringList names);
+    void setDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
+                               const QString& name, std::optional<quint64> count);
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
     void setTransferContext(QString applicationInstanceId,
@@ -83,6 +85,8 @@ class FileBrowserPane final : public QWidget
                                rfm::core::InternalTransferAction action,
                                QString destinationDirectory, bool actionWasExplicitlyRequested);
     void crossSourceMoveUnsupported();
+    void directoryItemCountRequested(rfm::core::BrowserLocation location, quint64 generation,
+                                     QString name);
 
   private:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -95,6 +99,7 @@ class FileBrowserPane final : public QWidget
                  const QString& destination) const;
     void updateDropAppearance(bool active, bool valid, int folderRow = -1);
     void updateCutAppearance();
+    void requestNextDirectoryItemCount();
     [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
     void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
@@ -102,6 +107,11 @@ class FileBrowserPane final : public QWidget
     QTableWidget* m_fileTable{nullptr};
     rfm::core::BrowserLocation m_currentLocation;
     QStringList m_pendingSelectionNames;
+    QStringList m_pendingDirectoryCountNames;
+    rfm::core::BrowserLocation m_activeDirectoryCountLocation;
+    QString m_activeDirectoryCountName;
+    quint64 m_directoryCountGeneration{0};
+    quint64 m_activeDirectoryCountGeneration{0};
     QList<rfm::core::BrowserLocation> m_backHistory;
     QList<rfm::core::BrowserLocation> m_forwardHistory;
     QString m_applicationInstanceId;

@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QDropEvent>
 #include <QFile>
+#include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QLocale>
@@ -28,6 +29,11 @@ class FileBrowserPaneTest final : public QObject
 
   private slots:
     void displaysDirectoryAndBuildsRemoteSelection();
+    void presentsFileTypesIconsAndModificationTimesConsistently();
+    void configuresIndependentMovableColumns();
+    void sortsEveryColumnUsingRawValues();
+    void loadsDirectoryCountsLazilyAndSortsThem();
+    void preservesSshDirectoryCountsAcrossRefresh();
     void rubberBandSelectsMultipleLocalRows();
     void controlRubberBandTogglesRemoteRows();
     void dragFromSelectedRowPreservesSelectionAndStartsInternalDrag();
@@ -145,6 +151,332 @@ void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
     QVERIFY(!selection.at(0).directory);
     QCOMPARE(selection.at(1).path, QStringLiteral("/srv/folder"));
     QVERIFY(selection.at(1).directory);
+}
+
+void FileBrowserPaneTest::presentsFileTypesIconsAndModificationTimesConsistently()
+{
+    const QDateTime modified = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("folder"), 0, modified, true, false},
+        {QStringLiteral("photo.jpg"), 100, modified, false, false},
+        {QStringLiteral("archive.zip"), 200, modified, false, false},
+        {QStringLiteral("unknown.rfm_unknown_extension_987"), 300, {}, false, false},
+        {QStringLiteral("linked-photo.jpg"), 0, modified, false, true},
+    };
+    rfm::app::FileBrowserPane pane;
+
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/tmp")},
+                       QStringLiteral("file:///tmp"), entries);
+    QTableWidget* const table = pane.fileTable();
+    QCOMPARE(table->columnCount(), 4);
+    QCOMPARE(table->horizontalHeaderItem(0)->text(), QStringLiteral("Name"));
+    QCOMPARE(table->horizontalHeaderItem(1)->text(), QStringLiteral("Size"));
+    QCOMPARE(table->horizontalHeaderItem(2)->text(), QStringLiteral("Type"));
+    QCOMPARE(table->horizontalHeaderItem(3)->text(), QStringLiteral("Modified"));
+    QCOMPARE(table->item(0, 2)->text(), QStringLiteral("Folder"));
+    QVERIFY(table->item(1, 2)->text() != QStringLiteral("File"));
+    QVERIFY(table->item(2, 2)->text() != QStringLiteral("File"));
+    QCOMPARE(table->item(3, 2)->text(), QStringLiteral("File"));
+    QCOMPARE(table->item(4, 2)->text(), QStringLiteral("Symbolic link"));
+    QCOMPARE(table->item(1, 3)->text(), QLocale{}.toString(modified, QLocale::ShortFormat));
+    QCOMPARE(table->item(3, 3)->text(), QStringLiteral("—"));
+    for (int row = 0; row < table->rowCount(); ++row) {
+        QVERIFY(!table->item(row, 0)->icon().isNull());
+    }
+
+    QStringList localTypes;
+    for (int row = 0; row < table->rowCount(); ++row) {
+        localTypes.push_back(table->item(row, 2)->text());
+    }
+    pane.showDirectory(
+        {rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/srv")},
+        QStringLiteral("sftp://host/srv"), entries);
+    for (int row = 0; row < table->rowCount(); ++row) {
+        QCOMPARE(table->item(row, 2)->text(), localTypes.at(row));
+    }
+    QCOMPARE(table->item(1, 3)->text(), QLocale{}.toString(modified, QLocale::ShortFormat));
+    QCOMPARE(table->item(3, 3)->text(), QStringLiteral("—"));
+}
+
+void FileBrowserPaneTest::configuresIndependentMovableColumns()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(420, 260);
+    pane.show();
+    QApplication::processEvents();
+
+    QTableWidget* const table = pane.fileTable();
+    QHeaderView* const header = table->horizontalHeader();
+    QVERIFY(header->sectionsClickable());
+    QVERIFY(header->sectionsMovable());
+    QVERIFY(header->isFirstSectionMovable());
+    QVERIFY(!header->stretchLastSection());
+    for (int section = 0; section < table->columnCount(); ++section) {
+        QCOMPARE(header->sectionResizeMode(section), QHeaderView::Interactive);
+    }
+
+    const QList<int> initialWidths{header->sectionSize(0), header->sectionSize(1),
+                                   header->sectionSize(2), header->sectionSize(3)};
+    QCOMPARE(initialWidths, QList<int>({280, 110, 180, 170}));
+    header->resizeSection(1, 60);
+    QCOMPARE(header->sectionSize(0), initialWidths.at(0));
+    QCOMPARE(header->sectionSize(1), 60);
+    QCOMPARE(header->sectionSize(2), initialWidths.at(2));
+    QCOMPARE(header->sectionSize(3), initialWidths.at(3));
+    header->resizeSection(1, initialWidths.at(1) + 70);
+    QCOMPARE(header->sectionSize(0), initialWidths.at(0));
+    QCOMPARE(header->sectionSize(1), initialWidths.at(1) + 70);
+    QCOMPARE(header->sectionSize(2), initialWidths.at(2));
+    QCOMPARE(header->sectionSize(3), initialWidths.at(3));
+    QTRY_VERIFY(table->horizontalScrollBar()->maximum() > 0);
+
+    header->moveSection(header->visualIndex(0), 3);
+    QCOMPARE(header->visualIndex(0), 3);
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"), {});
+    QCOMPARE(header->visualIndex(0), 3);
+    QCOMPARE(header->sectionSize(1), initialWidths.at(1) + 70);
+
+    rfm::app::PaneWorkspace workspace;
+    workspace.setSplit(true);
+    for (rfm::app::FileBrowserPane* const browser :
+         {workspace.primaryPane(), workspace.otherVisiblePane()}) {
+        QVERIFY(browser->fileTable()->horizontalHeader()->sectionsMovable());
+        QVERIFY(browser->fileTable()->horizontalHeader()->isFirstSectionMovable());
+        QVERIFY(!browser->fileTable()->horizontalHeader()->stretchLastSection());
+    }
+}
+
+void FileBrowserPaneTest::sortsEveryColumnUsingRawValues()
+{
+    const QDateTime early = QDateTime::fromSecsSinceEpoch(1'600'000'000);
+    const QDateTime late = QDateTime::fromSecsSinceEpoch(1'700'000'000);
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("z-folder"), 0, late, true, false},
+        {QStringLiteral("a-folder"), 0, early, true, false},
+        {QStringLiteral("b.txt"), 2, late, false, false},
+        {QStringLiteral("a.jpg"), 10, early, false, false},
+        {QStringLiteral("c.rfm_unknown_extension_987"), 1, {}, false, false},
+    };
+    rfm::app::FileBrowserPane pane;
+    pane.resize(800, 320);
+    pane.show();
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/tmp")},
+                       QStringLiteral("file:///tmp"), entries);
+    QTableWidget* const table = pane.fileTable();
+    QHeaderView* const header = table->horizontalHeader();
+    const auto names = [table]() {
+        QStringList result;
+        for (int row = 0; row < table->rowCount(); ++row) {
+            result.push_back(table->item(row, 0)->text());
+        }
+        return result;
+    };
+
+    table->sortItems(0, Qt::AscendingOrder);
+    QCOMPARE(names(), QStringList({QStringLiteral("a-folder"), QStringLiteral("z-folder"),
+                                   QStringLiteral("a.jpg"), QStringLiteral("b.txt"),
+                                   QStringLiteral("c.rfm_unknown_extension_987")}));
+    QCOMPARE(header->sortIndicatorSection(), 0);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::AscendingOrder);
+    const QPoint nameHeaderCenter(header->sectionViewportPosition(0) + header->sectionSize(0) / 2,
+                                  header->height() / 2);
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, nameHeaderCenter);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+    QCOMPARE(names(), QStringList({QStringLiteral("z-folder"), QStringLiteral("a-folder"),
+                                   QStringLiteral("c.rfm_unknown_extension_987"),
+                                   QStringLiteral("b.txt"), QStringLiteral("a.jpg")}));
+
+    table->sortItems(1, Qt::AscendingOrder);
+    QCOMPARE(names().sliced(2), QStringList({QStringLiteral("c.rfm_unknown_extension_987"),
+                                             QStringLiteral("b.txt"), QStringLiteral("a.jpg")}));
+    table->sortItems(1, Qt::DescendingOrder);
+    QCOMPARE(names().sliced(2), QStringList({QStringLiteral("a.jpg"), QStringLiteral("b.txt"),
+                                             QStringLiteral("c.rfm_unknown_extension_987")}));
+
+    table->sortItems(2, Qt::AscendingOrder);
+    QVERIFY(QString::localeAwareCompare(table->item(2, 2)->text().toCaseFolded(),
+                                        table->item(3, 2)->text().toCaseFolded()) <= 0);
+    QVERIFY(QString::localeAwareCompare(table->item(3, 2)->text().toCaseFolded(),
+                                        table->item(4, 2)->text().toCaseFolded()) <= 0);
+
+    table->sortItems(3, Qt::AscendingOrder);
+    QCOMPARE(names().sliced(2), QStringList({QStringLiteral("a.jpg"), QStringLiteral("b.txt"),
+                                             QStringLiteral("c.rfm_unknown_extension_987")}));
+    table->sortItems(3, Qt::DescendingOrder);
+    QCOMPARE(names().sliced(2), QStringList({QStringLiteral("b.txt"), QStringLiteral("a.jpg"),
+                                             QStringLiteral("c.rfm_unknown_extension_987")}));
+    for (int row = 0; row < 2; ++row) {
+        QVERIFY(table->item(row, 0)->data(Qt::UserRole).toBool());
+    }
+    QCOMPARE(table->item(4, 3)->text(), QStringLiteral("—"));
+
+    const QStringList localOrder = names();
+    const int sortedSection = header->sortIndicatorSection();
+    const Qt::SortOrder sortedOrder = header->sortIndicatorOrder();
+    pane.showDirectory(
+        {rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/srv")},
+        QStringLiteral("sftp://host/srv"), entries);
+    QCOMPARE(names(), localOrder);
+    QCOMPARE(header->sortIndicatorSection(), sortedSection);
+    QCOMPARE(header->sortIndicatorOrder(), sortedOrder);
+}
+
+void FileBrowserPaneTest::loadsDirectoryCountsLazilyAndSortsThem()
+{
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("z-folder"), 0, {}, true, false},
+        {QStringLiteral("a-folder"), 0, {}, true, false},
+        {QStringLiteral("denied"), 0, {}, true, false},
+        {QStringLiteral("file.bin"), 2, {}, false, false},
+    };
+    rfm::app::FileBrowserPane pane;
+    QSignalSpy requests(&pane, &rfm::app::FileBrowserPane::directoryItemCountRequested);
+    const rfm::core::BrowserLocation localLocation{rfm::core::FileSource::Local,
+                                                   QString::fromLatin1(rfm::core::LocalMachineId),
+                                                   QStringLiteral("/tmp")};
+    pane.showDirectory(localLocation, QStringLiteral("file:///tmp"), entries);
+    for (int row = 0; row < 3; ++row) {
+        QCOMPARE(pane.fileTable()->item(row, 1)->text(), QStringLiteral("…"));
+    }
+    QCOMPARE(pane.fileTable()->item(3, 1)->text(), QLocale{}.formattedDataSize(2));
+
+    QTRY_COMPARE(requests.size(), 1);
+    const auto finishRequest = [&pane, &requests](int index, std::optional<quint64> count) {
+        const QList<QVariant> arguments = requests.at(index);
+        pane.setDirectoryItemCount(arguments.at(0).value<rfm::core::BrowserLocation>(),
+                                   arguments.at(1).toULongLong(), arguments.at(2).toString(),
+                                   count);
+    };
+    finishRequest(0, 14);
+    QTRY_COMPARE(requests.size(), 2);
+    finishRequest(1, 1);
+    QTRY_COMPARE(requests.size(), 3);
+    finishRequest(2, std::nullopt);
+    QApplication::processEvents();
+    QCOMPARE(requests.size(), 3);
+
+    const auto rowNamed = [&pane](const QString& name) {
+        for (int row = 0; row < pane.fileTable()->rowCount(); ++row) {
+            if (pane.fileTable()->item(row, 0)->text() == name) {
+                return row;
+            }
+        }
+        return -1;
+    };
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("z-folder")), 1)->text(),
+             QStringLiteral("14 items"));
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("a-folder")), 1)->text(),
+             QStringLiteral("1 item"));
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("denied")), 1)->text(),
+             QStringLiteral("—"));
+
+    pane.fileTable()->sortItems(1, Qt::AscendingOrder);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("a-folder"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("z-folder"));
+    QCOMPARE(pane.fileTable()->item(2, 0)->text(), QStringLiteral("denied"));
+    QCOMPARE(pane.fileTable()->item(3, 0)->text(), QStringLiteral("file.bin"));
+    pane.fileTable()->sortItems(1, Qt::DescendingOrder);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("z-folder"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("a-folder"));
+    QCOMPARE(pane.fileTable()->item(2, 0)->text(), QStringLiteral("denied"));
+    QCOMPARE(pane.fileTable()->item(3, 0)->text(), QStringLiteral("file.bin"));
+
+    const rfm::core::BrowserLocation remoteLocation{
+        rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/srv")};
+    pane.showDirectory(remoteLocation, QStringLiteral("sftp://host/srv"), entries);
+    for (int row = 0; row < 3; ++row) {
+        QCOMPARE(pane.fileTable()->item(row, 1)->text(), QStringLiteral("…"));
+    }
+    QTRY_COMPARE(requests.size(), 4);
+    QCOMPARE(requests.constLast().at(0).value<rfm::core::BrowserLocation>(), remoteLocation);
+}
+
+void FileBrowserPaneTest::preservesSshDirectoryCountsAcrossRefresh()
+{
+    const rfm::core::BrowserLocation remoteLocation{
+        rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/srv")};
+    const QList<rfm::core::RemoteEntry> initialEntries{
+        {QStringLiteral("kept"), 0, {}, true, false},
+    };
+    const QList<rfm::core::RemoteEntry> refreshedEntries{
+        {QStringLiteral("kept"), 0, {}, true, false},
+        {QStringLiteral("new"), 0, {}, true, false},
+    };
+    rfm::app::FileBrowserPane pane;
+    QSignalSpy requests(&pane, &rfm::app::FileBrowserPane::directoryItemCountRequested);
+    const auto rowNamed = [&pane](const QString& name) {
+        for (int row = 0; row < pane.fileTable()->rowCount(); ++row) {
+            if (pane.fileTable()->item(row, 0)->text() == name) {
+                return row;
+            }
+        }
+        return -1;
+    };
+    const auto finishRequest = [&pane, &requests](int index, std::optional<quint64> count) {
+        const QList<QVariant> arguments = requests.at(index);
+        pane.setDirectoryItemCount(arguments.at(0).value<rfm::core::BrowserLocation>(),
+                                   arguments.at(1).toULongLong(), arguments.at(2).toString(),
+                                   count);
+    };
+
+    pane.showDirectory(remoteLocation, QStringLiteral("sftp://host/srv"), initialEntries);
+    QTRY_COMPARE(requests.size(), 1);
+    finishRequest(0, 3);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("3 items"));
+
+    pane.fileTable()->sortItems(1, Qt::AscendingOrder);
+    pane.showDirectory(remoteLocation, QStringLiteral("sftp://host/srv"), refreshedEntries);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("3 items"));
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("new")), 1)->text(),
+             QStringLiteral("…"));
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("kept"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("new"));
+
+    QTRY_COMPARE(requests.size(), 2);
+    QSignalSpy itemChanges(pane.fileTable(), &QTableWidget::itemChanged);
+    finishRequest(1, 3);
+    QCOMPARE(itemChanges.size(), 0);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("3 items"));
+    QTRY_COMPARE(requests.size(), 3);
+    finishRequest(2, 2);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("new")), 1)->text(),
+             QStringLiteral("2 items"));
+
+    pane.showDirectory(remoteLocation, QStringLiteral("sftp://host/srv"), refreshedEntries);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("3 items"));
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("new")), 1)->text(),
+             QStringLiteral("2 items"));
+    QTRY_COMPARE(requests.size(), 4);
+    finishRequest(3, 4);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("4 items"));
+    QTRY_COMPARE(requests.size(), 5);
+    finishRequest(4, std::nullopt);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("new")), 1)->text(),
+             QStringLiteral("2 items"));
+
+    pane.showDirectory(remoteLocation, QStringLiteral("sftp://host/srv"), refreshedEntries);
+    QTRY_COMPARE(requests.size(), 6);
+    pane.showDirectory(remoteLocation, QStringLiteral("sftp://host/srv"), refreshedEntries);
+    finishRequest(5, 99);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("4 items"));
+    QTRY_COMPARE(requests.size(), 7);
+
+    const rfm::core::BrowserLocation localLocation{rfm::core::FileSource::Local,
+                                                   QString::fromLatin1(rfm::core::LocalMachineId),
+                                                   QStringLiteral("/tmp")};
+    pane.showDirectory(localLocation, QStringLiteral("file:///tmp"), refreshedEntries);
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("kept")), 1)->text(),
+             QStringLiteral("…"));
+    QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("new")), 1)->text(),
+             QStringLiteral("…"));
 }
 
 void FileBrowserPaneTest::rubberBandSelectsMultipleLocalRows()

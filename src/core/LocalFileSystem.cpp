@@ -774,6 +774,17 @@ void LocalFileSystemWorker::listDirectory(quint64 requestId, QString path)
     }
 }
 
+void LocalFileSystemWorker::countDirectoryEntries(quint64 requestId, QString path)
+{
+    LocalDirectoryResult result = LocalFileSystem::listDirectory(path);
+    if (result.succeeded()) {
+        emit directoryCounted(requestId, std::move(result.path),
+                              static_cast<quint64>(result.entries.size()));
+    } else {
+        emit directoryCountFailed(requestId, std::move(result.path));
+    }
+}
+
 void LocalFileSystemWorker::listVolumes()
 {
     LocalStorageSnapshot snapshot = LocalFileSystem::storageSnapshot();

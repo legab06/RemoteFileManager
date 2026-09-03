@@ -83,6 +83,20 @@ bool isFatalSftpError(int sftpError)
     return sftpError == SSH_FX_NO_CONNECTION || sftpError == SSH_FX_CONNECTION_LOST;
 }
 
+QDateTime remoteModificationTime(const sftp_attributes attributes)
+{
+    if ((attributes->flags & SSH_FILEXFER_ATTR_MODIFYTIME) != 0U) {
+        if (attributes->mtime64 > static_cast<quint64>(std::numeric_limits<qint64>::max())) {
+            return {};
+        }
+        return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(attributes->mtime64));
+    }
+    if ((attributes->flags & SSH_FILEXFER_ATTR_ACMODTIME) != 0U) {
+        return QDateTime::fromSecsSinceEpoch(static_cast<qint64>(attributes->mtime));
+    }
+    return {};
+}
+
 std::optional<quint64> remoteFileSystemId(sftp_session sftp, const QString& path)
 {
     const QByteArray encoded = path.toUtf8();
@@ -1908,8 +1922,7 @@ void SshSession::authenticateAndOpen()
     while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
         const QString name = QString::fromUtf8(attributes->name);
         if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
-            entries.push_back({name, attributes->size,
-                               QDateTime::fromSecsSinceEpoch(attributes->mtime),
+            entries.push_back({name, attributes->size, remoteModificationTime(attributes),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
                                attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
         }
@@ -1957,8 +1970,7 @@ void SshSession::listDirectory(quint64 requestId, QString path)
         if (name != QStringLiteral(".") && name != QStringLiteral("..") &&
             (m_impl->activeCopyJob == nullptr ||
              !m_impl->activeCopyJob->hidesListingEntry(path, name))) {
-            entries.push_back({name, attributes->size,
-                               QDateTime::fromSecsSinceEpoch(attributes->mtime),
+            entries.push_back({name, attributes->size, remoteModificationTime(attributes),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
                                attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
         }
@@ -1980,6 +1992,48 @@ void SshSession::listDirectory(quint64 requestId, QString path)
         return std::pair{!entry.directory, entry.name.toCaseFolded()};
     });
     emit directoryListed(requestId, path, entries);
+}
+
+void SshSession::countDirectoryEntries(quint64 requestId, QString path)
+{
+    if (m_impl->sftp == nullptr) {
+        emit directoryCountFailed(requestId, path);
+        return;
+    }
+    const QByteArray encodedPath = path.toUtf8();
+    sftp_dir directory = sftp_opendir(m_impl->sftp, encodedPath.constData());
+    if (directory == nullptr) {
+        const int directoryError = sftp_get_error(m_impl->sftp);
+        emit directoryCountFailed(requestId, path);
+        if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
+            ssh_is_connected(m_impl->session) == 0) {
+            fail(tr("The SSH connection was lost while opening %1.").arg(path));
+        }
+        return;
+    }
+
+    quint64 count = 0;
+    while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
+        const QString name = QString::fromUtf8(attributes->name);
+        if (name != QStringLiteral(".") && name != QStringLiteral("..") &&
+            (m_impl->activeCopyJob == nullptr ||
+             !m_impl->activeCopyJob->hidesListingEntry(path, name))) {
+            ++count;
+        }
+        sftp_attributes_free(attributes);
+    }
+    const int directoryError =
+        sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
+    sftp_closedir(directory);
+    if (directoryError != SSH_FX_OK) {
+        emit directoryCountFailed(requestId, path);
+        if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
+            ssh_is_connected(m_impl->session) == 0) {
+            fail(tr("The SSH connection was lost while reading %1.").arg(path));
+        }
+        return;
+    }
+    emit directoryCounted(requestId, path, count);
 }
 
 void SshSession::listStorageVolumes(quint64 requestId)

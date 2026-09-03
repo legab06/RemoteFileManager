@@ -17,11 +17,13 @@
 #include <QFileInfo>
 #include <QFocusEvent>
 #include <QHeaderView>
+#include <QHash>
+#include <QIcon>
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QLocale>
-#include <QMimeDatabase>
 #include <QMimeData>
+#include <QMimeDatabase>
 #include <QMimeType>
 #include <QMouseEvent>
 #include <QPainter>
@@ -29,6 +31,7 @@
 #include <QRubberBand>
 #include <QScrollBar>
 #include <QSizePolicy>
+#include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -43,6 +46,78 @@ namespace rfm::app
 
 namespace
 {
+
+constexpr int SortValueRole = Qt::UserRole + 3;
+constexpr int SortKindRole = Qt::UserRole + 4;
+constexpr int SortNameRole = Qt::UserRole + 5;
+constexpr int SortDirectoryRole = Qt::UserRole + 6;
+constexpr int SortValueKnownRole = Qt::UserRole + 7;
+
+enum class SortKind { Text, Size, Modified };
+
+class SortableFileItem final : public QTableWidgetItem
+{
+  public:
+    SortableFileItem(QString text, SortKind kind, QVariant value, const QString& name,
+                     bool directory, bool valueKnown = true)
+        : QTableWidgetItem(std::move(text))
+    {
+        setData(SortValueRole, std::move(value));
+        setData(SortKindRole, static_cast<int>(kind));
+        setData(SortNameRole, name);
+        setData(SortDirectoryRole, directory);
+        setData(SortValueKnownRole, valueKnown);
+    }
+
+    [[nodiscard]] bool operator<(const QTableWidgetItem& other) const override
+    {
+        const Qt::SortOrder order = tableWidget() != nullptr
+                                        ? tableWidget()->horizontalHeader()->sortIndicatorOrder()
+                                        : Qt::AscendingOrder;
+        const bool directory = data(SortDirectoryRole).toBool();
+        const bool otherDirectory = other.data(SortDirectoryRole).toBool();
+        if (directory != otherDirectory) {
+            return order == Qt::AscendingOrder ? directory : !directory;
+        }
+
+        const SortKind kind = static_cast<SortKind>(data(SortKindRole).toInt());
+        const QVariant value = data(SortValueRole);
+        const QVariant otherValue = other.data(SortValueRole);
+        if (kind == SortKind::Modified) {
+            const QDateTime modified = value.toDateTime();
+            const QDateTime otherModified = otherValue.toDateTime();
+            if (modified.isValid() != otherModified.isValid()) {
+                const bool missing = !modified.isValid();
+                return order == Qt::AscendingOrder ? !missing : missing;
+            }
+            if (modified.isValid() && modified != otherModified) {
+                return modified < otherModified;
+            }
+        } else if (kind == SortKind::Size) {
+            const bool valueKnown = data(SortValueKnownRole).toBool();
+            const bool otherValueKnown = other.data(SortValueKnownRole).toBool();
+            if (valueKnown != otherValueKnown) {
+                const bool missing = !valueKnown;
+                return order == Qt::AscendingOrder ? !missing : missing;
+            }
+            const quint64 size = value.toULongLong();
+            const quint64 otherSize = otherValue.toULongLong();
+            if (size != otherSize) {
+                return size < otherSize;
+            }
+        } else {
+            const QString textValue = value.toString().toCaseFolded();
+            const QString otherTextValue = otherValue.toString().toCaseFolded();
+            const int comparison = QString::localeAwareCompare(textValue, otherTextValue);
+            if (comparison != 0) {
+                return comparison < 0;
+            }
+        }
+
+        return QString::localeAwareCompare(data(SortNameRole).toString().toCaseFolded(),
+                                           other.data(SortNameRole).toString().toCaseFolded()) < 0;
+    }
+};
 
 QColor blendedColor(const QColor& base, const QColor& accent, float accentRatio)
 {
@@ -66,7 +141,7 @@ QString safePropertyValue(const QString& value)
     return safe.simplified();
 }
 
-std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
+std::optional<QMimeType> mimeTypeForFileName(const QString& fileName)
 {
     if (QFileInfo(fileName).suffix().isEmpty()) {
         return std::nullopt;
@@ -77,11 +152,65 @@ std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
         mimeType.name() == QStringLiteral("application/octet-stream")) {
         return std::nullopt;
     }
-    const QString description = mimeType.comment().trimmed();
-    if (description.isEmpty() || description == mimeType.name()) {
-        return std::nullopt;
+    return mimeType;
+}
+
+struct FilePresentation {
+    QString type;
+    QIcon icon;
+};
+
+FilePresentation presentationForEntry(const rfm::core::RemoteEntry& entry)
+{
+    QFileIconProvider fallbackIcons;
+    if (entry.symbolicLink) {
+        const QStyle::StandardPixmap pixmap =
+            entry.directory ? QStyle::SP_DirLinkIcon : QStyle::SP_FileLinkIcon;
+        QIcon icon = QApplication::style()->standardIcon(pixmap);
+        if (icon.isNull()) {
+            icon = fallbackIcons.icon(entry.directory ? QFileIconProvider::Folder
+                                                      : QFileIconProvider::File);
+        }
+        return {QObject::tr("Symbolic link"), std::move(icon)};
     }
-    return description;
+    if (entry.directory) {
+        return {QObject::tr("Folder"), fallbackIcons.icon(QFileIconProvider::Folder)};
+    }
+
+    const std::optional<QMimeType> mimeType = mimeTypeForFileName(entry.name);
+    if (!mimeType.has_value()) {
+        return {QObject::tr("File"), fallbackIcons.icon(QFileIconProvider::File)};
+    }
+
+    QString description = mimeType->comment().trimmed();
+    if (description.isEmpty() || description == mimeType->name()) {
+        description = QObject::tr("File");
+    }
+    QIcon icon = QIcon::fromTheme(mimeType->iconName());
+    if (icon.isNull()) {
+        icon = QIcon::fromTheme(mimeType->genericIconName());
+    }
+    if (icon.isNull()) {
+        // Keep remote detection name-only while still letting each Qt platform
+        // provide its native extension icon when no themed MIME icon exists.
+        icon = fallbackIcons.icon(QFileInfo(entry.name));
+    }
+    if (icon.isNull()) {
+        icon = fallbackIcons.icon(QFileIconProvider::File);
+    }
+    return {std::move(description), std::move(icon)};
+}
+
+QString modifiedDisplayText(const QDateTime& modifiedAt)
+{
+    return modifiedAt.isValid() ? QLocale{}.toString(modifiedAt, QLocale::ShortFormat)
+                                : QObject::tr("—");
+}
+
+QString directoryItemCountText(quint64 count)
+{
+    return count == 1 ? QObject::tr("1 item")
+                      : QObject::tr("%1 items").arg(QLocale{}.toString(count));
 }
 
 rfm::core::InternalTransferAction requestedTransferAction(Qt::KeyboardModifiers modifiers)
@@ -403,8 +532,8 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     auto* const dragTable = new InternalDragTable(this);
     m_fileTable = dragTable;
     m_fileTable->setObjectName(QStringLiteral("remoteFileTable"));
-    m_fileTable->setColumnCount(3);
-    m_fileTable->setHorizontalHeaderLabels({tr("Name"), tr("Size"), tr("Modified")});
+    m_fileTable->setColumnCount(4);
+    m_fileTable->setHorizontalHeaderLabels({tr("Name"), tr("Size"), tr("Type"), tr("Modified")});
     m_fileTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_fileTable->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_fileTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -416,8 +545,20 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     m_fileTable->setDragDropMode(QAbstractItemView::DragDrop);
     m_fileTable->setDropIndicatorShown(false);
     m_fileTable->verticalHeader()->hide();
-    m_fileTable->horizontalHeader()->setStretchLastSection(true);
-    m_fileTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    QHeaderView* const header = m_fileTable->horizontalHeader();
+    header->setSectionsClickable(true);
+    header->setSectionsMovable(true);
+    header->setFirstSectionMovable(true);
+    header->setStretchLastSection(false);
+    header->setSectionResizeMode(QHeaderView::Interactive);
+    header->setMinimumSectionSize(48);
+    header->resizeSection(0, 280);
+    header->resizeSection(1, 110);
+    header->resizeSection(2, 180);
+    header->resizeSection(3, 170);
+    m_fileTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_fileTable->setSortingEnabled(true);
+    header->setSortIndicator(-1, Qt::AscendingOrder);
     layout->addWidget(m_fileTable);
 
     installEventFilter(this);
@@ -496,13 +637,10 @@ std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() con
     const QString path = m_currentLocation.source == rfm::core::FileSource::Local
                              ? QDir(m_currentLocation.path).filePath(entry.name)
                              : rfm::core::RemotePath::join(m_currentLocation.path, entry.name);
-    const QString type = entry.symbolicLink
-                             ? tr("Symbolic link")
-                             : entry.directory
-                                   ? tr("Folder")
-                                   : mimeDescriptionForFileName(entry.name).value_or(tr("File"));
+    const FilePresentation presentation = presentationForEntry(entry);
     QStringList lines{tr("Name: %1").arg(safePropertyValue(entry.name)),
-                      tr("Type: %1").arg(type), tr("Path: %1").arg(safePropertyValue(path))};
+                      tr("Type: %1").arg(presentation.type),
+                      tr("Path: %1").arg(safePropertyValue(path))};
     if (!entry.directory) {
         const QString extension = safePropertyValue(QFileInfo(entry.name).suffix());
         if (!extension.isEmpty()) {
@@ -516,10 +654,7 @@ std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() con
                 : static_cast<qint64>(entry.size);
         lines.push_back(tr("Size: %1").arg(QLocale{}.formattedDataSize(displaySize)));
     }
-    if (entry.modifiedAt.isValid()) {
-        lines.push_back(
-            tr("Modified: %1").arg(QLocale{}.toString(entry.modifiedAt, QLocale::ShortFormat)));
-    }
+    lines.push_back(tr("Modified: %1").arg(modifiedDisplayText(entry.modifiedAt)));
     return FileEntryProperties{safePropertyValue(entry.name), lines.join(QChar{'\n'})};
 }
 
@@ -640,6 +775,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         return;
     }
     QStringList namesToSelect;
+    QHash<QString, quint64> preservedDirectoryCounts;
     int previousScrollPosition = -1;
     const bool sameDirectory = normalizedLocation == m_currentLocation;
     if (sameDirectory) {
@@ -650,6 +786,19 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
             }
         }
         previousScrollPosition = m_fileTable->verticalScrollBar()->value();
+        if (normalizedLocation.source == rfm::core::FileSource::Ssh) {
+            for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+                const QTableWidgetItem* const nameItem = m_fileTable->item(row, 0);
+                const QTableWidgetItem* const sizeItem = m_fileTable->item(row, 1);
+                if (nameItem != nullptr && sizeItem != nullptr &&
+                    nameItem->data(Qt::UserRole).toBool() &&
+                    !nameItem->data(Qt::UserRole + 1).toBool() &&
+                    sizeItem->data(SortValueKnownRole).toBool()) {
+                    preservedDirectoryCounts.insert(nameItem->text(),
+                                                    sizeItem->data(SortValueRole).toULongLong());
+                }
+            }
+        }
     }
     for (const QString& name : std::as_const(m_pendingSelectionNames)) {
         if (!namesToSelect.contains(name)) {
@@ -692,13 +841,17 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     m_fileTable->setDragEnabled(internalTransferEnabled);
     m_fileTable->setAcceptDrops(internalTransferEnabled);
     m_fileTable->viewport()->setAcceptDrops(internalTransferEnabled);
+    const bool sortingEnabled = m_fileTable->isSortingEnabled();
+    m_fileTable->setSortingEnabled(false);
+    ++m_directoryCountGeneration;
+    m_pendingDirectoryCountNames.clear();
     m_fileTable->setRowCount(static_cast<int>(entries.size()));
-    QFileIconProvider icons;
     for (qsizetype row = 0; row < entries.size(); ++row) {
         const auto& entry = entries.at(row);
-        auto* const nameItem = new QTableWidgetItem(
-            icons.icon(entry.directory ? QFileIconProvider::Folder : QFileIconProvider::File),
-            entry.name);
+        const FilePresentation presentation = presentationForEntry(entry);
+        auto* const nameItem = new SortableFileItem(entry.name, SortKind::Text, entry.name,
+                                                    entry.name, entry.directory);
+        nameItem->setIcon(presentation.icon);
         nameItem->setData(Qt::UserRole, entry.directory);
         nameItem->setData(Qt::UserRole + 1, entry.symbolicLink);
         nameItem->setData(Qt::UserRole + 2, QVariant::fromValue(entry));
@@ -707,14 +860,31 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
             entry.size > static_cast<quint64>(std::numeric_limits<qint64>::max())
                 ? std::numeric_limits<qint64>::max()
                 : static_cast<qint64>(entry.size);
-        auto* const sizeItem = new QTableWidgetItem(
-            entry.directory ? QString{} : QLocale{}.formattedDataSize(displaySize));
+        const bool countableDirectory = entry.directory && !entry.symbolicLink;
+        if (countableDirectory) {
+            m_pendingDirectoryCountNames.push_back(entry.name);
+        }
+        const auto preservedCount = preservedDirectoryCounts.constFind(entry.name);
+        const bool hasPreservedCount =
+            countableDirectory && preservedCount != preservedDirectoryCounts.cend();
+        auto* const sizeItem = new SortableFileItem(
+            hasPreservedCount    ? directoryItemCountText(*preservedCount)
+            : countableDirectory ? tr("…")
+            : entry.directory    ? tr("—")
+                                 : QLocale{}.formattedDataSize(displaySize),
+            SortKind::Size, QVariant::fromValue(hasPreservedCount ? *preservedCount : entry.size),
+            entry.name, entry.directory, !countableDirectory || hasPreservedCount);
         sizeItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
         m_fileTable->setItem(static_cast<int>(row), 1, sizeItem);
-        m_fileTable->setItem(
-            static_cast<int>(row), 2,
-            new QTableWidgetItem(QLocale{}.toString(entry.modifiedAt, QLocale::ShortFormat)));
+        m_fileTable->setItem(static_cast<int>(row), 2,
+                             new SortableFileItem(presentation.type, SortKind::Text,
+                                                  presentation.type, entry.name, entry.directory));
+        m_fileTable->setItem(static_cast<int>(row), 3,
+                             new SortableFileItem(modifiedDisplayText(entry.modifiedAt),
+                                                  SortKind::Modified, entry.modifiedAt, entry.name,
+                                                  entry.directory));
     }
+    m_fileTable->setSortingEnabled(sortingEnabled);
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
         const QTableWidgetItem* const item = m_fileTable->item(row, 0);
         if (item != nullptr && namesToSelect.contains(item->text())) {
@@ -729,6 +899,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     m_pathEdit->setText(displayPath);
     updateCutAppearance();
     emit historyChanged();
+    QTimer::singleShot(0, this, &FileBrowserPane::requestNextDirectoryItemCount);
 }
 
 void FileBrowserPane::clear()
@@ -736,6 +907,8 @@ void FileBrowserPane::clear()
     m_currentLocation = {};
     m_contextMenuRow = -1;
     m_pendingSelectionNames.clear();
+    ++m_directoryCountGeneration;
+    m_pendingDirectoryCountNames.clear();
     m_backHistory.clear();
     m_forwardHistory.clear();
     m_pathEdit->clear();
@@ -783,6 +956,63 @@ void FileBrowserPane::removeHistoryUnderPath(rfm::core::FileSource source, const
 void FileBrowserPane::setPendingSelectionNames(QStringList names)
 {
     m_pendingSelectionNames = std::move(names);
+}
+
+void FileBrowserPane::setDirectoryItemCount(const rfm::core::BrowserLocation& location,
+                                            quint64 generation, const QString& name,
+                                            std::optional<quint64> count)
+{
+    if (location != m_activeDirectoryCountLocation ||
+        generation != m_activeDirectoryCountGeneration || name != m_activeDirectoryCountName) {
+        return;
+    }
+    m_activeDirectoryCountLocation = {};
+    m_activeDirectoryCountName.clear();
+    m_activeDirectoryCountGeneration = 0;
+
+    if (location == m_currentLocation && generation == m_directoryCountGeneration) {
+        for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+            const QTableWidgetItem* const nameItem = m_fileTable->item(row, 0);
+            if (nameItem == nullptr || nameItem->text() != name) {
+                continue;
+            }
+            QTableWidgetItem* const sizeItem = m_fileTable->item(row, 1);
+            if (sizeItem != nullptr) {
+                const bool hadKnownCount = sizeItem->data(SortValueKnownRole).toBool();
+                const bool countChanged =
+                    count.has_value() &&
+                    (!hadKnownCount || sizeItem->data(SortValueRole).toULongLong() != *count);
+                const bool showFailure =
+                    !count.has_value() && !hadKnownCount && sizeItem->text() != tr("—");
+                if (!countChanged && !showFailure) {
+                    break;
+                }
+                const bool sortingEnabled = m_fileTable->isSortingEnabled();
+                m_fileTable->setSortingEnabled(false);
+                sizeItem->setText(count.has_value() ? directoryItemCountText(*count) : tr("—"));
+                sizeItem->setData(SortValueKnownRole, count.has_value());
+                if (count.has_value()) {
+                    sizeItem->setData(SortValueRole, QVariant::fromValue(*count));
+                }
+                m_fileTable->setSortingEnabled(sortingEnabled);
+            }
+            break;
+        }
+    }
+    QTimer::singleShot(0, this, &FileBrowserPane::requestNextDirectoryItemCount);
+}
+
+void FileBrowserPane::requestNextDirectoryItemCount()
+{
+    if (!m_activeDirectoryCountName.isEmpty() || m_pendingDirectoryCountNames.isEmpty() ||
+        !m_currentLocation.isValid()) {
+        return;
+    }
+    m_activeDirectoryCountLocation = m_currentLocation;
+    m_activeDirectoryCountGeneration = m_directoryCountGeneration;
+    m_activeDirectoryCountName = m_pendingDirectoryCountNames.takeFirst();
+    emit directoryItemCountRequested(m_activeDirectoryCountLocation,
+                                     m_activeDirectoryCountGeneration, m_activeDirectoryCountName);
 }
 
 void FileBrowserPane::setInteractionEnabled(bool enabled)

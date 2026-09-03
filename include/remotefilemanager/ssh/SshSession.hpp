@@ -40,6 +40,7 @@ class SshSession final : public QObject
     void connectToHost(rfm::core::ConnectionProfile profile, QString password);
     void confirmUnknownHost(bool accepted);
     void listDirectory(quint64 requestId, QString path);
+    void countDirectoryEntries(quint64 requestId, QString path);
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
     void operateVolume(rfm::core::VolumeOperationRequest request);
@@ -63,8 +64,9 @@ class SshSession final : public QObject
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
-    void remoteFilesystemsCompared(quint64 requestId,
-                                   rfm::core::RemoteFilesystemRelation relation);
+    void directoryCounted(quint64 requestId, QString path, quint64 count);
+    void directoryCountFailed(quint64 requestId, QString path);
+    void remoteFilesystemsCompared(quint64 requestId, rfm::core::RemoteFilesystemRelation relation);
     void storageVolumesListed(quint64 requestId, QList<rfm::core::StorageVolume> volumes);
     void storageMountInfoFingerprint(quint64 requestId, QByteArray fingerprint);
     void storageMountsProbed(quint64 requestId, QByteArray fingerprint);
