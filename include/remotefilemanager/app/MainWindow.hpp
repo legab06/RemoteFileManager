@@ -198,18 +198,23 @@ class MainWindow final : public QMainWindow
                                         quint64 destinationPaneId, QString destinationDirectory);
     [[nodiscard]] std::optional<rfm::core::InternalTransferAction>
     chooseCrossFilesystemTransferAction();
+    void scheduleTransferDestinationRefresh(quint64 transferId);
     [[nodiscard]] QString
     transferValidationMessage(rfm::core::InternalTransferValidationError error) const;
+    [[nodiscard]] QString listingStatusMessage(const QString& path,
+                                               PaneNavigation navigation) const;
     void requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
                                  bool coalesceIfPending,
-                                 PaneNavigation navigation = PaneNavigation::Refresh);
+                                 PaneNavigation navigation = PaneNavigation::Refresh,
+                                 bool showStatusMessage = true);
     void requestLocalDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
                                       PaneNavigation navigation = PaneNavigation::Refresh,
-                                      bool treeRequest = false);
+                                      bool treeRequest = false, bool showStatusMessage = true);
     void requestLocalTreeDirectoryRefresh(const QString& path);
     void requestRemoteTreeDirectory(const QString& profileId, const QString& path);
     void requestLocationListing(quint64 paneId, const rfm::core::BrowserLocation& location,
-                                bool showBusy, PaneNavigation navigation);
+                                bool showBusy, PaneNavigation navigation,
+                                bool showStatusMessage = true);
     Q_INVOKABLE void handleLocalDirectoryListed(quint64 requestId, const QString& path,
                                                 const QList<rfm::core::RemoteEntry>& entries);
     Q_INVOKABLE void handleLocalDirectoryListingError(quint64 requestId, const QString& path,
@@ -254,7 +259,8 @@ class MainWindow final : public QMainWindow
                                                 rfm::core::FileSource source,
                                                 quint64 connectionGeneration = 0) const;
     void cancelDirectoryRequests(quint64 paneId);
-    void setPaneBusy(quint64 paneId, bool busy, const QString& message = {});
+    void setPaneBusy(quint64 paneId, bool busy, const QString& message = {},
+                     int messageTimeout = 0);
     void schedulePaneRefresh(quint64 paneId, bool showBusy);
     void scheduleVisiblePanesForPaths(const QSet<QString>& paths, bool showBusy);
     [[nodiscard]] bool confirmOtherPaneOperation(const QString& operation,
@@ -350,6 +356,7 @@ class MainWindow final : public QMainWindow
     QHash<quint64, quint64> m_paneNavigationGenerations;
     QHash<quint64, rfm::core::FileSource> m_expectedPaneSources;
     QHash<quint64, bool> m_scheduledPaneRefreshes;
+    QHash<quint64, rfm::core::BrowserLocation> m_scheduledTransferRefreshLocations;
     struct OperationContext {
         quint64 sourcePaneId{0};
         quint64 destinationPaneId{0};
@@ -375,6 +382,11 @@ class MainWindow final : public QMainWindow
     QSet<quint64> m_silentRemoteOperationResults;
     QHash<quint64, rfm::core::OperationProgress> m_operations;
     QHash<quint64, quint64> m_transferPanes;
+    struct TransferRefreshContext {
+        rfm::core::BrowserLocation destination;
+        rfm::core::RemoteConnectionIdentity connection;
+    };
+    QHash<quint64, TransferRefreshContext> m_transferRefreshContexts;
     rfm::core::InternalClipboard m_internalClipboard;
     QHash<quint64, quint64> m_clipboardMoveOperations;
     QHash<quint64, quint64> m_localClipboardMoveOperations;

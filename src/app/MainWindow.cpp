@@ -61,6 +61,8 @@ namespace rfm::app
 namespace
 {
 
+constexpr int ListingStatusMessageTimeoutMs = 3000;
+
 QString remoteDisplayUrl(const rfm::core::ConnectionProfile& profile, const QString& path)
 {
     const QString normalizedPath = rfm::core::RemotePath::normalize(path);
@@ -193,11 +195,26 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     m_refreshDebounceTimer->setSingleShot(true);
     connect(m_refreshDebounceTimer, &QTimer::timeout, this, [this] {
         const auto refreshes = std::exchange(m_scheduledPaneRefreshes, {});
+        const auto transferDestinations = std::exchange(m_scheduledTransferRefreshLocations, {});
         for (auto iterator = refreshes.cbegin(); iterator != refreshes.cend(); ++iterator) {
             if (FileBrowserPane* const pane = m_paneWorkspace->pane(iterator.key());
                 pane != nullptr && !pane->isHidden()) {
+                const auto destination = transferDestinations.constFind(iterator.key());
+                if (destination != transferDestinations.cend()) {
+                    const bool stillDisplaysDestination =
+                        destination->source == rfm::core::FileSource::Ssh
+                            ? pane->source() == rfm::core::FileSource::Ssh &&
+                                  pane->currentLocation().machineId == destination->machineId &&
+                                  rfm::core::RemotePath::normalize(pane->currentPath()) ==
+                                      destination->path
+                            : pane->source() == rfm::core::FileSource::Local &&
+                                  QDir::cleanPath(pane->currentPath()) == destination->path;
+                    if (!stillDisplaysDestination) {
+                        continue;
+                    }
+                }
                 requestLocationListing(iterator.key(), pane->currentLocation(), iterator.value(),
-                                       PaneNavigation::Refresh);
+                                       PaneNavigation::Refresh, false);
             }
         }
     });
@@ -377,6 +394,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
                     m_nonTerminalTransfers.remove(id);
                 }
                 m_transferPanes.remove(id);
+                m_transferRefreshContexts.remove(id);
                 updateConnectionAction();
                 statusBar()->showMessage(error, 8000);
             });
@@ -1522,6 +1540,7 @@ void MainWindow::resetDisconnectedUi()
     stopAutomaticRefresh();
     m_refreshDebounceTimer->stop();
     m_scheduledPaneRefreshes.clear();
+    m_scheduledTransferRefreshLocations.clear();
     m_directoryRequests.clear();
     m_directoryQueue.clear();
     m_expectedDirectoryRequests.clear();
@@ -1537,6 +1556,7 @@ void MainWindow::resetDisconnectedUi()
     m_remoteOperations.clear();
     m_silentRemoteOperationResults.clear();
     m_transferPanes.clear();
+    m_transferRefreshContexts.clear();
     bool hasLocalPane = false;
     for (const quint64 paneId : m_paneWorkspace->paneIds()) {
         FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
@@ -2185,6 +2205,18 @@ void MainWindow::queueDownloads(QString localDirectory)
 void MainWindow::queueTransferRequest(const rfm::core::TransferRequest& request, quint64 paneId)
 {
     m_transferPanes.insert(request.id, paneId);
+    TransferRefreshContext refreshContext;
+    refreshContext.connection = currentConnectionIdentity();
+    if (request.direction == rfm::core::TransferDirection::Upload) {
+        refreshContext.destination = {rfm::core::FileSource::Ssh, activeRemoteMachineId(),
+                                      rfm::core::RemotePath::normalize(
+                                          rfm::core::RemotePath::parent(request.destination))};
+    } else {
+        refreshContext.destination = {
+            rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+            QDir::cleanPath(QFileInfo(request.destination).absolutePath())};
+    }
+    m_transferRefreshContexts.insert(request.id, std::move(refreshContext));
     m_pendingTransferRequests.insert(request.id);
     m_nonTerminalTransfers.insert(request.id);
     updateConnectionAction();
@@ -2562,15 +2594,39 @@ void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progr
     }
     updateConnectionAction();
 
-    if (progress.state == rfm::core::TransferState::Completed &&
-        progress.direction == rfm::core::TransferDirection::Upload &&
-        !progress.destination.isEmpty()) {
-        scheduleVisiblePanesForPaths(
-            {rfm::core::RemotePath::normalize(rfm::core::RemotePath::parent(progress.destination))},
-            false);
+    if (progress.state == rfm::core::TransferState::Completed) {
+        scheduleTransferDestinationRefresh(progress.id);
     }
     if (terminal) {
         m_transferPanes.remove(progress.id);
+        m_transferRefreshContexts.remove(progress.id);
+    }
+}
+
+void MainWindow::scheduleTransferDestinationRefresh(quint64 transferId)
+{
+    const auto context = m_transferRefreshContexts.constFind(transferId);
+    if (context == m_transferRefreshContexts.cend()) {
+        return;
+    }
+    if (context->connection != currentConnectionIdentity()) {
+        return;
+    }
+    for (const quint64 paneId : m_paneWorkspace->visiblePaneIds()) {
+        FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+        if (pane == nullptr || pane->source() != context->destination.source) {
+            continue;
+        }
+        const bool sameDestination =
+            context->destination.source == rfm::core::FileSource::Ssh
+                ? pane->currentLocation().machineId == context->destination.machineId &&
+                      rfm::core::RemotePath::normalize(pane->currentPath()) ==
+                          context->destination.path
+                : QDir::cleanPath(pane->currentPath()) == context->destination.path;
+        if (sameDestination) {
+            schedulePaneRefresh(paneId, false);
+            m_scheduledTransferRefreshLocations.insert(paneId, context->destination);
+        }
     }
 }
 
@@ -2833,7 +2889,8 @@ void MainWindow::clearInternalClipboard()
 }
 
 void MainWindow::requestDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
-                                         bool coalesceIfPending, PaneNavigation navigation)
+                                         bool coalesceIfPending, PaneNavigation navigation,
+                                         bool showStatusMessage)
 {
     FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
     if (!m_connected || pane == nullptr || pane->isHidden() || path.isEmpty()) {
@@ -2880,13 +2937,16 @@ void MainWindow::requestDirectoryListing(quint64 paneId, const QString& path, bo
     m_expectedDirectoryRequests.insert(paneId, requestId);
     m_directoryQueue.enqueue(requestId);
     if (showBusy) {
-        setPaneBusy(paneId, true, tr("Refreshing %1…").arg(path));
+        setPaneBusy(paneId, true,
+                    showStatusMessage ? listingStatusMessage(path, navigation) : QString{},
+                    showStatusMessage ? ListingStatusMessageTimeoutMs : 0);
     }
     startNextDirectoryListing();
 }
 
 void MainWindow::requestLocalDirectoryListing(quint64 paneId, const QString& path, bool showBusy,
-                                              PaneNavigation navigation, bool treeRequest)
+                                              PaneNavigation navigation, bool treeRequest,
+                                              bool showStatusMessage)
 {
     FileBrowserPane* const pane = paneId == 0 ? nullptr : m_paneWorkspace->pane(paneId);
     if (path.isEmpty() || (!treeRequest && (pane == nullptr || pane->isHidden()))) {
@@ -2917,7 +2977,9 @@ void MainWindow::requestLocalDirectoryListing(quint64 paneId, const QString& pat
     if (paneId != 0) {
         m_expectedLocalDirectoryRequests.insert(paneId, requestId);
         if (showBusy) {
-            setPaneBusy(paneId, true, tr("Opening local folder %1…").arg(path));
+            setPaneBusy(paneId, true,
+                        showStatusMessage ? listingStatusMessage(path, navigation) : QString{},
+                        showStatusMessage ? ListingStatusMessageTimeoutMs : 0);
         }
     }
     emit localDirectoryRequested(requestId, path);
@@ -2948,14 +3010,17 @@ void MainWindow::requestRemoteTreeDirectory(const QString& profileId, const QStr
 }
 
 void MainWindow::requestLocationListing(quint64 paneId, const rfm::core::BrowserLocation& location,
-                                        bool showBusy, PaneNavigation navigation)
+                                        bool showBusy, PaneNavigation navigation,
+                                        bool showStatusMessage)
 {
     if (location.source == rfm::core::FileSource::Local &&
         location.machineId == QString::fromLatin1(rfm::core::LocalMachineId)) {
-        requestLocalDirectoryListing(paneId, location.path, showBusy, navigation);
+        requestLocalDirectoryListing(paneId, location.path, showBusy, navigation, false,
+                                     showStatusMessage);
     } else if (location.source == rfm::core::FileSource::Ssh && m_connected &&
                location.machineId == activeRemoteMachineId()) {
-        requestDirectoryListing(paneId, location.path, showBusy, true, navigation);
+        requestDirectoryListing(paneId, location.path, showBusy, true, navigation,
+                                showStatusMessage);
     }
 }
 
@@ -3373,7 +3438,16 @@ void MainWindow::cancelDirectoryRequests(quint64 paneId)
     setPaneBusy(paneId, false);
 }
 
-void MainWindow::setPaneBusy(quint64 paneId, bool busy, const QString& message)
+QString MainWindow::listingStatusMessage(const QString& path, PaneNavigation navigation) const
+{
+    if (navigation == PaneNavigation::Refresh) {
+        return tr("Refreshing %1…").arg(path);
+    }
+    return tr("Opening folder %1…").arg(path);
+}
+
+void MainWindow::setPaneBusy(quint64 paneId, bool busy, const QString& message,
+                             int messageTimeout)
 {
     FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
     if (pane == nullptr) {
@@ -3387,7 +3461,7 @@ void MainWindow::setPaneBusy(quint64 paneId, bool busy, const QString& message)
     pane->setInteractionEnabled(!busy && !m_busy);
     updateNavigationActions();
     if (busy && !message.isEmpty()) {
-        statusBar()->showMessage(message);
+        statusBar()->showMessage(message, messageTimeout);
     }
     updateConnectionAction();
     updateOperationActions();
@@ -3399,6 +3473,7 @@ void MainWindow::schedulePaneRefresh(quint64 paneId, bool showBusy)
     if (pane == nullptr || pane->isHidden() || pane->currentPath().isEmpty()) {
         return;
     }
+    m_scheduledTransferRefreshLocations.remove(paneId);
     m_scheduledPaneRefreshes[paneId] = m_scheduledPaneRefreshes.value(paneId) || showBusy;
     m_refreshDebounceTimer->start();
 }
@@ -3444,6 +3519,7 @@ void MainWindow::stopAutomaticRefresh()
     m_activeDirectoryRequestId = 0;
     m_busyPanes.clear();
     m_scheduledPaneRefreshes.clear();
+    m_scheduledTransferRefreshLocations.clear();
 }
 
 void MainWindow::updateOperationActions()

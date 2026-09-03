@@ -562,6 +562,9 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             if (valid) {
                 dragEvent->setDropAction(dropAction);
                 dragEvent->accept();
+            } else if (unsupportedCrossSourceMove) {
+                dragEvent->setDropAction(Qt::IgnoreAction);
+                dragEvent->ignore();
             } else if (payload.has_value()) {
                 dragEvent->setDropAction(Qt::IgnoreAction);
                 dragEvent->accept();

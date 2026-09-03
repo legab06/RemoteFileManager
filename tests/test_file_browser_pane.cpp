@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QDir>
 #include <QDropEvent>
 #include <QFile>
@@ -1079,6 +1080,27 @@ void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
 
     QMimeData localMime;
     localMime.setData(rfm::core::InternalTransferMimeType, localData);
+    const QPoint background(10, ssh.fileTable()->viewport()->height() - 2);
+    QDragEnterEvent normalEnter(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+                                Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(ssh.fileTable()->viewport(), &normalEnter);
+    QVERIFY(normalEnter.isAccepted());
+    QCOMPARE(normalEnter.dropAction(), Qt::CopyAction);
+    QDragMoveEvent shiftedMove(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+                               Qt::LeftButton, Qt::ShiftModifier);
+    QApplication::sendEvent(ssh.fileTable()->viewport(), &shiftedMove);
+    QVERIFY(!shiftedMove.isAccepted());
+    QCOMPARE(shiftedMove.dropAction(), Qt::IgnoreAction);
+    QDragMoveEvent restoredMove(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+                                Qt::LeftButton, Qt::NoModifier);
+    QApplication::sendEvent(ssh.fileTable()->viewport(), &restoredMove);
+    QVERIFY(restoredMove.isAccepted());
+    QCOMPARE(restoredMove.dropAction(), Qt::CopyAction);
+    QDragMoveEvent controlShiftMove(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+                                    Qt::LeftButton, Qt::ControlModifier | Qt::ShiftModifier);
+    QApplication::sendEvent(ssh.fileTable()->viewport(), &controlShiftMove);
+    QVERIFY(controlShiftMove.isAccepted());
+    QCOMPARE(controlShiftMove.dropAction(), Qt::CopyAction);
     const auto sendDrop = [](rfm::app::FileBrowserPane& destination, const QMimeData& mime,
                              Qt::KeyboardModifiers modifiers, Qt::DropAction expectedAction,
                              rfm::core::InternalTransferAction expectedIntent, bool accepted) {
@@ -1087,7 +1109,7 @@ void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
         QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
                               modifiers);
         QApplication::sendEvent(destination.fileTable()->viewport(), &enter);
-        QVERIFY(enter.isAccepted());
+        QCOMPARE(enter.isAccepted(), accepted);
         QCOMPARE(enter.dropAction(), expectedAction);
         QCOMPARE(destination.fileTable()->property("dropState").toString(),
                  accepted ? QStringLiteral("valid") : QStringLiteral("invalid"));
@@ -1095,7 +1117,9 @@ void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
                         modifiers);
         QApplication::sendEvent(destination.fileTable()->viewport(), &drop);
         QCOMPARE(drop.isAccepted(), accepted);
-        QCOMPARE(drop.dropAction(), expectedAction);
+        if (accepted) {
+            QCOMPARE(drop.dropAction(), expectedAction);
+        }
         QCOMPARE(drops.size(), accepted ? 1 : 0);
         if (accepted) {
             QCOMPARE(drops.constFirst().at(1).value<rfm::core::InternalTransferAction>(),

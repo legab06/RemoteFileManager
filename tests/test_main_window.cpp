@@ -445,6 +445,9 @@ class MainWindowTest final : public QObject
     void displaysLocalSuccessWarning();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void refreshesAfterCompletedUpload();
+    void localAndRemoteNavigationShowOpeningStatusMessage();
+    void manualRefreshShowsStatusMessage();
+    void crossSourceMoveUnsupportedReplacesRefreshMessage();
     void appliesOnlyExpectedDirectoryResult();
     void distinguishesRequestsForSamePath();
     void newNavigationMakesActiveResultObsolete();
@@ -2686,23 +2689,80 @@ void MainWindowTest::refreshesAfterCompletedUpload()
     upload.direction = rfm::core::TransferDirection::Upload;
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, upload)));
-    QVERIFY(debounce->isActive());
-    debounce->stop();
-    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
-    QCOMPARE(requested.size(), 1);
-    QCOMPARE(requested.constFirst().at(1).toString(), QStringLiteral("/srv"));
+    QVERIFY(!debounce->isActive());
+    QCOMPARE(requested.size(), 0);
 
-    const quint64 requestId = requested.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
-        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    requested.clear();
     auto download = progress(502, rfm::core::TransferState::Completed, 10, 10);
     download.direction = rfm::core::TransferDirection::Download;
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, download)));
     QVERIFY(!debounce->isActive());
     QCOMPARE(requested.size(), 0);
+}
+
+void MainWindowTest::manualRefreshShowsStatusMessage()
+{
+    rfm::app::MainWindow window;
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    pane->showDirectory(
+        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+         QStringLiteral("/tmp")},
+        QStringLiteral("/tmp"), {});
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy requested(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    window.statusBar()->clearMessage();
+    window.findChild<QAction*>(QStringLiteral("refreshAction"))->trigger();
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Refreshing /tmp…"));
+    QCOMPARE(requested.size(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(window.statusBar()->currentMessage().isEmpty(), 4000);
+}
+
+void MainWindowTest::localAndRemoteNavigationShowOpeningStatusMessage()
+{
+    rfm::app::MainWindow localWindow;
+    auto* const localPane = localWindow.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(localPane != nullptr);
+    QObject::disconnect(&localWindow, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy localRequested(&localWindow, &rfm::app::MainWindow::localDirectoryRequested);
+    localPane->locationNavigationRequested(
+        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+         QStringLiteral("/tmp")},
+        rfm::app::PaneNavigation::Normal);
+    QCOMPARE(localWindow.statusBar()->currentMessage(), QStringLiteral("Opening folder /tmp…"));
+    QCOMPARE(localRequested.size(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(localWindow.statusBar()->currentMessage().isEmpty(), 4000);
+
+    rfm::app::MainWindow remoteWindow;
+    QVERIFY(QMetaObject::invokeMethod(&remoteWindow, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    QObject::disconnect(&remoteWindow, &rfm::app::MainWindow::directoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy remoteRequested(&remoteWindow, &rfm::app::MainWindow::directoryRequested);
+    auto* const remotePane = remoteWindow.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(remotePane != nullptr);
+    const rfm::core::BrowserLocation remoteLocation = remotePane->currentLocation();
+    remotePane->locationNavigationRequested(
+        {rfm::core::FileSource::Ssh, remoteLocation.machineId, QStringLiteral("/srv/next")},
+        rfm::app::PaneNavigation::Normal);
+    QCOMPARE(remoteWindow.statusBar()->currentMessage(),
+             QStringLiteral("Opening folder /srv/next…"));
+    QVERIFY(!remoteWindow.statusBar()->currentMessage().contains(QStringLiteral("Refreshing")));
+    QCOMPARE(remoteRequested.size(), 1);
+}
+
+void MainWindowTest::crossSourceMoveUnsupportedReplacesRefreshMessage()
+{
+    rfm::app::MainWindow window;
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    window.statusBar()->showMessage(QStringLiteral("Refreshing /previous…"));
+    QVERIFY(QMetaObject::invokeMethod(pane, "crossSourceMoveUnsupported", Qt::DirectConnection));
+    QCOMPARE(window.statusBar()->currentMessage(),
+             QStringLiteral("Moving between local and SSH locations is not supported yet."));
 }
 
 void MainWindowTest::appliesOnlyExpectedDirectoryResult()
@@ -3889,7 +3949,7 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
-    auto* const secondary = workspace->otherVisiblePane();
+    QVERIFY(workspace->otherVisiblePane() != nullptr);
     const quint64 initialId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, initialId),
@@ -3903,8 +3963,10 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
         {{QStringLiteral("/source/a"), QStringLiteral("/destination/a"), true, {}}}};
     QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
                                       Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    window.statusBar()->showMessage(QStringLiteral("Remote operation completed"));
     debounce->stop();
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Remote operation completed"));
     QCOMPARE(requested.size(), 1);
     QCOMPARE(requested.constFirst().at(1).toString(), QStringLiteral("/destination"));
     const quint64 copyRefresh = requested.constFirst().constFirst().toULongLong();
@@ -3939,28 +4001,6 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, destinationRefresh),
         Q_ARG(QString, secondMovePath), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
 
-    workspace->primaryPane()->showDirectory(QStringLiteral("/destination"),
-                                            QStringLiteral("/destination"), {});
-    secondary->showDirectory(QStringLiteral("/destination"), QStringLiteral("/destination"), {});
-    requested.clear();
-    auto upload = progress(702, rfm::core::TransferState::Completed, 10, 10);
-    upload.destination = QStringLiteral("/destination/uploaded.txt");
-    upload.direction = rfm::core::TransferDirection::Upload;
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::TransferProgress, upload)));
-    debounce->stop();
-    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
-    QCOMPARE(requested.size(), 1);
-    const quint64 firstUploadRefresh = requested.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, firstUploadRefresh),
-        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QCOMPARE(requested.size(), 2);
-
-    const quint64 secondUploadRefresh = requested.at(1).constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, secondUploadRefresh),
-        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     requested.clear();
     auto download = progress(703, rfm::core::TransferState::Completed, 10, 10);
     download.direction = rfm::core::TransferDirection::Download;
@@ -4585,7 +4625,8 @@ void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
         Q_ARG(rfm::core::InternalTransferPayload, *localPayload),
         Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
         Q_ARG(quint64, destinationPaneId), Q_ARG(QString, QStringLiteral("/uploads")),
-        Q_ARG(bool, true)));
+        Q_ARG(bool, false)));
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
     QCOMPARE(transfers.size(), 2);
     QHash<QString, rfm::core::TransferRequest> uploads;
     for (const QList<QVariant>& arguments : transfers) {
@@ -4598,6 +4639,34 @@ void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
     QCOMPARE(uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder"))).destination,
              QStringLiteral("/uploads/folder"));
     QVERIFY(uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder"))).directory);
+
+    auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
+    QVERIFY(debounce != nullptr);
+    const auto firstUpload = uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("a.txt")));
+    auto uploadCompleted = progress(firstUpload.id, rfm::core::TransferState::Completed, 1, 1);
+    uploadCompleted.source = firstUpload.source;
+    uploadCompleted.destination = firstUpload.destination;
+    uploadCompleted.direction = firstUpload.direction;
+    window.statusBar()->showMessage(QStringLiteral("Transfer completed"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, uploadCompleted)));
+    QVERIFY(debounce->isActive());
+    debounce->stop();
+    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Transfer completed"));
+
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Ssh, remoteDestination.machineId, QStringLiteral("/elsewhere")},
+        QStringLiteral("/elsewhere"), {});
+    const auto secondUpload = uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder")));
+    auto uploadAfterNavigation =
+        progress(secondUpload.id, rfm::core::TransferState::Completed, 1, 1);
+    uploadAfterNavigation.source = secondUpload.source;
+    uploadAfterNavigation.destination = secondUpload.destination;
+    uploadAfterNavigation.direction = secondUpload.direction;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, uploadAfterNavigation)));
+    QVERIFY(!debounce->isActive());
 
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleInternalDrop", Qt::DirectConnection,
@@ -4662,7 +4731,8 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
         Q_ARG(rfm::core::InternalTransferPayload, *sshPayload),
         Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
         Q_ARG(quint64, destinationPaneId), Q_ARG(QString, destinationDirectory),
-        Q_ARG(bool, true)));
+        Q_ARG(bool, false)));
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
     QCOMPARE(transfers.size(), 2);
     QHash<QString, rfm::core::TransferRequest> downloads;
     for (const QList<QVariant>& arguments : transfers) {
@@ -4674,6 +4744,43 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
              QDir(destinationDirectory).filePath(QStringLiteral("a.txt")));
     QCOMPARE(downloads.value(QStringLiteral("/source/folder")).destination,
              QDir(destinationDirectory).filePath(QStringLiteral("folder")));
+
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy localRefreshes(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
+    QVERIFY(debounce != nullptr);
+    const auto firstDownload = downloads.value(QStringLiteral("/source/a.txt"));
+    auto downloadCompleted = progress(firstDownload.id, rfm::core::TransferState::Completed, 1, 1);
+    downloadCompleted.source = firstDownload.source;
+    downloadCompleted.destination = firstDownload.destination;
+    downloadCompleted.direction = firstDownload.direction;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, downloadCompleted)));
+    QVERIFY(debounce->isActive());
+    debounce->stop();
+    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(localRefreshes.size(), 1);
+    QCOMPARE(localRefreshes.constFirst().at(1).toString(), destinationDirectory);
+
+    localRefreshes.clear();
+    const QString otherDirectory = QDir(temporary.path()).filePath(QStringLiteral("other"));
+    QVERIFY(QDir().mkpath(otherDirectory));
+    const auto secondDownload = downloads.value(QStringLiteral("/source/folder"));
+    auto downloadAfterNavigation =
+        progress(secondDownload.id, rfm::core::TransferState::Completed, 1, 1);
+    downloadAfterNavigation.source = secondDownload.source;
+    downloadAfterNavigation.destination = secondDownload.destination;
+    downloadAfterNavigation.direction = secondDownload.direction;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, downloadAfterNavigation)));
+    QVERIFY(debounce->isActive());
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, otherDirectory}, otherDirectory,
+        {});
+    debounce->stop();
+    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(localRefreshes.size(), 0);
 
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
     QVERIFY(QMetaObject::invokeMethod(
