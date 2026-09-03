@@ -23,12 +23,15 @@
 #include <QMimeDatabase>
 #include <QMimeData>
 #include <QMimeType>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QRubberBand>
 #include <QScrollBar>
 #include <QSizePolicy>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <functional>
@@ -81,10 +84,41 @@ std::optional<QString> mimeDescriptionForFileName(const QString& fileName)
     return description;
 }
 
+rfm::core::InternalTransferAction requestedTransferAction(Qt::KeyboardModifiers modifiers)
+{
+    return modifiers.testFlag(Qt::ControlModifier) || !modifiers.testFlag(Qt::ShiftModifier)
+               ? rfm::core::InternalTransferAction::Copy
+               : rfm::core::InternalTransferAction::Move;
+}
+
+bool transferActionWasExplicitlyRequested(Qt::KeyboardModifiers modifiers)
+{
+    return modifiers.testFlag(Qt::ControlModifier) || modifiers.testFlag(Qt::ShiftModifier);
+}
+
+Qt::DropAction qtDropAction(rfm::core::InternalTransferAction action)
+{
+    return action == rfm::core::InternalTransferAction::Copy ? Qt::CopyAction : Qt::MoveAction;
+}
+
 class InternalDragTable final : public QTableWidget
 {
   public:
-    using QTableWidget::QTableWidget;
+    explicit InternalDragTable(QWidget* parent = nullptr) : QTableWidget(parent)
+    {
+        m_autoScrollTimer.setInterval(50);
+        connect(&m_autoScrollTimer, &QTimer::timeout, this, [this]() {
+            QScrollBar* const scrollBar = verticalScrollBar();
+            const int previousValue = scrollBar->value();
+            scrollBar->setValue(previousValue + m_autoScrollDirection * scrollBar->singleStep());
+            if (scrollBar->value() == previousValue) {
+                m_autoScrollTimer.stop();
+                return;
+            }
+            updateRubberBandSelection(m_lastViewportPosition);
+        });
+    }
+
     std::function<void(Qt::DropActions)> startDragHandler;
 
   protected:
@@ -94,6 +128,261 @@ class InternalDragTable final : public QTableWidget
             startDragHandler(supportedActions);
         }
     }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            QTableWidget::mousePressEvent(event);
+            return;
+        }
+
+        const QModelIndex pressedIndex = indexAt(event->position().toPoint());
+        if (pressedIndex.isValid()) {
+            finishRubberBand();
+            m_itemInteractionActive = true;
+            m_itemDragAttempted = false;
+            m_itemPressViewportPosition = event->position().toPoint();
+            m_itemInitialSelectedRows = selectedRowSet();
+            m_preserveItemSelectionForDrag =
+                selectionModel()->isSelected(pressedIndex) && m_itemInitialSelectedRows.size() > 1;
+            QTableWidget::mousePressEvent(event);
+            if (m_preserveItemSelectionForDrag) {
+                m_itemClickSelectedRows = selectedRowSet();
+                const bool control = event->modifiers().testFlag(Qt::ControlModifier);
+                const bool shift = event->modifiers().testFlag(Qt::ShiftModifier);
+                if (control && !shift) {
+                    m_itemClickSelectedRows = m_itemInitialSelectedRows;
+                    m_itemClickSelectedRows.remove(pressedIndex.row());
+                } else if (!control && !shift) {
+                    m_itemClickSelectedRows = {pressedIndex.row()};
+                }
+                setSelectedRows(m_itemInitialSelectedRows);
+            }
+            return;
+        }
+
+        finishItemInteraction();
+        setFocus(Qt::MouseFocusReason);
+        m_rubberBandPending = true;
+        m_rubberBandActive = false;
+        m_pressViewportPosition = event->position().toPoint();
+        m_originContentPosition = contentPosition(m_pressViewportPosition);
+        m_lastViewportPosition = m_pressViewportPosition;
+        m_controlSelection = event->modifiers().testFlag(Qt::ControlModifier);
+        m_initialSelectedRows.clear();
+        for (const QModelIndex& index : selectionModel()->selectedRows(0)) {
+            m_initialSelectedRows.insert(index.row());
+        }
+        if (!m_controlSelection) {
+            clearSelection();
+        }
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override
+    {
+        if (m_itemInteractionActive) {
+            if (!event->buttons().testFlag(Qt::LeftButton)) {
+                finishItemInteraction();
+                event->accept();
+                return;
+            }
+            const QPoint position = event->position().toPoint();
+            if (!m_itemDragAttempted &&
+                (position - m_itemPressViewportPosition).manhattanLength() >=
+                    QApplication::startDragDistance()) {
+                m_itemDragAttempted = true;
+                setState(QAbstractItemView::DraggingState);
+                if (dragEnabled()) {
+                    startDrag(model()->supportedDragActions());
+                }
+                if (m_itemInteractionActive) {
+                    setState(QAbstractItemView::NoState);
+                }
+            }
+            event->accept();
+            return;
+        }
+
+        if (!m_rubberBandPending) {
+            QTableWidget::mouseMoveEvent(event);
+            return;
+        }
+        if (!event->buttons().testFlag(Qt::LeftButton)) {
+            finishRubberBand();
+            QTableWidget::mouseMoveEvent(event);
+            return;
+        }
+
+        const QPoint position = event->position().toPoint();
+        if (!m_rubberBandActive && (position - m_pressViewportPosition).manhattanLength() <
+                                       QApplication::startDragDistance()) {
+            event->accept();
+            return;
+        }
+
+        if (!m_rubberBandActive) {
+            m_rubberBandActive = true;
+            if (m_rubberBand == nullptr) {
+                m_rubberBand = new QRubberBand(QRubberBand::Rectangle, viewport());
+                m_rubberBand->setObjectName(QStringLiteral("fileSelectionRubberBand"));
+            }
+            m_rubberBand->show();
+        }
+        updateRubberBandSelection(position);
+        updateAutoScroll(position);
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (m_itemInteractionActive && event->button() == Qt::LeftButton) {
+            if (!m_itemDragAttempted) {
+                QTableWidget::mouseReleaseEvent(event);
+                if (m_preserveItemSelectionForDrag) {
+                    setSelectedRows(m_itemClickSelectedRows);
+                }
+            } else {
+                event->accept();
+            }
+            finishItemInteraction();
+            return;
+        }
+        if (m_rubberBandPending && event->button() == Qt::LeftButton) {
+            finishRubberBand();
+            event->accept();
+            return;
+        }
+        QTableWidget::mouseReleaseEvent(event);
+    }
+
+    void focusOutEvent(QFocusEvent* event) override
+    {
+        finishRubberBand();
+        finishItemInteraction();
+        QTableWidget::focusOutEvent(event);
+    }
+
+  private:
+    [[nodiscard]] QSet<int> selectedRowSet() const
+    {
+        QSet<int> rows;
+        for (const QModelIndex& index : selectionModel()->selectedRows(0)) {
+            rows.insert(index.row());
+        }
+        return rows;
+    }
+
+    void setSelectedRows(const QSet<int>& rows)
+    {
+        QItemSelection selection;
+        const int columns = model()->columnCount();
+        for (int row = 0; row < model()->rowCount(); ++row) {
+            if (rows.contains(row)) {
+                selection.select(model()->index(row, 0), model()->index(row, columns - 1));
+            }
+        }
+        selectionModel()->select(selection,
+                                 QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    }
+
+    [[nodiscard]] QPoint contentPosition(const QPoint& viewportPosition) const
+    {
+        const QRect bounds = viewport()->rect();
+        const QPoint boundedPosition{qBound(bounds.left(), viewportPosition.x(), bounds.right()),
+                                     qBound(bounds.top(), viewportPosition.y(), bounds.bottom())};
+        return boundedPosition + QPoint(horizontalOffset(), verticalOffset());
+    }
+
+    void updateRubberBandSelection(const QPoint& viewportPosition)
+    {
+        m_lastViewportPosition = viewportPosition;
+        const QPoint currentContentPosition = contentPosition(viewportPosition);
+        const QRect contentRectangle =
+            QRect(m_originContentPosition, currentContentPosition).normalized();
+        const QRect viewportRectangle =
+            contentRectangle.translated(-horizontalOffset(), -verticalOffset());
+        m_rubberBand->setGeometry(viewportRectangle);
+
+        QSet<int> intersectingRows;
+        const int columns = model()->columnCount();
+        for (int row = 0; row < model()->rowCount(); ++row) {
+            QRect rowRectangle;
+            for (int column = 0; column < columns; ++column) {
+                rowRectangle = rowRectangle.united(visualRect(model()->index(row, column)));
+            }
+            rowRectangle.translate(horizontalOffset(), verticalOffset());
+            if (!rowRectangle.isEmpty() && rowRectangle.intersects(contentRectangle)) {
+                intersectingRows.insert(row);
+            }
+        }
+
+        QSet<int> selectedRows = m_controlSelection ? m_initialSelectedRows : QSet<int>{};
+        for (const int row : std::as_const(intersectingRows)) {
+            if (m_controlSelection && selectedRows.contains(row)) {
+                selectedRows.remove(row);
+            } else {
+                selectedRows.insert(row);
+            }
+        }
+
+        setSelectedRows(selectedRows);
+    }
+
+    void updateAutoScroll(const QPoint& viewportPosition)
+    {
+        constexpr int AutoScrollMargin = 24;
+        if (viewportPosition.y() < AutoScrollMargin) {
+            m_autoScrollDirection = -1;
+        } else if (viewportPosition.y() >= viewport()->height() - AutoScrollMargin) {
+            m_autoScrollDirection = 1;
+        } else {
+            m_autoScrollDirection = 0;
+        }
+        if (m_autoScrollDirection == 0) {
+            m_autoScrollTimer.stop();
+        } else if (!m_autoScrollTimer.isActive()) {
+            m_autoScrollTimer.start();
+        }
+    }
+
+    void finishRubberBand()
+    {
+        m_autoScrollTimer.stop();
+        m_autoScrollDirection = 0;
+        m_rubberBandPending = false;
+        m_rubberBandActive = false;
+        if (m_rubberBand != nullptr) {
+            m_rubberBand->hide();
+        }
+    }
+
+    void finishItemInteraction()
+    {
+        m_itemInteractionActive = false;
+        m_itemDragAttempted = false;
+        m_preserveItemSelectionForDrag = false;
+        m_itemInitialSelectedRows.clear();
+        m_itemClickSelectedRows.clear();
+        setState(QAbstractItemView::NoState);
+    }
+
+    QRubberBand* m_rubberBand{nullptr};
+    QTimer m_autoScrollTimer;
+    QPoint m_pressViewportPosition;
+    QPoint m_originContentPosition;
+    QPoint m_lastViewportPosition;
+    QPoint m_itemPressViewportPosition;
+    QSet<int> m_initialSelectedRows;
+    QSet<int> m_itemInitialSelectedRows;
+    QSet<int> m_itemClickSelectedRows;
+    int m_autoScrollDirection{0};
+    bool m_rubberBandPending{false};
+    bool m_rubberBandActive{false};
+    bool m_controlSelection{false};
+    bool m_itemInteractionActive{false};
+    bool m_itemDragAttempted{false};
+    bool m_preserveItemSelectionForDrag{false};
 };
 
 } // namespace
@@ -182,11 +471,15 @@ bool FileBrowserPane::canGoForward() const { return !m_forwardHistory.isEmpty();
 
 QByteArray FileBrowserPane::createInternalDragData() const
 {
-    if (m_currentLocation.source != rfm::core::FileSource::Ssh) {
+    if (m_currentLocation.source == rfm::core::FileSource::None) {
         return {};
     }
-    return rfm::core::encodeInternalTransfer(
-        {m_applicationInstanceId, m_connectionIdentity, m_paneId, selectedEntries()});
+    return rfm::core::encodeInternalTransfer({m_currentLocation.source, m_currentLocation.machineId,
+                                              m_applicationInstanceId,
+                                              m_currentLocation.source == rfm::core::FileSource::Ssh
+                                                  ? m_connectionIdentity
+                                                  : rfm::core::RemoteConnectionIdentity{},
+                                              m_paneId, selectedEntries()});
 }
 
 std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() const
@@ -256,12 +549,22 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             const QPoint position = dragEvent->position().toPoint();
             int folderRow = -1;
             const QString destination = dropDestinationAt(position, &folderRow);
+            const rfm::core::InternalTransferAction action =
+                requestedTransferAction(dragEvent->modifiers());
+            const Qt::DropAction dropAction = qtDropAction(action);
+            const bool unsupportedCrossSourceMove =
+                payload.has_value() && action == rfm::core::InternalTransferAction::Move &&
+                payload->source != m_currentLocation.source;
             const bool valid =
-                payload.has_value() && validateDrop(*payload, destination).accepted();
+                payload.has_value() && dragEvent->possibleActions().testFlag(dropAction) &&
+                !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
             updateDropAppearance(payload.has_value(), valid, valid ? folderRow : -1);
             if (valid) {
-                dragEvent->setDropAction(Qt::CopyAction);
+                dragEvent->setDropAction(dropAction);
                 dragEvent->accept();
+            } else if (unsupportedCrossSourceMove) {
+                dragEvent->setDropAction(Qt::IgnoreAction);
+                dragEvent->ignore();
             } else if (payload.has_value()) {
                 dragEvent->setDropAction(Qt::IgnoreAction);
                 dragEvent->accept();
@@ -284,17 +587,30 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
                           mimeData->data(rfm::core::InternalTransferMimeType))
                     : std::nullopt;
             const QString destination = dropDestinationAt(dropEvent->position().toPoint());
+            const rfm::core::InternalTransferAction action =
+                requestedTransferAction(dropEvent->modifiers());
+            const Qt::DropAction dropAction = qtDropAction(action);
+            const bool unsupportedCrossSourceMove =
+                payload.has_value() && action == rfm::core::InternalTransferAction::Move &&
+                payload->source != m_currentLocation.source;
             const bool valid =
-                payload.has_value() && validateDrop(*payload, destination).accepted();
+                payload.has_value() && dropEvent->possibleActions().testFlag(dropAction) &&
+                !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
             updateDropAppearance(false, false);
             if (!valid) {
+                if (unsupportedCrossSourceMove) {
+                    emit crossSourceMoveUnsupported();
+                }
+                dropEvent->setDropAction(Qt::IgnoreAction);
                 dropEvent->ignore();
                 return true;
             }
-            dropEvent->setDropAction(Qt::CopyAction);
+            dropEvent->setDropAction(dropAction);
             dropEvent->accept();
             emit activated();
-            emit internalDropRequested(*payload, destination);
+            emit internalDropRequested(*payload, action, destination,
+                                       transferActionWasExplicitlyRequested(
+                                           dropEvent->modifiers()));
             return true;
         }
     }
@@ -372,9 +688,10 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     }
     m_currentLocation = normalizedLocation;
     m_contextMenuRow = -1;
-    m_fileTable->setDragEnabled(m_currentLocation.source == rfm::core::FileSource::Ssh);
-    m_fileTable->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
-    m_fileTable->viewport()->setAcceptDrops(m_currentLocation.source == rfm::core::FileSource::Ssh);
+    const bool internalTransferEnabled = m_currentLocation.source != rfm::core::FileSource::None;
+    m_fileTable->setDragEnabled(internalTransferEnabled);
+    m_fileTable->setAcceptDrops(internalTransferEnabled);
+    m_fileTable->viewport()->setAcceptDrops(internalTransferEnabled);
     m_fileTable->setRowCount(static_cast<int>(entries.size()));
     QFileIconProvider icons;
     for (qsizetype row = 0; row < entries.size(); ++row) {
@@ -626,10 +943,12 @@ void FileBrowserPane::prepareContextMenu(const QPoint& position)
 
 void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
 {
+    Q_UNUSED(supportedActions)
     const QByteArray data = createInternalDragData();
     if (data.isEmpty()) {
         return;
     }
+    emit internalDragStarted();
     auto* const mimeData = new QMimeData;
     mimeData->setData(rfm::core::InternalTransferMimeType, data);
     QDrag drag(m_fileTable);
@@ -643,11 +962,15 @@ void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
     painter.setPen(Qt::NoPen);
     painter.drawRoundedRect(pixmap.rect().adjusted(0, 0, -1, -1), 5, 5);
     painter.setPen(palette().color(QPalette::HighlightedText));
-    painter.drawText(pixmap.rect(), Qt::AlignCenter,
-                     tr("%1 remote item(s)").arg(selectedEntries().size()));
+    const QString itemKind = m_currentLocation.source == rfm::core::FileSource::Local
+                                 ? tr("%1 local item(s)")
+                                 : tr("%1 remote item(s)");
+    painter.drawText(pixmap.rect(), Qt::AlignCenter, itemKind.arg(selectedEntries().size()));
     drag.setPixmap(pixmap);
     drag.setHotSpot(QPoint(12, 12));
-    drag.exec(supportedActions & (Qt::CopyAction | Qt::MoveAction), Qt::CopyAction);
+    const Qt::DropActions allowedActions = Qt::CopyAction | Qt::MoveAction;
+    drag.exec(allowedActions,
+              qtDropAction(requestedTransferAction(QApplication::keyboardModifiers())));
 }
 
 QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRow) const
@@ -666,7 +989,9 @@ QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRo
     if (folderRow != nullptr) {
         *folderRow = hit->row();
     }
-    return rfm::core::RemotePath::join(m_currentLocation.path, name->text());
+    return m_currentLocation.source == rfm::core::FileSource::Local
+               ? QDir(m_currentLocation.path).filePath(name->text())
+               : rfm::core::RemotePath::join(m_currentLocation.path, name->text());
 }
 
 QString FileBrowserPane::normalizedPath(const rfm::core::BrowserLocation& location) const
@@ -690,8 +1015,11 @@ rfm::core::InternalTransferValidation
 FileBrowserPane::validateDrop(const rfm::core::InternalTransferPayload& payload,
                               const QString& destination) const
 {
-    return rfm::core::validateInternalTransfer(payload, m_applicationInstanceId,
-                                               m_connectionIdentity, destination);
+    rfm::core::BrowserLocation destinationLocation = m_currentLocation;
+    destinationLocation.path = destination;
+    return rfm::core::validateInternalTransfer(
+        payload, m_applicationInstanceId, destinationLocation, m_connectionIdentity,
+        rfm::core::InternalTransferCompatibility::AllowLocalAndSsh);
 }
 
 void FileBrowserPane::updateDropAppearance(bool active, bool valid, int folderRow)

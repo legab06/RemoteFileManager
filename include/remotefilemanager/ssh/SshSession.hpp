@@ -3,6 +3,7 @@
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
+#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/Storage.hpp"
@@ -45,6 +46,8 @@ class SshSession final : public QObject
     void cancelVolumeAuthentication(quint64 operationId, quint64 authenticationToken);
     void createDirectory(quint64 id, QString parent, QString name);
     void renameEntry(quint64 id, QString source, QString newName);
+    void compareRemoteFilesystems(quint64 requestId, QString sourceDirectory,
+                                  QString destinationDirectory);
     void startRemoteOperation(rfm::core::RemoteOperationRequest request);
     void removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive);
     void startTransfer(rfm::core::TransferRequest request);
@@ -60,6 +63,8 @@ class SshSession final : public QObject
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
+    void remoteFilesystemsCompared(quint64 requestId,
+                                   rfm::core::RemoteFilesystemRelation relation);
     void storageVolumesListed(quint64 requestId, QList<rfm::core::StorageVolume> volumes);
     void storageMountInfoFingerprint(quint64 requestId, QByteArray fingerprint);
     void storageMountsProbed(quint64 requestId, QByteArray fingerprint);

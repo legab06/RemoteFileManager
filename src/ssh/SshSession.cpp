@@ -2497,6 +2497,20 @@ void SshSession::renameEntry(quint64 id, QString source, QString newName)
     emit operationFinished(operations.rename(id, source, newName));
 }
 
+void SshSession::compareRemoteFilesystems(quint64 requestId, QString sourceDirectory,
+                                          QString destinationDirectory)
+{
+    if (requestId == 0 || m_impl->sftp == nullptr || m_impl->shuttingDown ||
+        m_impl->disconnecting) {
+        emit remoteFilesystemsCompared(requestId, rfm::core::RemoteFilesystemRelation::Unknown);
+        return;
+    }
+    const rfm::core::RemoteFilesystemRelation relation = rfm::core::remoteFilesystemRelation(
+        remoteFileSystemId(m_impl->sftp, sourceDirectory),
+        remoteFileSystemId(m_impl->sftp, destinationDirectory));
+    emit remoteFilesystemsCompared(requestId, relation);
+}
+
 void SshSession::startRemoteOperation(rfm::core::RemoteOperationRequest request)
 {
     if (m_impl->sftp == nullptr || m_impl->shuttingDown || m_impl->disconnecting) {

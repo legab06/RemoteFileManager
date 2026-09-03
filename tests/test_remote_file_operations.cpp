@@ -1,4 +1,5 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/RemoteMoveSafety.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/core/ServerSideCopyJob.hpp"
@@ -526,6 +527,7 @@ class RemoteFileOperationsTest final : public QObject
     void reportsSourceCleanupFailureAfterCopy();
     void preservesPromotedSourceWhenMountTreeGuardFails();
     void doesNotFallbackForAnUnqualifiedRenameFailure();
+    void classifiesRemoteFilesystemIdsConservatively();
     void removesFileAndRecursiveTreeWithGuards();
     void emitsWorkerOperationErrors();
     void treatsListingWithoutSessionAsFatal();
@@ -802,6 +804,18 @@ void RemoteFileOperationsTest::qualifiesCrossDeviceFallbackWithoutFollowingSourc
     auto missingFileSystem = normal;
     missingFileSystem.sourceContainerFileSystem.reset();
     QVERIFY(!rfm::core::allowsRemoteMoveFallback(missingFileSystem));
+}
+
+void RemoteFileOperationsTest::classifiesRemoteFilesystemIdsConservatively()
+{
+    QCOMPARE(rfm::core::remoteFilesystemRelation(quint64{42}, quint64{42}),
+             rfm::core::RemoteFilesystemRelation::Same);
+    QCOMPARE(rfm::core::remoteFilesystemRelation(quint64{42}, quint64{43}),
+             rfm::core::RemoteFilesystemRelation::Different);
+    QCOMPARE(rfm::core::remoteFilesystemRelation(std::nullopt, quint64{43}),
+             rfm::core::RemoteFilesystemRelation::Unknown);
+    QCOMPARE(rfm::core::remoteFilesystemRelation(quint64{42}, std::nullopt),
+             rfm::core::RemoteFilesystemRelation::Unknown);
 }
 
 void RemoteFileOperationsTest::serverSideCopyPollingPreservesSharedSessionBlockingMode()

@@ -78,8 +78,11 @@ class FileBrowserPane final : public QWidget
     void historyChanged();
     void selectionChanged();
     void contextMenuRequested(QPoint globalPosition);
+    void internalDragStarted();
     void internalDropRequested(rfm::core::InternalTransferPayload payload,
-                               QString destinationDirectory);
+                               rfm::core::InternalTransferAction action,
+                               QString destinationDirectory, bool actionWasExplicitlyRequested);
+    void crossSourceMoveUnsupported();
 
   private:
     bool eventFilter(QObject* watched, QEvent* event) override;

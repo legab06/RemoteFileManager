@@ -457,6 +457,27 @@ LocalFileOperationItemResult operationItemResult(const QString& source, const QS
 
 } // namespace
 
+bool LocalFileSystem::pathsUseDifferentFileSystems(const QString& source,
+                                                   const QString& destination)
+{
+    // rename() moves directory entries, so inspect their parent filesystems. This also avoids
+    // following a symbolic link target onto an unrelated volume.
+    const QStorageInfo sourceStorage(QFileInfo(source).absolutePath());
+    const QStorageInfo destinationStorage(QFileInfo(destination).absolutePath());
+    if (!sourceStorage.isValid() || !sourceStorage.isReady() || !destinationStorage.isValid() ||
+        !destinationStorage.isReady()) {
+        return false;
+    }
+    if (!sourceStorage.device().isEmpty() && !destinationStorage.device().isEmpty()) {
+        return sourceStorage.device() != destinationStorage.device();
+    }
+    if (sourceStorage.rootPath().isEmpty() || destinationStorage.rootPath().isEmpty()) {
+        return false;
+    }
+    return sourceStorage.rootPath().compare(destinationStorage.rootPath(),
+                                            localPathCaseSensitivity()) != 0;
+}
+
 bool LocalFileOperationResult::allSucceeded() const
 {
     return !cancelled && !items.isEmpty() &&

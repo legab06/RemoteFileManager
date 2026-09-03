@@ -6,7 +6,6 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QObject>
-#include <QStorageInfo>
 #include <QStringList>
 #include <QUuid>
 
@@ -262,23 +261,6 @@ QString removeEntry(const QString& path)
     return {};
 }
 
-bool pathsUseDifferentFileSystems(const QString& source, const QString& destination)
-{
-    // rename() moves directory entries, so inspect their parent filesystems. This also avoids
-    // following a symbolic link target onto an unrelated volume.
-    const QStorageInfo sourceStorage(QFileInfo(source).absolutePath());
-    const QStorageInfo destinationStorage(QFileInfo(destination).absolutePath());
-    if (!sourceStorage.isValid() || !sourceStorage.isReady() || !destinationStorage.isValid() ||
-        !destinationStorage.isReady()) {
-        return false;
-    }
-    if (!sourceStorage.device().isEmpty() && !destinationStorage.device().isEmpty()) {
-        return sourceStorage.device() != destinationStorage.device();
-    }
-    return !sourceStorage.rootPath().isEmpty() && !destinationStorage.rootPath().isEmpty() &&
-           !pathsEqual(sourceStorage.rootPath(), destinationStorage.rootPath());
-}
-
 bool validateCopiedEntry(const QString& source, const QString& destination, QString& error)
 {
     const QFileInfo sourceInfo(source);
@@ -336,7 +318,7 @@ class DefaultLocalFileOperationBackend final : public LocalFileOperationBackend
   public:
     LocalRenameResult rename(const QString& source, const QString& destination) override
     {
-        if (pathsUseDifferentFileSystems(source, destination)) {
+        if (LocalFileSystem::pathsUseDifferentFileSystems(source, destination)) {
             return {LocalRenameError::CrossDevice,
                     translated("The source and destination are on different filesystems.")};
         }

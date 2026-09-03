@@ -22,6 +22,8 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QHeaderView>
@@ -32,6 +34,7 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMimeData>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QScrollBar>
@@ -225,6 +228,17 @@ void chooseCollisionButton(const QString& label)
         QFAIL("Requested collision button was not found");
     });
     timer->start();
+}
+
+void chooseCrossFilesystemDropButton(const QString& objectName)
+{
+    QTimer::singleShot(0, [objectName] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        QVERIFY(messageBox != nullptr);
+        auto* const button = messageBox->findChild<QAbstractButton*>(objectName);
+        QVERIFY(button != nullptr);
+        button->click();
+    });
 }
 
 void showLocalSplit(rfm::app::MainWindow& window, const QString& source, const QString& destination,
@@ -431,6 +445,9 @@ class MainWindowTest final : public QObject
     void displaysLocalSuccessWarning();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void refreshesAfterCompletedUpload();
+    void localAndRemoteNavigationShowOpeningStatusMessage();
+    void manualRefreshShowsStatusMessage();
+    void crossSourceMoveUnsupportedReplacesRefreshMessage();
     void appliesOnlyExpectedDirectoryResult();
     void distinguishesRequestsForSamePath();
     void newNavigationMakesActiveResultObsolete();
@@ -454,7 +471,13 @@ class MainWindowTest final : public QObject
     void refreshesAllVisiblePanesAffectedByOperationsAndUploads();
     void persistsRemovesAndClearsTerminalOperationHistory();
     void clipboardCopiesCutsPastesAndClearsSuccessfulMove();
-    void dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds();
+    void remoteDragDropRoutesModifierIntentionsToExistingRequests();
+    void remoteCrossFilesystemPreflightRoutesOriginalDrop();
+    void localDragDropRoutesModifierIntentionsToExistingRequests_data();
+    void localDragDropRoutesModifierIntentionsToExistingRequests();
+    void promptsForConfirmedCrossVolumeLocalDragDrop();
+    void localToSshDragDropQueuesExistingUploadsAndRejectsMove();
+    void sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSessions();
     void keyboardActionsExposeShortcutsAndTargetTheActivePane();
     void opensLocalDirectoryWithoutSshAndNavigatesAsynchronously();
     void mutatesLocalEntriesAndRefreshesMatchingPanes();
@@ -2666,23 +2689,80 @@ void MainWindowTest::refreshesAfterCompletedUpload()
     upload.direction = rfm::core::TransferDirection::Upload;
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, upload)));
-    QVERIFY(debounce->isActive());
-    debounce->stop();
-    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
-    QCOMPARE(requested.size(), 1);
-    QCOMPARE(requested.constFirst().at(1).toString(), QStringLiteral("/srv"));
+    QVERIFY(!debounce->isActive());
+    QCOMPARE(requested.size(), 0);
 
-    const quint64 requestId = requested.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
-        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    requested.clear();
     auto download = progress(502, rfm::core::TransferState::Completed, 10, 10);
     download.direction = rfm::core::TransferDirection::Download;
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, download)));
     QVERIFY(!debounce->isActive());
     QCOMPARE(requested.size(), 0);
+}
+
+void MainWindowTest::manualRefreshShowsStatusMessage()
+{
+    rfm::app::MainWindow window;
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    pane->showDirectory(
+        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+         QStringLiteral("/tmp")},
+        QStringLiteral("/tmp"), {});
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy requested(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    window.statusBar()->clearMessage();
+    window.findChild<QAction*>(QStringLiteral("refreshAction"))->trigger();
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Refreshing /tmp…"));
+    QCOMPARE(requested.size(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(window.statusBar()->currentMessage().isEmpty(), 4000);
+}
+
+void MainWindowTest::localAndRemoteNavigationShowOpeningStatusMessage()
+{
+    rfm::app::MainWindow localWindow;
+    auto* const localPane = localWindow.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(localPane != nullptr);
+    QObject::disconnect(&localWindow, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy localRequested(&localWindow, &rfm::app::MainWindow::localDirectoryRequested);
+    localPane->locationNavigationRequested(
+        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+         QStringLiteral("/tmp")},
+        rfm::app::PaneNavigation::Normal);
+    QCOMPARE(localWindow.statusBar()->currentMessage(), QStringLiteral("Opening folder /tmp…"));
+    QCOMPARE(localRequested.size(), 1);
+    QTRY_VERIFY_WITH_TIMEOUT(localWindow.statusBar()->currentMessage().isEmpty(), 4000);
+
+    rfm::app::MainWindow remoteWindow;
+    QVERIFY(QMetaObject::invokeMethod(&remoteWindow, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    QObject::disconnect(&remoteWindow, &rfm::app::MainWindow::directoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy remoteRequested(&remoteWindow, &rfm::app::MainWindow::directoryRequested);
+    auto* const remotePane = remoteWindow.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(remotePane != nullptr);
+    const rfm::core::BrowserLocation remoteLocation = remotePane->currentLocation();
+    remotePane->locationNavigationRequested(
+        {rfm::core::FileSource::Ssh, remoteLocation.machineId, QStringLiteral("/srv/next")},
+        rfm::app::PaneNavigation::Normal);
+    QCOMPARE(remoteWindow.statusBar()->currentMessage(),
+             QStringLiteral("Opening folder /srv/next…"));
+    QVERIFY(!remoteWindow.statusBar()->currentMessage().contains(QStringLiteral("Refreshing")));
+    QCOMPARE(remoteRequested.size(), 1);
+}
+
+void MainWindowTest::crossSourceMoveUnsupportedReplacesRefreshMessage()
+{
+    rfm::app::MainWindow window;
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    window.statusBar()->showMessage(QStringLiteral("Refreshing /previous…"));
+    QVERIFY(QMetaObject::invokeMethod(pane, "crossSourceMoveUnsupported", Qt::DirectConnection));
+    QCOMPARE(window.statusBar()->currentMessage(),
+             QStringLiteral("Moving between local and SSH locations is not supported yet."));
 }
 
 void MainWindowTest::appliesOnlyExpectedDirectoryResult()
@@ -3869,7 +3949,7 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
-    auto* const secondary = workspace->otherVisiblePane();
+    QVERIFY(workspace->otherVisiblePane() != nullptr);
     const quint64 initialId = requested.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, initialId),
@@ -3883,8 +3963,10 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
         {{QStringLiteral("/source/a"), QStringLiteral("/destination/a"), true, {}}}};
     QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
                                       Q_ARG(rfm::core::RemoteOperationResult, copyResult)));
+    window.statusBar()->showMessage(QStringLiteral("Remote operation completed"));
     debounce->stop();
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Remote operation completed"));
     QCOMPARE(requested.size(), 1);
     QCOMPARE(requested.constFirst().at(1).toString(), QStringLiteral("/destination"));
     const quint64 copyRefresh = requested.constFirst().constFirst().toULongLong();
@@ -3919,28 +4001,6 @@ void MainWindowTest::refreshesAllVisiblePanesAffectedByOperationsAndUploads()
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, destinationRefresh),
         Q_ARG(QString, secondMovePath), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
 
-    workspace->primaryPane()->showDirectory(QStringLiteral("/destination"),
-                                            QStringLiteral("/destination"), {});
-    secondary->showDirectory(QStringLiteral("/destination"), QStringLiteral("/destination"), {});
-    requested.clear();
-    auto upload = progress(702, rfm::core::TransferState::Completed, 10, 10);
-    upload.destination = QStringLiteral("/destination/uploaded.txt");
-    upload.direction = rfm::core::TransferDirection::Upload;
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::TransferProgress, upload)));
-    debounce->stop();
-    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
-    QCOMPARE(requested.size(), 1);
-    const quint64 firstUploadRefresh = requested.constFirst().constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, firstUploadRefresh),
-        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QCOMPARE(requested.size(), 2);
-
-    const quint64 secondUploadRefresh = requested.at(1).constFirst().toULongLong();
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, secondUploadRefresh),
-        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
     requested.clear();
     auto download = progress(703, rfm::core::TransferState::Completed, 10, 10);
     download.direction = rfm::core::TransferDirection::Download;
@@ -4142,7 +4202,7 @@ void MainWindowTest::clipboardCopiesCutsPastesAndClearsSuccessfulMove()
     QCOMPARE(sourcePane->fileTable()->rowCount(), 0);
 }
 
-void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds()
+void MainWindowTest::remoteDragDropRoutesModifierIntentionsToExistingRequests()
 {
     rfm::app::MainWindow window;
     auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
@@ -4171,55 +4231,566 @@ void MainWindowTest::dragDropOffersCopyMoveAndCancelWithoutDuplicateBackendKinds
 
     QObject::disconnect(&window, &rfm::app::MainWindow::copyRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::moveRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteFilesystemRelationRequested,
+                        nullptr, nullptr);
     QSignalSpy copies(&window, &rfm::app::MainWindow::copyRequested);
     QSignalSpy moves(&window, &rfm::app::MainWindow::moveRequested);
-    const quint64 destinationPaneId = workspace->paneId(destinationPane);
-    auto choose = [](const QString& buttonName) {
-        QTimer::singleShot(0, [buttonName] {
-            auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
-            QVERIFY(messageBox != nullptr);
-            auto* const button = messageBox->findChild<QPushButton*>(buttonName);
-            QVERIFY(button != nullptr);
-            button->click();
-        });
+    QSignalSpy filesystemRequests(&window,
+                                  &rfm::app::MainWindow::remoteFilesystemRelationRequested);
+    QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteOperationRequested);
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, sourcePane->createInternalDragData());
+    const QPoint background(10, destinationPane->fileTable()->viewport()->height() - 2);
+    const auto sendDrop = [&](Qt::KeyboardModifiers modifiers,
+                              rfm::core::RemoteOperationKind expectedKind) {
+        const Qt::DropAction expectedDropAction =
+            expectedKind == rfm::core::RemoteOperationKind::Copy ? Qt::CopyAction : Qt::MoveAction;
+        QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                              modifiers);
+        QApplication::sendEvent(destinationPane->fileTable()->viewport(), &enter);
+        QVERIFY(enter.isAccepted());
+        QCOMPARE(enter.dropAction(), expectedDropAction);
+        QDropEvent drop(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                        modifiers);
+        QApplication::sendEvent(destinationPane->fileTable()->viewport(), &drop);
+        QVERIFY(drop.isAccepted());
+        QCOMPARE(drop.dropAction(), expectedDropAction);
+
+        if (modifiers == Qt::NoModifier) {
+            QCOMPARE(filesystemRequests.size(), 1);
+            const QList<QVariant> filesystemRequest = filesystemRequests.takeFirst();
+            QCOMPARE(filesystemRequest.at(1).toString(), QStringLiteral("/source"));
+            QCOMPARE(filesystemRequest.at(2).toString(), QStringLiteral("/destination"));
+            QVERIFY(QMetaObject::invokeMethod(
+                &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
+                Q_ARG(quint64, filesystemRequest.at(0).toULongLong()),
+                Q_ARG(rfm::core::RemoteFilesystemRelation,
+                      rfm::core::RemoteFilesystemRelation::Same)));
+        } else {
+            QCOMPARE(filesystemRequests.size(), 0);
+        }
+
+        QCOMPARE(remoteRequests.size(), 1);
+        const auto request = qvariant_cast<rfm::core::RemoteOperationRequest>(
+            remoteRequests.takeFirst().constFirst());
+        QCOMPARE(request.kind, expectedKind);
+        QCOMPARE(request.sources.size(), 2);
+        QCOMPARE(request.sources.at(0).path, QStringLiteral("/source/a.txt"));
+        QVERIFY(!request.sources.at(0).directory);
+        QCOMPARE(request.sources.at(1).path, QStringLiteral("/source/folder"));
+        QVERIFY(request.sources.at(1).directory);
+        QCOMPARE(request.destinationDirectory, QStringLiteral("/destination"));
+        if (expectedKind == rfm::core::RemoteOperationKind::Copy) {
+            QCOMPARE(copies.size(), 1);
+            QCOMPARE(moves.size(), 0);
+            copies.clear();
+        } else {
+            QCOMPARE(copies.size(), 0);
+            QCOMPARE(moves.size(), 1);
+            moves.clear();
+        }
+
+        const rfm::core::RemoteOperationResult result{
+            request.id,
+            expectedKind,
+            {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
+             {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
+        remoteCoordinator->handleRemoteExecutorResult(result);
+        QApplication::processEvents();
     };
 
-    choose(QStringLiteral("dropCopyButton"));
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::InternalTransferPayload, *payload),
-                                      Q_ARG(quint64, destinationPaneId),
-                                      Q_ARG(QString, QStringLiteral("/destination"))));
-    QCOMPARE(copies.size(), 1);
-    QCOMPARE(moves.size(), 0);
-    const quint64 copyId = copies.constFirst().constFirst().toULongLong();
-    const rfm::core::RemoteOperationResult copyResult{
-        copyId,
-        rfm::core::RemoteOperationKind::Copy,
-        {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
-         {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
-    remoteCoordinator->handleRemoteExecutorResult(copyResult);
+    sendDrop(Qt::NoModifier, rfm::core::RemoteOperationKind::Copy);
+    sendDrop(Qt::ControlModifier, rfm::core::RemoteOperationKind::Copy);
+    sendDrop(Qt::ShiftModifier, rfm::core::RemoteOperationKind::Move);
+    sendDrop(Qt::ControlModifier | Qt::ShiftModifier, rfm::core::RemoteOperationKind::Copy);
+}
 
-    choose(QStringLiteral("dropMoveButton"));
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::InternalTransferPayload, *payload),
-                                      Q_ARG(quint64, destinationPaneId),
-                                      Q_ARG(QString, QStringLiteral("/destination"))));
-    QCOMPARE(moves.size(), 1);
-    const quint64 moveId = moves.constFirst().constFirst().toULongLong();
-    const rfm::core::RemoteOperationResult moveResult{
-        moveId,
-        rfm::core::RemoteOperationKind::Move,
-        {{QStringLiteral("/source/a.txt"), QStringLiteral("/destination/a.txt"), true, {}},
-         {QStringLiteral("/source/folder"), QStringLiteral("/destination/folder"), true, {}}}};
-    remoteCoordinator->handleRemoteExecutorResult(moveResult);
+void MainWindowTest::remoteCrossFilesystemPreflightRoutesOriginalDrop()
+{
+    rfm::app::MainWindow window;
+    auto* const remoteCoordinator = detachRemoteOperationExecutor(window);
+    QVERIFY(remoteCoordinator != nullptr);
+    window.show();
+    const QList<rfm::core::RemoteEntry> sourceEntries{
+        {QStringLiteral("a.txt"), 1, {}, false, false},
+        {QStringLiteral("folder"), 0, {}, true, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, sourceEntries)));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
+    window.findChild<QAction*>(QStringLiteral("splitViewAction"))->trigger();
+    const quint64 listingId = listings.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingId),
+        Q_ARG(QString, QStringLiteral("/destination")), Q_ARG(QList<rfm::core::RemoteEntry>, {})));
+    auto* const sourcePane = workspace->primaryPane();
+    auto* const destinationPane = workspace->otherVisiblePane();
+    QVERIFY(destinationPane != nullptr);
+    sourcePane->fileTable()->selectAll();
 
-    choose(QStringLiteral("dropCancelButton"));
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleInternalDrop", Qt::DirectConnection,
-                                      Q_ARG(rfm::core::InternalTransferPayload, *payload),
-                                      Q_ARG(quint64, destinationPaneId),
-                                      Q_ARG(QString, QStringLiteral("/destination"))));
-    QCOMPARE(copies.size(), 1);
-    QCOMPARE(moves.size(), 1);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteFilesystemRelationRequested,
+                        nullptr, nullptr);
+    QSignalSpy filesystemRequests(&window,
+                                  &rfm::app::MainWindow::remoteFilesystemRelationRequested);
+    QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteOperationRequested);
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, sourcePane->createInternalDragData());
+    const QPoint background(10, destinationPane->fileTable()->viewport()->height() - 2);
+    QList<QVariant> request;
+    const auto beginDrop = [&] {
+        QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                              Qt::NoModifier);
+        QApplication::sendEvent(destinationPane->fileTable()->viewport(), &enter);
+        QVERIFY(enter.isAccepted());
+        QCOMPARE(enter.dropAction(), Qt::CopyAction);
+        QDropEvent drop(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                        Qt::NoModifier);
+        QApplication::sendEvent(destinationPane->fileTable()->viewport(), &drop);
+        QVERIFY(drop.isAccepted());
+        QCOMPARE(drop.dropAction(), Qt::CopyAction);
+        QCOMPARE(filesystemRequests.size(), 1);
+        request = filesystemRequests.takeFirst();
+    };
+    const auto finishRequest = [&](rfm::core::RemoteOperationKind expectedKind,
+                                   const QString& expectedDestination) {
+        QCOMPARE(remoteRequests.size(), 1);
+        const auto request = qvariant_cast<rfm::core::RemoteOperationRequest>(
+            remoteRequests.takeFirst().constFirst());
+        QCOMPARE(request.kind, expectedKind);
+        QCOMPARE(request.sources.size(), 2);
+        QCOMPARE(request.sources.at(0).path, QStringLiteral("/source/a.txt"));
+        QCOMPARE(request.sources.at(1).path, QStringLiteral("/source/folder"));
+        QCOMPARE(request.destinationDirectory, expectedDestination);
+        remoteCoordinator->handleRemoteExecutorResult(
+            {request.id,
+             expectedKind,
+             {{QStringLiteral("/source/a.txt"), expectedDestination + QStringLiteral("/a.txt"),
+               true,
+               {}},
+              {QStringLiteral("/source/folder"), expectedDestination + QStringLiteral("/folder"),
+               true,
+               {}}}});
+        QApplication::processEvents();
+    };
+
+    beginDrop();
+    chooseCrossFilesystemDropButton(QStringLiteral("crossFilesystemDropCopyButton"));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
+        Q_ARG(quint64, request.at(0).toULongLong()),
+        Q_ARG(rfm::core::RemoteFilesystemRelation,
+              rfm::core::RemoteFilesystemRelation::Different)));
+    finishRequest(rfm::core::RemoteOperationKind::Copy, QStringLiteral("/destination"));
+
+    beginDrop();
+    chooseCrossFilesystemDropButton(QStringLiteral("crossFilesystemDropMoveButton"));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
+        Q_ARG(quint64, request.at(0).toULongLong()),
+        Q_ARG(rfm::core::RemoteFilesystemRelation,
+              rfm::core::RemoteFilesystemRelation::Different)));
+    finishRequest(rfm::core::RemoteOperationKind::Move, QStringLiteral("/destination"));
+
+    beginDrop();
+    chooseCrossFilesystemDropButton(QStringLiteral("crossFilesystemDropCancelButton"));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
+        Q_ARG(quint64, request.at(0).toULongLong()),
+        Q_ARG(rfm::core::RemoteFilesystemRelation,
+              rfm::core::RemoteFilesystemRelation::Different)));
+    QCOMPARE(remoteRequests.size(), 0);
+
+    beginDrop();
+    sourcePane->fileTable()->clearSelection();
+    const QString remoteMachineId = destinationPane->currentLocation().machineId;
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Ssh, remoteMachineId, QStringLiteral("/changed")},
+        QStringLiteral("/changed"), {});
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
+        Q_ARG(quint64, request.at(0).toULongLong()),
+        Q_ARG(rfm::core::RemoteFilesystemRelation,
+              rfm::core::RemoteFilesystemRelation::Unknown)));
+    finishRequest(rfm::core::RemoteOperationKind::Copy, QStringLiteral("/destination"));
+}
+
+void MainWindowTest::localDragDropRoutesModifierIntentionsToExistingRequests_data()
+{
+    QTest::addColumn<Qt::KeyboardModifiers>("modifiers");
+    QTest::addColumn<rfm::core::LocalFileOperationKind>("expectedKind");
+    QTest::addColumn<Qt::DropAction>("expectedDropAction");
+
+    QTest::newRow("normal-copy") << Qt::KeyboardModifiers{}
+                                 << rfm::core::LocalFileOperationKind::Copy << Qt::CopyAction;
+    QTest::newRow("control-copy") << Qt::KeyboardModifiers{Qt::ControlModifier}
+                                  << rfm::core::LocalFileOperationKind::Copy << Qt::CopyAction;
+    QTest::newRow("shift-move") << Qt::KeyboardModifiers{Qt::ShiftModifier}
+                                << rfm::core::LocalFileOperationKind::Move << Qt::MoveAction;
+    QTest::newRow("control-priority")
+        << Qt::KeyboardModifiers{Qt::ControlModifier | Qt::ShiftModifier}
+        << rfm::core::LocalFileOperationKind::Copy << Qt::CopyAction;
+}
+
+void MainWindowTest::localDragDropRoutesModifierIntentionsToExistingRequests()
+{
+    QFETCH(Qt::KeyboardModifiers, modifiers);
+    QFETCH(rfm::core::LocalFileOperationKind, expectedKind);
+    QFETCH(Qt::DropAction, expectedDropAction);
+
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString sourceDirectory = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destinationDirectory =
+        QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(sourceDirectory));
+    QVERIFY(QDir().mkpath(destinationDirectory));
+    for (const QString& name : {QStringLiteral("a.txt"), QStringLiteral("b.txt")}) {
+        QFile file(QDir(sourceDirectory).filePath(name));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write(name.toUtf8()) == name.size());
+    }
+
+    rfm::app::MainWindow window;
+    showLocalSplit(window, sourceDirectory, destinationDirectory,
+                   {{QStringLiteral("a.txt"), 5, {}, false, false},
+                    {QStringLiteral("b.txt"), 5, {}, false, false}},
+                   {});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const sourcePane = workspace->primaryPane();
+    auto* const destinationPane = workspace->otherVisiblePane();
+    QVERIFY(destinationPane != nullptr);
+    sourcePane->fileTable()->selectAll();
+    const auto localPayload =
+        rfm::core::decodeInternalTransfer(sourcePane->createInternalDragData());
+    QVERIFY(localPayload.has_value());
+    QCOMPARE(localPayload->source, rfm::core::FileSource::Local);
+    QCOMPARE(localPayload->sources.size(), 2);
+
+    QObject::disconnect(&window, &rfm::app::MainWindow::localFileOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy localRequests(&window, &rfm::app::MainWindow::localFileOperationRequested);
+    QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteOperationRequested);
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, sourcePane->createInternalDragData());
+    const QPoint background(10, destinationPane->fileTable()->viewport()->height() - 2);
+    QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                          modifiers);
+    QApplication::sendEvent(destinationPane->fileTable()->viewport(), &enter);
+    QVERIFY(enter.isAccepted());
+    QCOMPARE(enter.dropAction(), expectedDropAction);
+    QDropEvent drop(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                    modifiers);
+    QApplication::sendEvent(destinationPane->fileTable()->viewport(), &drop);
+    QVERIFY(drop.isAccepted());
+    QCOMPARE(drop.dropAction(), expectedDropAction);
+    QCOMPARE(localRequests.size(), 1);
+    QCOMPARE(remoteRequests.size(), 0);
+    const auto request = qvariant_cast<rfm::core::LocalFileOperationRequest>(
+        localRequests.constFirst().constFirst());
+    QCOMPARE(request.kind, expectedKind);
+    QCOMPARE(request.parentPath, sourceDirectory);
+    QCOMPARE(request.sourcePaths,
+             QStringList({QDir(sourceDirectory).filePath(QStringLiteral("a.txt")),
+                          QDir(sourceDirectory).filePath(QStringLiteral("b.txt"))}));
+    QCOMPARE(request.destinationDirectory, destinationDirectory);
+    auto* const operationTable = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(operationTable != nullptr);
+    const int operationRow = rowForId(operationTable, request.id);
+    QVERIFY(operationRow >= 0);
+    QCOMPARE(operationTable->item(operationRow, 0)->text(),
+             expectedKind == rfm::core::LocalFileOperationKind::Copy ? QStringLiteral("Copy")
+                                                                     : QStringLiteral("Move"));
+    QCOMPARE(operationTable->item(operationRow, 3)->text(), QStringLiteral("Queued"));
+    QVERIFY(QFileInfo(QDir(sourceDirectory).filePath(QStringLiteral("a.txt"))).exists());
+    QVERIFY(!QFileInfo(QDir(destinationDirectory).filePath(QStringLiteral("a.txt"))).exists());
+}
+
+void MainWindowTest::promptsForConfirmedCrossVolumeLocalDragDrop()
+{
+#ifndef Q_OS_LINUX
+    QSKIP("A portable distinct local filesystem is not available for this UI test.");
+#else
+    if (!QDir(QStringLiteral("/dev/shm")).exists()) {
+        QSKIP("The standard temporary memory filesystem is not available.");
+    }
+    QTemporaryDir sourceTemporary;
+    QTemporaryDir destinationTemporary(QStringLiteral("/dev/shm/rfm-dnd-XXXXXX"));
+    if (!sourceTemporary.isValid() || !destinationTemporary.isValid()) {
+        QSKIP("Could not create temporary directories on two local filesystems.");
+    }
+    const QString sourceDirectory = sourceTemporary.filePath(QStringLiteral("source"));
+    const QString destinationDirectory =
+        destinationTemporary.filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(sourceDirectory));
+    QVERIFY(QDir().mkpath(destinationDirectory));
+    const QString sourcePath = QDir(sourceDirectory).filePath(QStringLiteral("a.txt"));
+    QFile sourceFile(sourcePath);
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    sourceFile.close();
+    const QString destinationPath = QDir(destinationDirectory).filePath(QStringLiteral("a.txt"));
+    if (!rfm::core::LocalFileSystem::pathsUseDifferentFileSystems(sourcePath, destinationPath)) {
+        QSKIP("The temporary directories are not on confirmed distinct filesystems.");
+    }
+
+    rfm::app::MainWindow window;
+    showLocalSplit(window, sourceDirectory, destinationDirectory,
+                   {{QStringLiteral("a.txt"), 0, {}, false, false}}, {});
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const sourcePane = workspace->primaryPane();
+    auto* const destinationPane = workspace->otherVisiblePane();
+    QVERIFY(destinationPane != nullptr);
+    sourcePane->fileTable()->selectRow(0);
+
+    QObject::disconnect(&window, &rfm::app::MainWindow::localFileOperationRequested, nullptr,
+                        nullptr);
+    QSignalSpy requests(&window, &rfm::app::MainWindow::localFileOperationRequested);
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, sourcePane->createInternalDragData());
+    const QPoint background(10, destinationPane->fileTable()->viewport()->height() - 2);
+    QTimer::singleShot(0, [] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        QVERIFY(messageBox != nullptr);
+        auto* const moveButton =
+            messageBox->findChild<QAbstractButton*>(QStringLiteral("crossFilesystemDropMoveButton"));
+        QVERIFY(moveButton != nullptr);
+        moveButton->click();
+    });
+    QDropEvent drop(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                    Qt::NoModifier);
+    QApplication::sendEvent(destinationPane->fileTable()->viewport(), &drop);
+    QVERIFY(drop.isAccepted());
+    QCOMPARE(drop.dropAction(), Qt::CopyAction);
+    QCOMPARE(requests.size(), 1);
+    const auto request =
+        qvariant_cast<rfm::core::LocalFileOperationRequest>(requests.constFirst().constFirst());
+    QCOMPARE(request.kind, rfm::core::LocalFileOperationKind::Move);
+    QCOMPARE(request.sourcePaths, QStringList{sourcePath});
+    QCOMPARE(request.destinationDirectory, destinationDirectory);
+#endif
+}
+
+void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString sourceDirectory = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    QVERIFY(QDir().mkpath(sourceDirectory));
+    for (const QString& name : {QStringLiteral("a.txt"), QStringLiteral("folder")}) {
+        const QString path = QDir(sourceDirectory).filePath(name);
+        if (name == QStringLiteral("folder")) {
+            QVERIFY(QDir().mkpath(path));
+        } else {
+            QFile sourceFile(path);
+            QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+        }
+    }
+
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showRemoteDirectory", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral("/uploads")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const sourcePane = workspace->primaryPane();
+    const rfm::core::BrowserLocation remoteDestination = sourcePane->currentLocation();
+    workspace->setSplit(true);
+    auto* const destinationPane = workspace->otherVisiblePane();
+    QVERIFY(destinationPane != nullptr);
+    sourcePane->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, sourceDirectory}, sourceDirectory,
+        {{QStringLiteral("a.txt"), 0, {}, false, false},
+         {QStringLiteral("folder"), 0, {}, true, false}},
+        rfm::app::PaneNavigation::Initial);
+    destinationPane->showDirectory(remoteDestination, QStringLiteral("/uploads"), {});
+    sourcePane->fileTable()->selectAll();
+    const auto localPayload =
+        rfm::core::decodeInternalTransfer(sourcePane->createInternalDragData());
+    QVERIFY(localPayload.has_value());
+    QCOMPARE(localPayload->sources.size(), 2);
+    sourcePane->fileTable()->clearSelection();
+    const quint64 destinationPaneId = workspace->paneId(destinationPane);
+    QObject::disconnect(&window, &rfm::app::MainWindow::transferRequested, nullptr, nullptr);
+    QSignalSpy transfers(&window, &rfm::app::MainWindow::transferRequested);
+    QSignalSpy removes(&window, &rfm::app::MainWindow::removeRequested);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleInternalDrop", Qt::DirectConnection,
+        Q_ARG(rfm::core::InternalTransferPayload, *localPayload),
+        Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
+        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, QStringLiteral("/uploads")),
+        Q_ARG(bool, false)));
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
+    QCOMPARE(transfers.size(), 2);
+    QHash<QString, rfm::core::TransferRequest> uploads;
+    for (const QList<QVariant>& arguments : transfers) {
+        const auto request = arguments.constFirst().value<rfm::core::TransferRequest>();
+        QCOMPARE(request.direction, rfm::core::TransferDirection::Upload);
+        uploads.insert(request.source, request);
+    }
+    QCOMPARE(uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("a.txt"))).destination,
+             QStringLiteral("/uploads/a.txt"));
+    QCOMPARE(uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder"))).destination,
+             QStringLiteral("/uploads/folder"));
+    QVERIFY(uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder"))).directory);
+
+    auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
+    QVERIFY(debounce != nullptr);
+    const auto firstUpload = uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("a.txt")));
+    auto uploadCompleted = progress(firstUpload.id, rfm::core::TransferState::Completed, 1, 1);
+    uploadCompleted.source = firstUpload.source;
+    uploadCompleted.destination = firstUpload.destination;
+    uploadCompleted.direction = firstUpload.direction;
+    window.statusBar()->showMessage(QStringLiteral("Transfer completed"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, uploadCompleted)));
+    QVERIFY(debounce->isActive());
+    debounce->stop();
+    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("Transfer completed"));
+
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Ssh, remoteDestination.machineId, QStringLiteral("/elsewhere")},
+        QStringLiteral("/elsewhere"), {});
+    const auto secondUpload = uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder")));
+    auto uploadAfterNavigation =
+        progress(secondUpload.id, rfm::core::TransferState::Completed, 1, 1);
+    uploadAfterNavigation.source = secondUpload.source;
+    uploadAfterNavigation.destination = secondUpload.destination;
+    uploadAfterNavigation.direction = secondUpload.direction;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, uploadAfterNavigation)));
+    QVERIFY(!debounce->isActive());
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleInternalDrop", Qt::DirectConnection,
+        Q_ARG(rfm::core::InternalTransferPayload, *localPayload),
+        Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Move),
+        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, QStringLiteral("/uploads")),
+        Q_ARG(bool, true)));
+    QCOMPARE(transfers.size(), 2);
+    QCOMPARE(removes.size(), 0);
+    QVERIFY(QFileInfo(QDir(sourceDirectory).filePath(QStringLiteral("a.txt"))).exists());
+    QVERIFY(QFileInfo(QDir(sourceDirectory).filePath(QStringLiteral("folder"))).isDir());
+}
+
+void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSessions()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString destinationDirectory =
+        QDir(temporary.path()).filePath(QStringLiteral("downloads"));
+    QVERIFY(QDir().mkpath(destinationDirectory));
+    const QList<rfm::core::RemoteEntry> sourceEntries{
+        {QStringLiteral("a.txt"), 1, {}, false, false},
+        {QStringLiteral("folder"), 0, {}, true, false},
+    };
+
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, sourceEntries)));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const sourcePane = workspace->primaryPane();
+    workspace->setSplit(true);
+    auto* const destinationPane = workspace->otherVisiblePane();
+    QVERIFY(destinationPane != nullptr);
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, destinationDirectory},
+        destinationDirectory, {});
+    sourcePane->fileTable()->selectAll();
+    const auto sshPayload = rfm::core::decodeInternalTransfer(sourcePane->createInternalDragData());
+    QVERIFY(sshPayload.has_value());
+    QCOMPARE(sshPayload->source, rfm::core::FileSource::Ssh);
+    QCOMPARE(sshPayload->sources.size(), 2);
+    const quint64 destinationPaneId = workspace->paneId(destinationPane);
+    QObject::disconnect(&window, &rfm::app::MainWindow::transferRequested, nullptr, nullptr);
+    QSignalSpy transfers(&window, &rfm::app::MainWindow::transferRequested);
+    QSignalSpy removes(&window, &rfm::app::MainWindow::removeRequested);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleInternalDrop", Qt::DirectConnection,
+        Q_ARG(rfm::core::InternalTransferPayload, *sshPayload),
+        Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Move),
+        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, destinationDirectory),
+        Q_ARG(bool, true)));
+    QCOMPARE(transfers.size(), 0);
+    QCOMPARE(removes.size(), 0);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleInternalDrop", Qt::DirectConnection,
+        Q_ARG(rfm::core::InternalTransferPayload, *sshPayload),
+        Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
+        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, destinationDirectory),
+        Q_ARG(bool, false)));
+    QVERIFY(QApplication::activeModalWidget() == nullptr);
+    QCOMPARE(transfers.size(), 2);
+    QHash<QString, rfm::core::TransferRequest> downloads;
+    for (const QList<QVariant>& arguments : transfers) {
+        const auto request = arguments.constFirst().value<rfm::core::TransferRequest>();
+        QCOMPARE(request.direction, rfm::core::TransferDirection::Download);
+        downloads.insert(request.source, request);
+    }
+    QCOMPARE(downloads.value(QStringLiteral("/source/a.txt")).destination,
+             QDir(destinationDirectory).filePath(QStringLiteral("a.txt")));
+    QCOMPARE(downloads.value(QStringLiteral("/source/folder")).destination,
+             QDir(destinationDirectory).filePath(QStringLiteral("folder")));
+
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
+                        nullptr);
+    QSignalSpy localRefreshes(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
+    QVERIFY(debounce != nullptr);
+    const auto firstDownload = downloads.value(QStringLiteral("/source/a.txt"));
+    auto downloadCompleted = progress(firstDownload.id, rfm::core::TransferState::Completed, 1, 1);
+    downloadCompleted.source = firstDownload.source;
+    downloadCompleted.destination = firstDownload.destination;
+    downloadCompleted.direction = firstDownload.direction;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, downloadCompleted)));
+    QVERIFY(debounce->isActive());
+    debounce->stop();
+    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(localRefreshes.size(), 1);
+    QCOMPARE(localRefreshes.constFirst().at(1).toString(), destinationDirectory);
+
+    localRefreshes.clear();
+    const QString otherDirectory = QDir(temporary.path()).filePath(QStringLiteral("other"));
+    QVERIFY(QDir().mkpath(otherDirectory));
+    const auto secondDownload = downloads.value(QStringLiteral("/source/folder"));
+    auto downloadAfterNavigation =
+        progress(secondDownload.id, rfm::core::TransferState::Completed, 1, 1);
+    downloadAfterNavigation.source = secondDownload.source;
+    downloadAfterNavigation.destination = secondDownload.destination;
+    downloadAfterNavigation.direction = secondDownload.direction;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, downloadAfterNavigation)));
+    QVERIFY(debounce->isActive());
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, otherDirectory}, otherDirectory,
+        {});
+    debounce->stop();
+    QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
+    QCOMPARE(localRefreshes.size(), 0);
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleInternalDrop", Qt::DirectConnection,
+        Q_ARG(rfm::core::InternalTransferPayload, *sshPayload),
+        Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
+        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, destinationDirectory),
+        Q_ARG(bool, true)));
+    QCOMPARE(transfers.size(), 2);
+    QCOMPARE(removes.size(), 0);
 }
 
 void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()
