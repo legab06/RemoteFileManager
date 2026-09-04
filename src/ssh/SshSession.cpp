@@ -1926,19 +1926,47 @@ void SshSession::confirmUnknownHost(bool accepted)
 void SshSession::authenticateAndOpen()
 {
     if (m_impl->profile.authenticationMode == rfm::core::AuthenticationMode::PasswordOnly) {
-        const int methods = ssh_userauth_list(m_impl->session, nullptr);
-        if (methods < 0) {
-            fail(tr("Unable to determine the server authentication methods: %1")
+        const int auth = ssh_userauth_none(m_impl->session, nullptr);
+        switch (auth) {
+        case SSH_AUTH_SUCCESS:
+            // The server accepted the "none" authentication.
+            // Continue with normal success path.
+            openSftp();
+            return;
+        case SSH_AUTH_DENIED:
+        case SSH_AUTH_PARTIAL:
+            // Server requires authentication, check what methods are available
+            {
+                const int methods = ssh_userauth_list(m_impl->session, nullptr);
+                if (methods < 0) {
+                    fail(tr("Unable to determine the server authentication methods: %1")
+                             .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+                    return;
+                }
+                if ((static_cast<unsigned int>(methods) & SSH_AUTH_METHOD_PASSWORD) == 0U) {
+                    fail(tr("The server does not offer password authentication."));
+                    return;
+                }
+                m_impl->awaitingPasswordAuthentication = true;
+                emit passwordAuthenticationRequired(PasswordAuthenticationReason::PasswordOnly);
+                return;
+            }
+        case SSH_AUTH_ERROR:
+            fail(tr("SSH authentication could not be completed: %1")
+                     .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+            return;
+        case SSH_AUTH_AGAIN:
+            // This should normally not happen in this context
+            // But if it does, treat as error
+            fail(tr("SSH authentication could not be completed: %1")
+                     .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+            return;
+        default:
+            // Unexpected result
+            fail(tr("SSH authentication could not be completed: %1")
                      .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
             return;
         }
-        if ((static_cast<unsigned int>(methods) & SSH_AUTH_METHOD_PASSWORD) == 0U) {
-            fail(tr("The server does not offer password authentication."));
-            return;
-        }
-        m_impl->awaitingPasswordAuthentication = true;
-        emit passwordAuthenticationRequired(PasswordAuthenticationReason::PasswordOnly);
-        return;
     }
 
     const QString resolvedPrivateKeyPath =
