@@ -587,6 +587,10 @@ void MainWindow::createActions()
     m_splitViewAction->setObjectName(QStringLiteral("splitViewAction"));
     m_splitViewAction->setCheckable(true);
     connect(m_splitViewAction, &QAction::toggled, m_paneWorkspace, &PaneWorkspace::setSplit);
+    m_resetFileViewAction = new QAction(tr("Reset file view"), this);
+    m_resetFileViewAction->setObjectName(QStringLiteral("resetFileViewAction"));
+    connect(m_resetFileViewAction, &QAction::triggered, m_paneWorkspace,
+            &PaneWorkspace::resetFileView);
     updateOperationActions();
 }
 
@@ -621,6 +625,8 @@ void MainWindow::createMenus()
     viewMenu->addAction(m_operationDockAction);
     viewMenu->addSeparator();
     viewMenu->addAction(m_splitViewAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_resetFileViewAction);
     viewMenu->addAction(m_focusLocationAction);
     viewMenu->addAction(m_switchPaneAction);
 

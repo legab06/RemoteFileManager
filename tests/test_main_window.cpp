@@ -412,6 +412,7 @@ class MainWindowTest final : public QObject
 
   private slots:
     void exposesInitialDisconnectedShell();
+    void resetFileViewActionResetsAllPanes();
     void dockVisibilityActionsTrackPanels();
     void validatesSecureConnectionForm();
     void keepsConnectionDialogOpenAcrossFailureAndRetry();
@@ -1320,6 +1321,34 @@ void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect(
     QVERIFY(!remotePane->hasLocation());
     QCOMPARE(localPane->source(), rfm::core::FileSource::Local);
     QCOMPARE(stack->currentWidget(), workspace);
+}
+
+void MainWindowTest::resetFileViewActionResetsAllPanes()
+{
+    rfm::app::MainWindow window;
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    workspace->setSplit(true);
+    auto* const primary = workspace->primaryPane();
+    auto* const secondary = workspace->otherVisiblePane();
+    QVERIFY(primary != nullptr);
+    QVERIFY(secondary != nullptr);
+    for (rfm::app::FileBrowserPane* const pane : {primary, secondary}) {
+        auto* const header = pane->fileTable()->horizontalHeader();
+        header->moveSection(header->visualIndex(0), 3);
+        pane->fileTable()->sortItems(1, Qt::AscendingOrder);
+    }
+    auto* const action = window.findChild<QAction*>(QStringLiteral("resetFileViewAction"));
+    QVERIFY(action != nullptr);
+    action->trigger();
+    for (rfm::app::FileBrowserPane* const pane : {primary, secondary}) {
+        const auto* const header = pane->fileTable()->horizontalHeader();
+        QCOMPARE(header->sortIndicatorSection(), -1);
+        QVERIFY(!header->isSortIndicatorShown());
+        for (int logicalIndex = 0; logicalIndex < header->count(); ++logicalIndex) {
+            QCOMPARE(header->visualIndex(logicalIndex), logicalIndex);
+        }
+    }
 }
 
 void MainWindowTest::exposesInitialDisconnectedShell()

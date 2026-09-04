@@ -16,8 +16,8 @@
 #include <QFileIconProvider>
 #include <QFileInfo>
 #include <QFocusEvent>
-#include <QHeaderView>
 #include <QHash>
+#include <QHeaderView>
 #include <QIcon>
 #include <QItemSelectionModel>
 #include <QLineEdit>
@@ -30,6 +30,8 @@
 #include <QPixmap>
 #include <QRubberBand>
 #include <QScrollBar>
+#include <QResizeEvent>
+#include <QSettings>
 #include <QSizePolicy>
 #include <QStyle>
 #include <QTableWidget>
@@ -39,6 +41,7 @@
 
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <utility>
 
 namespace rfm::app
@@ -52,6 +55,21 @@ constexpr int SortKindRole = Qt::UserRole + 4;
 constexpr int SortNameRole = Qt::UserRole + 5;
 constexpr int SortDirectoryRole = Qt::UserRole + 6;
 constexpr int SortValueKnownRole = Qt::UserRole + 7;
+constexpr int SortNaturalIndexRole = Qt::UserRole + 8;
+constexpr auto tableHeaderStateKey = "ui/fileBrowserPane/headerState";
+constexpr auto tableSortColumnKey = "ui/fileBrowserPane/sortColumn";
+constexpr auto tableSortOrderKey = "ui/fileBrowserPane/sortOrder";
+constexpr auto tableLayoutModeKey = "ui/fileBrowserPane/layoutMode";
+constexpr int defaultNameColumnWidth = 280;
+constexpr int defaultSizeColumnWidth = 110;
+constexpr int defaultTypeColumnWidth = 180;
+constexpr int defaultModifiedColumnWidth = 170;
+
+QSet<FileBrowserPane*>& tableHeaderPanes()
+{
+    static QSet<FileBrowserPane*> panes;
+    return panes;
+}
 
 enum class SortKind { Text, Size, Modified };
 
@@ -552,19 +570,47 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     header->setStretchLastSection(false);
     header->setSectionResizeMode(QHeaderView::Interactive);
     header->setMinimumSectionSize(48);
-    header->resizeSection(0, 280);
-    header->resizeSection(1, 110);
-    header->resizeSection(2, 180);
-    header->resizeSection(3, 170);
+    header->resizeSection(0, defaultNameColumnWidth);
+    header->resizeSection(1, defaultSizeColumnWidth);
+    header->resizeSection(2, defaultTypeColumnWidth);
+    header->resizeSection(3, defaultModifiedColumnWidth);
     m_fileTable->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_fileTable->setSortingEnabled(true);
     header->setSortIndicator(-1, Qt::AscendingOrder);
+    restoreTableHeaderState();
     layout->addWidget(m_fileTable);
+
+    m_tableHeaderSaveTimer = new QTimer(this);
+    m_tableHeaderSaveTimer->setSingleShot(true);
+    m_tableHeaderSaveTimer->setInterval(200);
+    connect(m_tableHeaderSaveTimer, &QTimer::timeout, this, &FileBrowserPane::saveTableHeaderState);
+    connect(header, &QHeaderView::sectionResized, this,
+            [this](int, int, int) {
+                if (!m_restoringTableHeaderState && !m_applyingLayoutState &&
+                    !m_applyingAdaptiveLayout) {
+                    markManualLayout();
+                }
+            });
+    connect(header, &QHeaderView::sectionMoved, this,
+            [this](int, int, int) {
+                if (!m_restoringTableHeaderState && !m_applyingLayoutState) {
+                    markManualLayout();
+                }
+            });
+    connect(header, &QHeaderView::sortIndicatorChanged, this,
+            &FileBrowserPane::handleSortIndicatorChanged);
+    connect(header, &QHeaderView::sectionPressed, this,
+            [this](int) { m_headerClickInProgress = true; });
+    connect(header, &QHeaderView::sectionClicked, this,
+            &FileBrowserPane::handleHeaderSectionClicked);
+    tableHeaderPanes().insert(this);
 
     installEventFilter(this);
     m_pathEdit->installEventFilter(this);
     m_fileTable->installEventFilter(this);
     m_fileTable->viewport()->installEventFilter(this);
+    header->installEventFilter(this);
+    header->viewport()->installEventFilter(this);
 
     connect(m_fileTable, &QTableWidget::cellDoubleClicked, this,
             [this](int row, int /* column */) { openEntry(row); });
@@ -575,6 +621,358 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     dragTable->startDragHandler = [this](Qt::DropActions supportedActions) {
         startInternalDrag(supportedActions);
     };
+    QTimer::singleShot(0, this, &FileBrowserPane::applyAdaptiveLayout);
+}
+
+FileBrowserPane::~FileBrowserPane()
+{
+    if (m_tableHeaderStateDirty) {
+        saveTableHeaderState();
+    }
+    tableHeaderPanes().remove(this);
+}
+
+void FileBrowserPane::restoreTableHeaderState()
+{
+    QSettings settings;
+    const QByteArray state = settings.value(QString::fromLatin1(tableHeaderStateKey)).toByteArray();
+    if (state.isEmpty()) {
+        m_adaptiveLayout = true;
+        resetTableHeaderState();
+        m_sortColumn = -1;
+        return;
+    }
+
+    const QString layoutMode = settings.value(QString::fromLatin1(tableLayoutModeKey)).toString();
+    // Profiles written before layoutMode existed have customized dimensions; preserve them.
+    m_adaptiveLayout = layoutMode.isEmpty() ? false : layoutMode != QLatin1String("manual");
+
+    const bool hasExplicitSortState = settings.contains(QString::fromLatin1(tableSortColumnKey));
+    const int storedSortColumn =
+        settings.value(QString::fromLatin1(tableSortColumnKey), -1).toInt();
+    const int storedSortOrder =
+        settings
+            .value(QString::fromLatin1(tableSortOrderKey), static_cast<int>(Qt::DescendingOrder))
+            .toInt();
+    const QHeaderView* const header = m_fileTable->horizontalHeader();
+    const int sortColumn = hasExplicitSortState ? storedSortColumn : header->sortIndicatorSection();
+    const Qt::SortOrder sortOrder = hasExplicitSortState
+                                        ? static_cast<Qt::SortOrder>(storedSortOrder)
+                                        : header->sortIndicatorOrder();
+    const bool validSortState =
+        (sortColumn == -1 || (sortColumn >= 0 && sortColumn < header->count())) &&
+        (sortColumn == -1 || sortOrder == Qt::AscendingOrder || sortOrder == Qt::DescendingOrder);
+    if (!validSortState) {
+        m_adaptiveLayout = true;
+        resetTableHeaderState();
+        m_sortColumn = -1;
+        return;
+    }
+    applyTableHeaderState(state, sortColumn, sortOrder, m_adaptiveLayout);
+}
+
+void FileBrowserPane::applyTableHeaderState(const QByteArray& state, int sortColumn,
+                                            Qt::SortOrder sortOrder, bool adaptiveLayout)
+{
+    if (state.isEmpty()) {
+        resetTableHeaderState();
+        return;
+    }
+    m_restoringTableHeaderState = true;
+    m_adaptiveLayout = adaptiveLayout;
+    const bool restored = m_fileTable->horizontalHeader()->restoreState(state);
+    m_sortColumn = sortColumn;
+    m_sortOrder = sortOrder;
+    m_restoringTableHeaderState = false;
+    if (!restored) {
+        m_adaptiveLayout = true;
+        resetTableHeaderState();
+        m_sortColumn = -1;
+        return;
+    }
+    applySortState();
+    applyAdaptiveLayout();
+}
+
+void FileBrowserPane::resetTableHeaderState()
+{
+    m_applyingLayoutState = true;
+    QHeaderView* const header = m_fileTable->horizontalHeader();
+    for (int logicalIndex = 0; logicalIndex < header->count(); ++logicalIndex) {
+        header->setSectionHidden(logicalIndex, false);
+        const int currentVisualIndex = header->visualIndex(logicalIndex);
+        if (currentVisualIndex != logicalIndex) {
+            header->moveSection(currentVisualIndex, logicalIndex);
+        }
+    }
+    const QList<int> defaultWidths{defaultNameColumnWidth, defaultSizeColumnWidth,
+                                   defaultTypeColumnWidth, defaultModifiedColumnWidth};
+    for (int logicalIndex = 0;
+         logicalIndex < header->count() && logicalIndex < defaultWidths.size(); ++logicalIndex) {
+        header->resizeSection(logicalIndex, defaultWidths.at(logicalIndex));
+    }
+    m_applyingSortState = true;
+    header->setSortIndicator(-1, Qt::AscendingOrder);
+    header->setSortIndicatorShown(false);
+    m_applyingSortState = false;
+    m_applyingLayoutState = false;
+}
+
+void FileBrowserPane::applyAdaptiveLayout()
+{
+    if (!m_adaptiveLayout || m_fileTable == nullptr) {
+        return;
+    }
+    QHeaderView* const header = m_fileTable->horizontalHeader();
+    const int viewportWidth = m_fileTable->viewport()->width();
+    if (viewportWidth <= 0 || header->count() == 0) {
+        return;
+    }
+    const QList<int> minimumWidths{72, 100, 130};
+    const QList<int> adaptiveBaseWidths{defaultSizeColumnWidth, defaultTypeColumnWidth,
+                                        defaultModifiedColumnWidth};
+    QList<int> otherWidths;
+    otherWidths.reserve(header->count() - 1);
+    for (int column = 1; column < header->count(); ++column) {
+        otherWidths.push_back(
+            qMax(minimumWidths.at(column - 1), adaptiveBaseWidths.at(column - 1)));
+    }
+    int otherColumnsWidth = std::accumulate(otherWidths.cbegin(), otherWidths.cend(), 0);
+    int contentWidth = defaultNameColumnWidth;
+    const QFontMetrics metrics(m_fileTable->font());
+    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+        if (const QTableWidgetItem* const item = m_fileTable->item(row, 0); item != nullptr) {
+            contentWidth = qMax(contentWidth, metrics.horizontalAdvance(item->text()) + 32);
+        }
+    }
+    constexpr int minimumNameWidth = 160;
+    const int contentLimit = qBound(520, contentWidth, 900);
+    const int maximumNameWidth = qMax(520, qMin(viewportWidth * 2 / 3, contentLimit));
+    const int availableNameWidth = viewportWidth - otherColumnsWidth;
+    // Name follows the remaining viewport continuously.  The only clamp is the
+    // absolute minimum/maximum; this keeps scrollbar appearance from feeding a
+    // second, discontinuous width decision.
+    const int suggestedNameWidth =
+        qBound(minimumNameWidth, availableNameWidth, maximumNameWidth);
+
+    if (availableNameWidth < minimumNameWidth) {
+        int remainingReduction = otherColumnsWidth - qMax(0, viewportWidth - minimumNameWidth);
+        while (remainingReduction > 0) {
+            bool reduced = false;
+            for (int index = 0; index < otherWidths.size() && remainingReduction > 0; ++index) {
+                if (otherWidths[index] > minimumWidths.at(index)) {
+                    --otherWidths[index];
+                    --remainingReduction;
+                    reduced = true;
+                }
+            }
+            if (!reduced) {
+                break;
+            }
+        }
+    }
+
+    m_applyingAdaptiveLayout = true;
+    if (header->sectionSize(0) != suggestedNameWidth) {
+        header->resizeSection(0, suggestedNameWidth);
+    }
+    for (int index = 0; index < otherWidths.size(); ++index) {
+        const int logicalIndex = index + 1;
+        if (header->sectionSize(logicalIndex) != otherWidths.at(index)) {
+            header->resizeSection(logicalIndex, otherWidths.at(index));
+        }
+    }
+    m_applyingAdaptiveLayout = false;
+}
+
+void FileBrowserPane::markManualLayout()
+{
+    m_adaptiveLayout = false;
+    if (m_headerDragActive) {
+        m_tableHeaderStateDirty = true;
+        return;
+    }
+    scheduleTableHeaderStateSave();
+}
+
+void FileBrowserPane::applyDefaultFileView()
+{
+    m_tableHeaderSaveTimer->stop();
+    m_tableHeaderStateDirty = false;
+    m_adaptiveLayout = true;
+    m_sortColumn = -1;
+    m_sortOrder = Qt::DescendingOrder;
+    resetTableHeaderState();
+    applySortState();
+    applyAdaptiveLayout();
+}
+
+void FileBrowserPane::resetFileView()
+{
+    QSettings settings;
+    settings.remove(QString::fromLatin1(tableHeaderStateKey));
+    settings.remove(QString::fromLatin1(tableSortColumnKey));
+    settings.remove(QString::fromLatin1(tableSortOrderKey));
+    settings.remove(QString::fromLatin1(tableLayoutModeKey));
+    settings.sync();
+    for (FileBrowserPane* const pane : tableHeaderPanes()) {
+        pane->applyDefaultFileView();
+    }
+}
+
+void FileBrowserPane::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    if (m_adaptiveLayout) {
+        applyAdaptiveLayout();
+    }
+}
+
+void FileBrowserPane::handleHeaderSectionClicked(int logicalIndex)
+{
+    m_headerClickInProgress = false;
+    if (m_restoringTableHeaderState || logicalIndex < 0 ||
+        logicalIndex >= m_fileTable->columnCount()) {
+        return;
+    }
+    if (logicalIndex != m_sortColumn) {
+        m_sortColumn = logicalIndex;
+        m_sortOrder = Qt::DescendingOrder;
+    } else if (m_sortOrder == Qt::DescendingOrder) {
+        m_sortOrder = Qt::AscendingOrder;
+    } else {
+        m_sortColumn = -1;
+    }
+    applySortState();
+    scheduleTableHeaderStateSave();
+}
+
+void FileBrowserPane::handleSortIndicatorChanged(int logicalIndex, Qt::SortOrder order)
+{
+    if (m_restoringTableHeaderState || m_applyingSortState || m_headerClickInProgress) {
+        return;
+    }
+    m_sortColumn = logicalIndex;
+    m_sortOrder = order;
+    if (m_sortColumn < 0 || m_sortColumn >= m_fileTable->columnCount()) {
+        m_sortColumn = -1;
+    } else {
+        m_fileTable->horizontalHeader()->setSortIndicatorShown(true);
+    }
+    if (m_sortColumn < 0) {
+        restoreNaturalOrder();
+    }
+    scheduleTableHeaderStateSave();
+}
+
+void FileBrowserPane::applySortState()
+{
+    m_applyingSortState = true;
+    QHeaderView* const header = m_fileTable->horizontalHeader();
+    if (m_sortColumn < 0 || m_sortColumn >= m_fileTable->columnCount()) {
+        header->setSortIndicator(-1, Qt::AscendingOrder);
+        header->setSortIndicatorShown(false);
+        m_applyingSortState = false;
+        restoreNaturalOrder();
+        header->setSortIndicatorShown(false);
+        return;
+    }
+    header->setSortIndicatorShown(true);
+    header->setSortIndicator(m_sortColumn, m_sortOrder);
+    m_fileTable->sortItems(m_sortColumn, m_sortOrder);
+    m_applyingSortState = false;
+}
+
+void FileBrowserPane::restoreNaturalOrder()
+{
+    if (m_fileTable->rowCount() < 2) {
+        return;
+    }
+    QStringList selectedNames;
+    for (const QModelIndex& index : m_fileTable->selectionModel()->selectedRows(0)) {
+        if (const QTableWidgetItem* const item = m_fileTable->item(index.row(), 0);
+            item != nullptr) {
+            selectedNames.push_back(item->text());
+        }
+    }
+    QList<QList<QTableWidgetItem*>> rows;
+    rows.reserve(m_fileTable->rowCount());
+    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+        QList<QTableWidgetItem*> items;
+        items.reserve(m_fileTable->columnCount());
+        for (int column = 0; column < m_fileTable->columnCount(); ++column) {
+            items.push_back(m_fileTable->takeItem(row, column));
+        }
+        rows.push_back(std::move(items));
+    }
+    std::ranges::sort(rows, [](const auto& first, const auto& second) {
+        const auto naturalIndex = [](const auto& row) {
+            return row.constFirst()->data(SortNaturalIndexRole).toInt();
+        };
+        return naturalIndex(first) < naturalIndex(second);
+    });
+    m_fileTable->setSortingEnabled(false);
+    for (int row = 0; row < rows.size(); ++row) {
+        for (int column = 0; column < rows.at(row).size(); ++column) {
+            m_fileTable->setItem(row, column, rows.at(row).at(column));
+        }
+    }
+    m_fileTable->clearSelection();
+    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+        if (const QTableWidgetItem* const item = m_fileTable->item(row, 0);
+            item != nullptr && selectedNames.contains(item->text())) {
+            m_fileTable->selectionModel()->select(m_fileTable->model()->index(row, 0),
+                                                  QItemSelectionModel::Select |
+                                                      QItemSelectionModel::Rows);
+        }
+    }
+    m_fileTable->setSortingEnabled(true);
+}
+
+void FileBrowserPane::scheduleTableHeaderStateSave()
+{
+    if (m_restoringTableHeaderState || m_applyingLayoutState || m_applyingAdaptiveLayout) {
+        return;
+    }
+    m_tableHeaderStateDirty = true;
+    if (m_tableHeaderSaveTimer != nullptr) {
+        m_tableHeaderSaveTimer->start();
+    }
+}
+
+void FileBrowserPane::saveTableHeaderState()
+{
+    if (m_fileTable == nullptr || !m_tableHeaderStateDirty) {
+        return;
+    }
+    if (m_tableHeaderSaveTimer != nullptr) {
+        m_tableHeaderSaveTimer->stop();
+    }
+    const QByteArray state = m_fileTable->horizontalHeader()->saveState();
+    QSettings settings;
+    const QString headerKey = QString::fromLatin1(tableHeaderStateKey);
+    const QString sortColumnKey = QString::fromLatin1(tableSortColumnKey);
+    const QString sortOrderKey = QString::fromLatin1(tableSortOrderKey);
+    const QString layoutModeKey = QString::fromLatin1(tableLayoutModeKey);
+    const int sortOrder = static_cast<int>(m_sortOrder);
+    if (settings.value(headerKey).toByteArray() != state ||
+        settings.value(sortColumnKey, -1).toInt() != m_sortColumn ||
+        settings.value(sortOrderKey, static_cast<int>(Qt::DescendingOrder)).toInt() != sortOrder ||
+        settings.value(layoutModeKey).toString() !=
+            (m_adaptiveLayout ? QStringLiteral("adaptive") : QStringLiteral("manual"))) {
+        settings.setValue(headerKey, state);
+        settings.setValue(sortColumnKey, m_sortColumn);
+        settings.setValue(sortOrderKey, sortOrder);
+        settings.setValue(layoutModeKey,
+                          m_adaptiveLayout ? QStringLiteral("adaptive") : QStringLiteral("manual"));
+        settings.sync();
+    }
+    m_tableHeaderStateDirty = false;
+    for (FileBrowserPane* const pane : tableHeaderPanes()) {
+        if (pane != this) {
+            pane->applyTableHeaderState(state, m_sortColumn, m_sortOrder, m_adaptiveLayout);
+        }
+    }
 }
 
 QString FileBrowserPane::currentPath() const { return m_currentLocation.path; }
@@ -660,8 +1058,10 @@ std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() con
 
 bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
 {
+    QHeaderView* const header = m_fileTable->horizontalHeader();
+    const bool headerEvent = watched == header || watched == header->viewport();
     if (watched == this || watched == m_pathEdit || watched == m_fileTable ||
-        watched == m_fileTable->viewport()) {
+        watched == m_fileTable->viewport() || headerEvent) {
         bool activatesPane = event->type() == QEvent::MouseButtonPress;
         if (event->type() == QEvent::FocusIn) {
             const Qt::FocusReason reason = static_cast<QFocusEvent*>(event)->reason();
@@ -670,6 +1070,81 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
         }
         if (activatesPane) {
             emit activated();
+        }
+    }
+    if (headerEvent) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            const auto* const mouseEvent = static_cast<QMouseEvent*>(event);
+            if (mouseEvent->button() == Qt::LeftButton && header->sectionsMovable()) {
+                const int mouseX = mouseEvent->position().toPoint().x();
+                m_headerDragLogicalIndex = header->logicalIndexAt(mouseX);
+                if (m_headerDragLogicalIndex >= 0) {
+                    const int sectionStart =
+                        header->sectionViewportPosition(m_headerDragLogicalIndex);
+                    const int sectionEnd =
+                        sectionStart + header->sectionSize(m_headerDragLogicalIndex);
+                    constexpr int resizeHandleMargin = 4;
+                    if (mouseX - sectionStart <= resizeHandleMargin ||
+                        sectionEnd - mouseX <= resizeHandleMargin) {
+                        m_headerDragLogicalIndex = -1;
+                    }
+                }
+                m_headerDragStartPosition = mouseEvent->position().toPoint();
+                m_headerDragActive = false;
+            }
+        } else if (event->type() == QEvent::MouseMove &&
+                   m_headerDragLogicalIndex >= 0) {
+            const auto* const mouseEvent = static_cast<QMouseEvent*>(event);
+            if (!m_headerDragActive &&
+                (mouseEvent->position().toPoint() - m_headerDragStartPosition)
+                        .manhattanLength() >= QApplication::startDragDistance()) {
+                m_headerDragActive = true;
+            }
+            if (m_headerDragActive) {
+                    const int currentVisualIndex =
+                        header->visualIndex(m_headerDragLogicalIndex);
+                    const int mouseX = mouseEvent->position().toPoint().x();
+                    const int currentStart =
+                        header->sectionViewportPosition(m_headerDragLogicalIndex);
+                    const int currentEnd = currentStart +
+                                           header->sectionSize(m_headerDragLogicalIndex);
+                    int targetVisualIndex = currentVisualIndex;
+                    if (mouseX > currentEnd) {
+                        for (int visualIndex = currentVisualIndex + 1;
+                             visualIndex < header->count(); ++visualIndex) {
+                            const int logicalIndex = header->logicalIndex(visualIndex);
+                            const int center = header->sectionViewportPosition(logicalIndex) +
+                                               header->sectionSize(logicalIndex) / 2;
+                            if (mouseX > center) {
+                                targetVisualIndex = visualIndex;
+                            } else {
+                                break;
+                            }
+                        }
+                    } else if (mouseX < currentStart) {
+                        for (int visualIndex = currentVisualIndex - 1; visualIndex >= 0;
+                             --visualIndex) {
+                            const int logicalIndex = header->logicalIndex(visualIndex);
+                            const int center = header->sectionViewportPosition(logicalIndex) +
+                                               header->sectionSize(logicalIndex) / 2;
+                            if (mouseX < center) {
+                                targetVisualIndex = visualIndex;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    if (targetVisualIndex != currentVisualIndex) {
+                        header->moveSection(currentVisualIndex, targetVisualIndex);
+                    }
+            }
+        } else if (event->type() == QEvent::MouseButtonRelease &&
+                   static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
+            if (m_headerDragActive) {
+                m_headerDragActive = false;
+                scheduleTableHeaderStateSave();
+            }
+            m_headerDragLogicalIndex = -1;
         }
     }
     if (watched == m_fileTable->viewport()) {
@@ -743,9 +1218,9 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
             dropEvent->setDropAction(dropAction);
             dropEvent->accept();
             emit activated();
-            emit internalDropRequested(*payload, action, destination,
-                                       transferActionWasExplicitlyRequested(
-                                           dropEvent->modifiers()));
+            emit internalDropRequested(
+                *payload, action, destination,
+                transferActionWasExplicitlyRequested(dropEvent->modifiers()));
             return true;
         }
     }
@@ -855,6 +1330,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         nameItem->setData(Qt::UserRole, entry.directory);
         nameItem->setData(Qt::UserRole + 1, entry.symbolicLink);
         nameItem->setData(Qt::UserRole + 2, QVariant::fromValue(entry));
+        nameItem->setData(SortNaturalIndexRole, static_cast<int>(row));
         m_fileTable->setItem(static_cast<int>(row), 0, nameItem);
         const qint64 displaySize =
             entry.size > static_cast<quint64>(std::numeric_limits<qint64>::max())
@@ -885,6 +1361,10 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
                                                   entry.directory));
     }
     m_fileTable->setSortingEnabled(sortingEnabled);
+    if (sortingEnabled) {
+        applySortState();
+    }
+    applyAdaptiveLayout();
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
         const QTableWidgetItem* const item = m_fileTable->item(row, 0);
         if (item != nullptr && namesToSelect.contains(item->text())) {
@@ -1290,12 +1770,12 @@ void FileBrowserPane::updateCutAppearance()
     const QColor cutColor = palette().color(QPalette::Disabled, QPalette::Text);
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
         const QTableWidgetItem* const name = m_fileTable->item(row, 0);
-        const QString path = name == nullptr
-                                 ? QString{}
-                                 : (m_currentLocation.source == rfm::core::FileSource::Local
-                                        ? QDir(m_currentLocation.path).filePath(name->text())
-                                        : rfm::core::RemotePath::join(m_currentLocation.path,
-                                                                       name->text()));
+        const QString path =
+            name == nullptr
+                ? QString{}
+                : (m_currentLocation.source == rfm::core::FileSource::Local
+                       ? QDir(m_currentLocation.path).filePath(name->text())
+                       : rfm::core::RemotePath::join(m_currentLocation.path, name->text()));
         const bool cut = m_cutPaths.contains(rfm::core::RemotePath::normalize(path));
         for (int column = 0; column < m_fileTable->columnCount(); ++column) {
             if (QTableWidgetItem* const item = m_fileTable->item(row, column)) {

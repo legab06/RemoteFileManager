@@ -3,9 +3,10 @@
 #include "remotefilemanager/core/InternalTransfer.hpp"
 
 #include <QApplication>
+#include <QCoreApplication>
+#include <QDir>
 #include <QDragEnterEvent>
 #include <QDragMoveEvent>
-#include <QDir>
 #include <QDropEvent>
 #include <QFile>
 #include <QHeaderView>
@@ -15,7 +16,9 @@
 #include <QMimeData>
 #include <QRubberBand>
 #include <QScrollBar>
+#include <QSettings>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -28,6 +31,7 @@ class FileBrowserPaneTest final : public QObject
     Q_OBJECT
 
   private slots:
+    void init();
     void displaysDirectoryAndBuildsRemoteSelection();
     void presentsFileTypesIconsAndModificationTimesConsistently();
     void configuresIndependentMovableColumns();
@@ -59,7 +63,40 @@ class FileBrowserPaneTest final : public QObject
     void cutAppearanceSurvivesRefreshAndClearsCleanly();
     void focusesLocationAndSwitchesVisiblePane();
     void navigatesLocalDirectoriesWithSourceAwareHistory();
+    void persistsTableHeaderStateAcrossInstances();
+    void persistsAscendingTableSortState();
+    void persistsNoTableSortState();
+    void restoresDefaultTableHeaderStateWhenPreferenceIsInvalid();
+    void sharesTableHeaderStateBetweenLocalAndSshPanes();
+    void cyclesThroughThreeSortStates();
+    void resetFileViewClearsStateAndRestoresAdaptiveLayout();
+    void manualLayoutSurvivesResizeAndPersistsMode();
+    void responsiveLayoutKeepsColumnsUsableAndOrderStable();
+    void adaptiveLayoutChangesContinuouslyAroundMinimum();
+    void headerMovesSectionsLiveDuringDrag();
+    void headerMovesEachSectionLive_data();
+    void headerMovesEachSectionLive();
 };
+
+namespace
+{
+
+constexpr auto tableHeaderStateKey = "ui/fileBrowserPane/headerState";
+constexpr auto tableSortColumnKey = "ui/fileBrowserPane/sortColumn";
+constexpr auto tableSortOrderKey = "ui/fileBrowserPane/sortOrder";
+constexpr auto tableLayoutModeKey = "ui/fileBrowserPane/layoutMode";
+
+}
+
+void FileBrowserPaneTest::init()
+{
+    QSettings settings;
+    settings.remove(QString::fromLatin1(tableHeaderStateKey));
+    settings.remove(QString::fromLatin1(tableSortColumnKey));
+    settings.remove(QString::fromLatin1(tableSortOrderKey));
+    settings.remove(QString::fromLatin1(tableLayoutModeKey));
+    settings.sync();
+}
 
 void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
 {
@@ -67,16 +104,15 @@ void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
     QVERIFY(temporary.isValid());
     QDir root(temporary.path());
     QVERIFY(root.mkdir(QStringLiteral("child")));
-    const rfm::core::BrowserLocation rootLocation{
-        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
-        temporary.path()};
-    const rfm::core::BrowserLocation childLocation{
-        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
-        root.filePath(QStringLiteral("child"))};
+    const rfm::core::BrowserLocation rootLocation{rfm::core::FileSource::Local,
+                                                  QString::fromLatin1(rfm::core::LocalMachineId),
+                                                  temporary.path()};
+    const rfm::core::BrowserLocation childLocation{rfm::core::FileSource::Local,
+                                                   QString::fromLatin1(rfm::core::LocalMachineId),
+                                                   root.filePath(QStringLiteral("child"))};
 
     rfm::app::FileBrowserPane pane;
-    QSignalSpy navigation(&pane,
-                          &rfm::app::FileBrowserPane::locationNavigationRequested);
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
     pane.showDirectory(rootLocation, QStringLiteral("file:///fixture"),
                        {{QStringLiteral("child"), 0, {}, true, false}},
                        rfm::app::PaneNavigation::Initial);
@@ -101,8 +137,7 @@ void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
                        rfm::app::PaneNavigation::Normal);
     QVERIFY(pane.canGoBack());
     pane.requestBack();
-    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)),
-             rootLocation);
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)), rootLocation);
     pane.showDirectory(rootLocation, QStringLiteral("file:///fixture"), {},
                        rfm::app::PaneNavigation::Back);
     QVERIFY(pane.canGoForward());
@@ -112,13 +147,367 @@ void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
     pane.showDirectory(childLocation, QStringLiteral("file:///fixture/child"), {},
                        rfm::app::PaneNavigation::Forward);
     pane.requestParentDirectory();
-    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)),
-             rootLocation);
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constLast().at(0)), rootLocation);
     pane.showDirectory(rootLocation, QStringLiteral("file:///fixture"), {},
                        rfm::app::PaneNavigation::Normal);
     pane.requestRefresh();
     QCOMPARE(navigation.constLast().at(1).value<rfm::app::PaneNavigation>(),
              rfm::app::PaneNavigation::Refresh);
+}
+
+void FileBrowserPaneTest::persistsTableHeaderStateAcrossInstances()
+{
+    {
+        rfm::app::FileBrowserPane pane;
+        QHeaderView* const header = pane.fileTable()->horizontalHeader();
+        header->resizeSection(1, 205);
+        header->moveSection(header->visualIndex(0), 3);
+        pane.fileTable()->sortItems(3, Qt::DescendingOrder);
+    }
+
+    rfm::app::FileBrowserPane restored;
+    QHeaderView* const header = restored.fileTable()->horizontalHeader();
+    QCOMPARE(header->sectionSize(1), 205);
+    QCOMPARE(header->visualIndex(0), 3);
+    QCOMPARE(header->sortIndicatorSection(), 3);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+}
+
+void FileBrowserPaneTest::persistsAscendingTableSortState()
+{
+    {
+        rfm::app::FileBrowserPane pane;
+        pane.fileTable()->sortItems(2, Qt::AscendingOrder);
+    }
+
+    rfm::app::FileBrowserPane restored;
+    const QHeaderView* const header = restored.fileTable()->horizontalHeader();
+    QCOMPARE(header->sortIndicatorSection(), 2);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::AscendingOrder);
+    QVERIFY(header->isSortIndicatorShown());
+}
+
+void FileBrowserPaneTest::persistsNoTableSortState()
+{
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("z.txt"), 2, {}, false, false},
+        {QStringLiteral("a.txt"), 1, {}, false, false},
+    };
+    {
+        rfm::app::FileBrowserPane pane;
+        pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+        pane.fileTable()->sortItems(1, Qt::DescendingOrder);
+        pane.fileTable()->horizontalHeader()->setSortIndicator(-1, Qt::AscendingOrder);
+        pane.fileTable()->horizontalHeader()->setSortIndicatorShown(false);
+    }
+
+    rfm::app::FileBrowserPane restored;
+    const QHeaderView* const header = restored.fileTable()->horizontalHeader();
+    QCOMPARE(header->sortIndicatorSection(), -1);
+    QVERIFY(!header->isSortIndicatorShown());
+    restored.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+    QCOMPARE(restored.fileTable()->item(0, 0)->text(), QStringLiteral("z.txt"));
+    QCOMPARE(restored.fileTable()->item(1, 0)->text(), QStringLiteral("a.txt"));
+}
+
+void FileBrowserPaneTest::restoresDefaultTableHeaderStateWhenPreferenceIsInvalid()
+{
+    QSettings settings;
+    settings.setValue(QString::fromLatin1(tableHeaderStateKey), QByteArrayLiteral("invalid"));
+    settings.sync();
+
+    rfm::app::FileBrowserPane pane;
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    QCOMPARE(header->sectionSize(0), 280);
+    QCOMPARE(header->sectionSize(1), 110);
+    QCOMPARE(header->sectionSize(2), 180);
+    QCOMPARE(header->sectionSize(3), 170);
+    for (int logicalIndex = 0; logicalIndex < header->count(); ++logicalIndex) {
+        QCOMPARE(header->visualIndex(logicalIndex), logicalIndex);
+    }
+    QCOMPARE(header->sortIndicatorSection(), -1);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::AscendingOrder);
+}
+
+void FileBrowserPaneTest::sharesTableHeaderStateBetweenLocalAndSshPanes()
+{
+    {
+        rfm::app::FileBrowserPane pane;
+        QHeaderView* const header = pane.fileTable()->horizontalHeader();
+        header->resizeSection(2, 240);
+        header->moveSection(header->visualIndex(0), 2);
+        pane.fileTable()->sortItems(2, Qt::AscendingOrder);
+    }
+
+    rfm::app::FileBrowserPane localPane;
+    rfm::app::FileBrowserPane sshPane;
+    const QHeaderView* const localHeader = localPane.fileTable()->horizontalHeader();
+    const QHeaderView* const sshHeader = sshPane.fileTable()->horizontalHeader();
+    for (int logicalIndex = 0; logicalIndex < localHeader->count(); ++logicalIndex) {
+        QCOMPARE(localHeader->visualIndex(logicalIndex), sshHeader->visualIndex(logicalIndex));
+        QCOMPARE(localHeader->sectionSize(logicalIndex), sshHeader->sectionSize(logicalIndex));
+    }
+    QCOMPARE(localHeader->sortIndicatorSection(), sshHeader->sortIndicatorSection());
+    QCOMPARE(localHeader->sortIndicatorOrder(), sshHeader->sortIndicatorOrder());
+
+    localPane.fileTable()->horizontalHeader()->moveSection(localHeader->visualIndex(0), 0);
+    QTest::qWait(250);
+    QCOMPARE(sshHeader->visualIndex(0), 0);
+}
+
+void FileBrowserPaneTest::cyclesThroughThreeSortStates()
+{
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("z.txt"), 2, {}, false, false},
+        {QStringLiteral("a.txt"), 1, {}, false, false},
+        {QStringLiteral("m.txt"), 3, {}, false, false},
+    };
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+    QCoreApplication::processEvents();
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    const QPoint center(header->sectionViewportPosition(0) + header->sectionSize(0) / 2,
+                        header->height() / 2);
+
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, center);
+    QCOMPARE(header->sortIndicatorSection(), 0);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+    QVERIFY(header->isSortIndicatorShown());
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("z.txt"));
+
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, center);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::AscendingOrder);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("a.txt"));
+
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, center);
+    QCOMPARE(header->sortIndicatorSection(), -1);
+    QVERIFY(!header->isSortIndicatorShown());
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("z.txt"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("a.txt"));
+    QCOMPARE(pane.fileTable()->item(2, 0)->text(), QStringLiteral("m.txt"));
+
+    const QList<rfm::core::RemoteEntry> refreshedEntries{
+        {QStringLiteral("m.txt"), 3, {}, false, false},
+        {QStringLiteral("z.txt"), 2, {}, false, false},
+        {QStringLiteral("a.txt"), 1, {}, false, false},
+    };
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), refreshedEntries);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("m.txt"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("z.txt"));
+    QCOMPARE(pane.fileTable()->item(2, 0)->text(), QStringLiteral("a.txt"));
+
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, center);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+    QVERIFY(header->isSortIndicatorShown());
+
+    const QPoint sizeCenter(header->sectionViewportPosition(1) + header->sectionSize(1) / 2,
+                            header->height() / 2);
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, sizeCenter);
+    QCOMPARE(header->sortIndicatorSection(), 1);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+}
+
+void FileBrowserPaneTest::resetFileViewClearsStateAndRestoresAdaptiveLayout()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(700, 400);
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"),
+                       {{QStringLiteral("z.txt"), 2, {}, false, false},
+                        {QStringLiteral("a-very-long-file-name.txt"), 1, {}, false, false}});
+    QCoreApplication::processEvents();
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    header->resizeSection(0, 190);
+    header->resizeSection(1, 240);
+    header->resizeSection(2, 145);
+    header->resizeSection(3, 210);
+    header->moveSection(header->visualIndex(0), 3);
+    header->moveSection(header->visualIndex(1), 0);
+    header->moveSection(header->visualIndex(2), 1);
+    header->setSectionHidden(2, true);
+    pane.fileTable()->sortItems(2, Qt::AscendingOrder);
+    QTest::qWait(250);
+    QVERIFY(QSettings{}.contains(QString::fromLatin1(tableHeaderStateKey)));
+
+    pane.resetFileView();
+    QCOMPARE(header->sortIndicatorSection(), -1);
+    QVERIFY(!header->isSortIndicatorShown());
+    for (int logicalIndex = 0; logicalIndex < header->count(); ++logicalIndex) {
+        QCOMPARE(header->visualIndex(logicalIndex), logicalIndex);
+        QVERIFY(!header->isSectionHidden(logicalIndex));
+    }
+    QSettings settings;
+    QVERIFY(!settings.contains(QString::fromLatin1(tableHeaderStateKey)));
+    QVERIFY(!settings.contains(QString::fromLatin1(tableSortColumnKey)));
+    QVERIFY(!settings.contains(QString::fromLatin1(tableSortOrderKey)));
+    QVERIFY(!settings.contains(QString::fromLatin1(tableLayoutModeKey)));
+
+    const int initialNameWidth = header->sectionSize(0);
+    pane.resize(1400, 400);
+    QCoreApplication::processEvents();
+    QVERIFY(header->sectionSize(0) != initialNameWidth);
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"),
+                       {{QStringLiteral("natural-first"), 1, {}, false, false},
+                        {QStringLiteral("natural-second"), 2, {}, false, false}});
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("natural-first"));
+
+    rfm::app::FileBrowserPane restored;
+    const QHeaderView* const restoredHeader = restored.fileTable()->horizontalHeader();
+    for (int logicalIndex = 0; logicalIndex < restoredHeader->count(); ++logicalIndex) {
+        QCOMPARE(restoredHeader->visualIndex(logicalIndex), logicalIndex);
+        QVERIFY(!restoredHeader->isSectionHidden(logicalIndex));
+    }
+    QCOMPARE(restoredHeader->sortIndicatorSection(), -1);
+    QVERIFY(!restoredHeader->isSortIndicatorShown());
+}
+
+void FileBrowserPaneTest::manualLayoutSurvivesResizeAndPersistsMode()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(900, 400);
+    pane.show();
+    QCoreApplication::processEvents();
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    header->resizeSection(1, 235);
+    QTest::qWait(250);
+    QCOMPARE(header->sectionSize(1), 235);
+    QCOMPARE(QSettings{}.value(QString::fromLatin1(tableLayoutModeKey)).toString(),
+             QStringLiteral("manual"));
+    pane.resize(500, 400);
+    QCoreApplication::processEvents();
+    QCOMPARE(header->sectionSize(1), 235);
+}
+
+void FileBrowserPaneTest::responsiveLayoutKeepsColumnsUsableAndOrderStable()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(1200, 360);
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"),
+                       {{QStringLiteral("name-with-a-reasonable-length.txt"), 1, {}, false,
+                         false}});
+    QCoreApplication::processEvents();
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    const int wideNameWidth = header->sectionSize(0);
+    QVERIFY(wideNameWidth > 280);
+    const QList<int> visualOrder{header->visualIndex(0), header->visualIndex(1),
+                                 header->visualIndex(2), header->visualIndex(3)};
+
+    pane.resize(220, 360);
+    QCoreApplication::processEvents();
+    QVERIFY(header->sectionSize(0) < wideNameWidth);
+    QVERIFY(header->sectionSize(0) >= 160);
+    QVERIFY(header->sectionSize(1) >= 72);
+    QVERIFY(header->sectionSize(2) >= 100);
+    QVERIFY(header->sectionSize(3) >= 130);
+    QVERIFY(pane.fileTable()->horizontalScrollBar()->isVisible());
+    const QList<int> narrowVisualOrder{header->visualIndex(0), header->visualIndex(1),
+                                       header->visualIndex(2), header->visualIndex(3)};
+    QCOMPARE(narrowVisualOrder, visualOrder);
+
+    pane.resize(1200, 360);
+    QCoreApplication::processEvents();
+    QVERIFY(header->sectionSize(1) >= 110);
+    QVERIFY(header->sectionSize(2) >= 180);
+    QVERIFY(header->sectionSize(3) >= 170);
+}
+
+void FileBrowserPaneTest::adaptiveLayoutChangesContinuouslyAroundMinimum()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"),
+                       {{QStringLiteral("a-file.txt"), 1, {}, false, false}});
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    int previousNameWidth = 0;
+    for (int paneWidth = 500; paneWidth <= 800; ++paneWidth) {
+        pane.resize(paneWidth, 320);
+        QCoreApplication::processEvents();
+        const int nameWidth = header->sectionSize(0);
+        if (previousNameWidth > 0) {
+            QVERIFY2(qAbs(nameWidth - previousNameWidth) <= 20,
+                     "adaptive Name width changed disproportionately");
+        }
+        previousNameWidth = nameWidth;
+    }
+
+    rfm::app::PaneWorkspace workspace;
+    workspace.resize(900, 320);
+    workspace.setSplit(true);
+    QCoreApplication::processEvents();
+    const auto* const primaryHeader = workspace.primaryPane()->fileTable()->horizontalHeader();
+    const auto* const secondaryHeader =
+        workspace.otherVisiblePane()->fileTable()->horizontalHeader();
+    QVERIFY(primaryHeader->sectionSize(0) >= 160);
+    QVERIFY(secondaryHeader->sectionSize(0) >= 160);
+}
+
+void FileBrowserPaneTest::headerMovesSectionsLiveDuringDrag()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(900, 320);
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"),
+                       {{QStringLiteral("first.txt"), 12, {}, false, false},
+                        {QStringLiteral("second.txt"), 4, {}, false, false}});
+    QCoreApplication::processEvents();
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    pane.fileTable()->sortItems(1, Qt::DescendingOrder);
+    const QList<int> widths{header->sectionSize(0), header->sectionSize(1),
+                            header->sectionSize(2), header->sectionSize(3)};
+    QSignalSpy moved(header, &QHeaderView::sectionMoved);
+    const QPoint start(header->sectionViewportPosition(0) + header->sectionSize(0) / 2,
+                       header->height() / 2);
+    const QPoint target(header->viewport()->width() - 2, header->height() / 2);
+    QTest::mousePress(header->viewport(), Qt::LeftButton, Qt::NoModifier, start);
+    QTest::mouseMove(header->viewport(), target, 20);
+    QCoreApplication::processEvents();
+    const bool movedBeforeRelease = moved.size() > 0;
+    QTest::mouseRelease(header->viewport(), Qt::LeftButton, Qt::NoModifier, target);
+    QVERIFY(movedBeforeRelease);
+    QCOMPARE(header->visualIndex(0), 3);
+    QCOMPARE(header->sortIndicatorSection(), 1);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+    const QList<int> finalWidths{header->sectionSize(0), header->sectionSize(1),
+                                 header->sectionSize(2), header->sectionSize(3)};
+    QCOMPARE(finalWidths, widths);
+    QTest::qWait(250);
+    rfm::app::FileBrowserPane restored;
+    QCOMPARE(restored.fileTable()->horizontalHeader()->visualIndex(0), 3);
+}
+
+void FileBrowserPaneTest::headerMovesEachSectionLive_data()
+{
+    QTest::addColumn<int>("source");
+    QTest::addColumn<int>("target");
+    for (int source = 0; source < 4; ++source) {
+        QTest::newRow(QByteArray::number(source).constData())
+            << source << (source == 0 || source == 2 ? 3 : 0);
+    }
+}
+
+void FileBrowserPaneTest::headerMovesEachSectionLive()
+{
+    QFETCH(const int, source);
+    QFETCH(const int, target);
+    rfm::app::FileBrowserPane pane;
+    pane.resize(900, 320);
+    pane.show();
+    QCoreApplication::processEvents();
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    QSignalSpy moved(header, &QHeaderView::sectionMoved);
+    const QPoint start(header->sectionViewportPosition(source) + header->sectionSize(source) / 2,
+                       header->height() / 2);
+    const QPoint destination(target == 0 ? 2 : header->viewport()->width() - 2,
+                             header->height() / 2);
+    QTest::mousePress(header->viewport(), Qt::LeftButton, Qt::NoModifier, start);
+    QTest::mouseMove(header->viewport(), destination, 20);
+    QCoreApplication::processEvents();
+    QVERIFY(moved.size() > 0);
+    QTest::mouseRelease(header->viewport(), Qt::LeftButton, Qt::NoModifier, destination);
+    QCOMPARE(header->visualIndex(source), target);
 }
 
 void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
@@ -128,8 +517,8 @@ void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
         {QStringLiteral("file.txt"), 1536, {}, false, false},
         {QStringLiteral("folder"), 0, {}, true, false},
     };
-    pane.showDirectory(QStringLiteral("/srv"),
-                       QStringLiteral("sftp://user@example.test:22//srv"), entries);
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://user@example.test:22//srv"),
+                       entries);
 
     QCOMPARE(pane.currentPath(), QStringLiteral("/srv"));
     QCOMPARE(pane.pathEdit()->text(), QStringLiteral("sftp://user@example.test:22//srv"));
@@ -139,12 +528,12 @@ void FileBrowserPaneTest::displaysDirectoryAndBuildsRemoteSelection()
     QCOMPARE(pane.fileTable()->selectionMode(), QAbstractItemView::ExtendedSelection);
     QCOMPARE(pane.fileTable()->selectionBehavior(), QAbstractItemView::SelectRows);
 
-    pane.fileTable()->selectionModel()->select(
-        pane.fileTable()->model()->index(0, 0),
-        QItemSelectionModel::Select | QItemSelectionModel::Rows);
-    pane.fileTable()->selectionModel()->select(
-        pane.fileTable()->model()->index(1, 0),
-        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    pane.fileTable()->selectionModel()->select(pane.fileTable()->model()->index(0, 0),
+                                               QItemSelectionModel::Select |
+                                                   QItemSelectionModel::Rows);
+    pane.fileTable()->selectionModel()->select(pane.fileTable()->model()->index(1, 0),
+                                               QItemSelectionModel::Select |
+                                                   QItemSelectionModel::Rows);
     const auto selection = pane.selectedEntries();
     QCOMPARE(selection.size(), 2);
     QCOMPARE(selection.at(0).path, QStringLiteral("/srv/file.txt"));
@@ -218,7 +607,10 @@ void FileBrowserPaneTest::configuresIndependentMovableColumns()
 
     const QList<int> initialWidths{header->sectionSize(0), header->sectionSize(1),
                                    header->sectionSize(2), header->sectionSize(3)};
-    QCOMPARE(initialWidths, QList<int>({280, 110, 180, 170}));
+    QVERIFY(initialWidths.at(0) >= 160);
+    QVERIFY(initialWidths.at(1) >= 48);
+    QVERIFY(initialWidths.at(2) >= 48);
+    QVERIFY(initialWidths.at(3) >= 48);
     header->resizeSection(1, 60);
     QCOMPARE(header->sectionSize(0), initialWidths.at(0));
     QCOMPARE(header->sectionSize(1), 60);
@@ -283,10 +675,11 @@ void FileBrowserPaneTest::sortsEveryColumnUsingRawValues()
     const QPoint nameHeaderCenter(header->sectionViewportPosition(0) + header->sectionSize(0) / 2,
                                   header->height() / 2);
     QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, nameHeaderCenter);
-    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+    QCOMPARE(header->sortIndicatorSection(), -1);
+    QVERIFY(!header->isSortIndicatorShown());
     QCOMPARE(names(), QStringList({QStringLiteral("z-folder"), QStringLiteral("a-folder"),
-                                   QStringLiteral("c.rfm_unknown_extension_987"),
-                                   QStringLiteral("b.txt"), QStringLiteral("a.jpg")}));
+                                   QStringLiteral("b.txt"), QStringLiteral("a.jpg"),
+                                   QStringLiteral("c.rfm_unknown_extension_987")}));
 
     table->sortItems(1, Qt::AscendingOrder);
     QCOMPARE(names().sliced(2), QStringList({QStringLiteral("c.rfm_unknown_extension_987"),
@@ -670,10 +1063,9 @@ void FileBrowserPaneTest::emitsNavigationIntentions()
     rfm::app::FileBrowserPane pane;
     pane.resize(640, 320);
     pane.show();
-    pane.showDirectory(
-        QStringLiteral("/srv/current"), QStringLiteral("sftp://host/srv/current"),
-        {{QStringLiteral("child"), 0, {}, true, false},
-         {QStringLiteral("file.txt"), 1, {}, false, false}});
+    pane.showDirectory(QStringLiteral("/srv/current"), QStringLiteral("sftp://host/srv/current"),
+                       {{QStringLiteral("child"), 0, {}, true, false},
+                        {QStringLiteral("file.txt"), 1, {}, false, false}});
     QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
 
     pane.requestParentDirectory();
@@ -716,17 +1108,15 @@ void FileBrowserPaneTest::activatesDirectoryAndBrokenSymbolicLinksForBackendReso
     rfm::app::FileBrowserPane pane;
     pane.resize(640, 240);
     pane.show();
-    pane.showDirectory(
-        QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
-        {{QStringLiteral("directory-link"), 0, {}, false, true},
-         {QStringLiteral("broken-link"), 0, {}, false, true},
-         {QStringLiteral("regular-file"), 1, {}, false, false}});
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+                       {{QStringLiteral("directory-link"), 0, {}, false, true},
+                        {QStringLiteral("broken-link"), 0, {}, false, true},
+                        {QStringLiteral("regular-file"), 1, {}, false, false}});
     QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::navigationRequested);
 
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
                                       Q_ARG(int, 0), Q_ARG(int, 0)));
-    QCOMPARE(navigation.takeFirst().constFirst().toString(),
-             QStringLiteral("/srv/directory-link"));
+    QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/srv/directory-link"));
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
                                       Q_ARG(int, 1), Q_ARG(int, 0)));
     QCOMPARE(navigation.takeFirst().constFirst().toString(), QStringLiteral("/srv/broken-link"));
@@ -740,13 +1130,13 @@ void FileBrowserPaneTest::preparesContextSelectionBeforeEmittingIntent()
     rfm::app::FileBrowserPane pane;
     pane.resize(640, 320);
     pane.show();
-    pane.showDirectory(
-        QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
-        {{QStringLiteral("first.txt"), 1, {}, false, false},
-         {QStringLiteral("second.txt"), 1, {}, false, false}});
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+                       {{QStringLiteral("first.txt"), 1, {}, false, false},
+                        {QStringLiteral("second.txt"), 1, {}, false, false}});
     pane.fileTable()->selectRow(0);
     QSignalSpy contextMenus(&pane, &rfm::app::FileBrowserPane::contextMenuRequested);
-    const QPoint secondRow = pane.fileTable()->visualItemRect(pane.fileTable()->item(1, 0)).center();
+    const QPoint secondRow =
+        pane.fileTable()->visualItemRect(pane.fileTable()->item(1, 0)).center();
 
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "customContextMenuRequested",
                                       Qt::DirectConnection, Q_ARG(QPoint, secondRow)));
@@ -785,8 +1175,7 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     rfm::app::FileBrowserPane pane;
     pane.resize(640, 320);
     pane.show();
-    QSignalSpy navigationRequests(&pane,
-                                  &rfm::app::FileBrowserPane::locationNavigationRequested);
+    QSignalSpy navigationRequests(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
 
     const auto clickRow = [&pane](int row) -> std::optional<rfm::app::FileEntryProperties> {
         const QPoint position =
@@ -859,9 +1248,9 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     QVERIFY(properties.text.contains(QStringLiteral("Type: Folder")));
     QVERIFY(!properties.text.contains(QStringLiteral("Size:")));
 
-    pane.showDirectory({rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
-                        QStringLiteral("/srv")},
-                       QStringLiteral("sftp://host/srv"), entries);
+    pane.showDirectory(
+        {rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/srv")},
+        QStringLiteral("sftp://host/srv"), entries);
     for (int index = 0; index < localTypes.size(); ++index) {
         clicked = clickRow(index + 1);
         QVERIFY(clicked.has_value());
@@ -885,13 +1274,13 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     QCOMPARE(clicked->title, QStringLiteral("report Type: forged.mkv"));
     QVERIFY(!clicked->title.contains(QChar{'\n'}));
     const QStringList unsafeLines = clicked->text.split(QChar{'\n'});
-    QCOMPARE(std::ranges::count_if(unsafeLines, [](const QString& line) {
-                 return line.startsWith(QStringLiteral("Type: "));
-             }),
+    QCOMPARE(std::ranges::count_if(
+                 unsafeLines,
+                 [](const QString& line) { return line.startsWith(QStringLiteral("Type: ")); }),
              1);
-    QCOMPARE(std::ranges::count_if(unsafeLines, [](const QString& line) {
-                 return line.startsWith(QStringLiteral("Path: "));
-             }),
+    QCOMPARE(std::ranges::count_if(
+                 unsafeLines,
+                 [](const QString& line) { return line.startsWith(QStringLiteral("Path: ")); }),
              1);
     QVERIFY(!clicked->text.contains(QStringLiteral("\nType: forged")));
     QVERIFY(!clicked->text.contains(QStringLiteral("\nPath: forged")));
@@ -906,12 +1295,15 @@ void FileBrowserPaneTest::restoresSelectionAndScrollOnRefresh()
     QList<rfm::core::RemoteEntry> entries;
     for (int index = 0; index < 80; ++index) {
         entries.push_back({QStringLiteral("file-%1.txt").arg(index, 2, 10, QChar{'0'}),
-                           static_cast<quint64>(index), {}, false, false});
+                           static_cast<quint64>(index),
+                           {},
+                           false,
+                           false});
     }
     pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"), entries);
-    pane.fileTable()->selectionModel()->select(
-        pane.fileTable()->model()->index(40, 0),
-        QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    pane.fileTable()->selectionModel()->select(pane.fileTable()->model()->index(40, 0),
+                                               QItemSelectionModel::Select |
+                                                   QItemSelectionModel::Rows);
     pane.fileTable()->verticalScrollBar()->setValue(25);
     const int scrollPosition = pane.fileTable()->verticalScrollBar()->value();
 
@@ -929,10 +1321,9 @@ void FileBrowserPaneTest::appliesPendingSelectionAfterOperation()
     rfm::app::FileBrowserPane pane;
     pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"), {});
     pane.setPendingSelectionNames({QStringLiteral("created.txt")});
-    pane.showDirectory(
-        QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
-        {{QStringLiteral("created.txt"), 10, {}, false, false},
-         {QStringLiteral("other.txt"), 10, {}, false, false}});
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("sftp://host/srv"),
+                       {{QStringLiteral("created.txt"), 10, {}, false, false},
+                        {QStringLiteral("other.txt"), 10, {}, false, false}});
 
     const QModelIndexList selected = pane.fileTable()->selectionModel()->selectedRows(0);
     QCOMPARE(selected.size(), 1);
@@ -986,10 +1377,9 @@ void FileBrowserPaneTest::workspaceTracksActivePaneFromInteraction()
     const QColor normalWindow = workspace.palette().color(QPalette::Window);
     primary->showDirectory(QStringLiteral("/one"), QStringLiteral("/one"), {},
                            rfm::app::PaneNavigation::Initial);
-    primary->showDirectory(
-        QStringLiteral("/one/child"), QStringLiteral("/one/child"),
-        {{QStringLiteral("kept.txt"), 1, {}, false, false}},
-        rfm::app::PaneNavigation::Normal);
+    primary->showDirectory(QStringLiteral("/one/child"), QStringLiteral("/one/child"),
+                           {{QStringLiteral("kept.txt"), 1, {}, false, false}},
+                           rfm::app::PaneNavigation::Normal);
     primary->fileTable()->selectRow(0);
     QSignalSpy activeChanges(&workspace, &rfm::app::PaneWorkspace::activePaneChanged);
 
@@ -1041,12 +1431,10 @@ void FileBrowserPaneTest::workspaceKeepsPanePathsAndSelectionsIndependent()
     workspace.setSplit(true);
     rfm::app::FileBrowserPane* const primary = workspace.primaryPane();
     rfm::app::FileBrowserPane* const secondary = workspace.otherVisiblePane();
-    primary->showDirectory(
-        QStringLiteral("/one"), QStringLiteral("sftp://host/one"),
-        {{QStringLiteral("first.txt"), 1, {}, false, false}});
-    secondary->showDirectory(
-        QStringLiteral("/two"), QStringLiteral("sftp://host/two"),
-        {{QStringLiteral("second.txt"), 1, {}, false, false}});
+    primary->showDirectory(QStringLiteral("/one"), QStringLiteral("sftp://host/one"),
+                           {{QStringLiteral("first.txt"), 1, {}, false, false}});
+    secondary->showDirectory(QStringLiteral("/two"), QStringLiteral("sftp://host/two"),
+                             {{QStringLiteral("second.txt"), 1, {}, false, false}});
     primary->fileTable()->selectRow(0);
 
     QCOMPARE(primary->currentPath(), QStringLiteral("/one"));
@@ -1171,8 +1559,8 @@ void FileBrowserPaneTest::constructsAndAcceptsOnlyInternalDragPayloads()
 
 void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
 {
-    const rfm::core::RemoteConnectionIdentity connection{
-        QStringLiteral("server.example.test"), 22, 4};
+    const rfm::core::RemoteConnectionIdentity connection{QStringLiteral("server.example.test"), 22,
+                                                         4};
     rfm::app::FileBrowserPane source;
     source.setTransferContext(QStringLiteral("instance"), connection, 1);
     source.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"),
@@ -1355,8 +1743,8 @@ void FileBrowserPaneTest::constructsLocalPayloadAndResolvesLocalDropDestinations
         const QList<QVariant> arguments = drops.takeFirst();
         QCOMPARE(arguments.at(1).value<rfm::core::InternalTransferAction>(), expectedAction);
         QCOMPARE(arguments.at(2).toString(), expectedDestination);
-        QCOMPARE(arguments.at(3).toBool(), modifiers.testFlag(Qt::ControlModifier) ||
-                                             modifiers.testFlag(Qt::ShiftModifier));
+        QCOMPARE(arguments.at(3).toBool(),
+                 modifiers.testFlag(Qt::ControlModifier) || modifiers.testFlag(Qt::ShiftModifier));
     };
 
     const QPoint childPosition =
@@ -1543,6 +1931,17 @@ void FileBrowserPaneTest::focusesLocationAndSwitchesVisiblePane()
     QCOMPARE(workspace.activePane(), primary);
 }
 
-QTEST_MAIN(FileBrowserPaneTest)
+int main(int argc, char* argv[])
+{
+    QApplication application(argc, argv);
+    QStandardPaths::setTestModeEnabled(true);
+    QCoreApplication::setOrganizationName(QStringLiteral("RemoteFileManagerTests"));
+    QCoreApplication::setApplicationName(QStringLiteral("rfm_file_browser_pane_tests"));
+    QTemporaryDir settingsDirectory;
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDirectory.path());
+    QSettings::setPath(QSettings::NativeFormat, QSettings::UserScope, settingsDirectory.path());
+    FileBrowserPaneTest test;
+    return QTest::qExec(&test, argc, argv);
+}
 
 #include "test_file_browser_pane.moc"

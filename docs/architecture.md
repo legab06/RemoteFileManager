@@ -99,6 +99,28 @@ obsolète est ignorée, un refus ou une erreur laisse un tiret, et un refresh re
 placeholders puis relance naturellement les comptages. La clé de tri `Size` représente
 donc des octets pour un fichier et un nombre d'enfants pour un dossier, les deux groupes
 restant séparés par la règle « dossiers d'abord ».
+La présentation du tableau est partagée entre les instances Local et SSH : chaque
+`FileBrowserPane` restaure et sauvegarde l'état natif de son `QHeaderView` dans
+`QSettings`, sous les clés `ui/fileBrowserPane/headerState`,
+`ui/fileBrowserPane/sortColumn`, `ui/fileBrowserPane/sortOrder` et
+`ui/fileBrowserPane/layoutMode`. La clé d'en-tête contient l'ordre visuel et les largeurs ;
+les clés de tri représentent aussi
+explicitement l'absence de tri (`sortColumn=-1`). Les changements sont regroupés pendant
+les redimensionnements et l'état courant est également écrit à la destruction du
+panneau. Une préférence absente, invalide ou incompatible repart des largeurs de base
+du tableau (Name 280, Size 110, Type 180, Modified 170), puis applique l'adaptation
+responsive du mode adaptatif.
+Un clic sur un en-tête suit le cycle Descending, Ascending, No sort ; dans ce dernier
+état, l'indicateur disparaît et l'ordre reçu du listing est restauré. Un listing suivant
+est trié uniquement lorsqu'un tri utilisateur est actif.
+Le mode `layoutMode` vaut `adaptive` après une réinitialisation ou sur une nouvelle
+installation ; il ajuste uniquement la colonne Name selon la largeur disponible et le
+contenu visible, sans mode Stretch. Un déplacement ou redimensionnement manuel passe le
+mode à `manual`, qui est conservé pendant les changements de fenêtre, de split, les
+refresh et les navigations. L'action View → Reset file view supprime ces préférences,
+réaffiche toutes les colonnes, réinitialise explicitement l'ordre Name/Size/Type/Modified
+et les largeurs dans tous les panneaux visibles (Local et SSH), puis
+réactive le mode adaptatif sans redémarrage.
 Lors d'un refresh du même emplacement SSH, le panneau réinjecte dans le nouveau listing
 les comptes valides de l'affichage précédent pour les seuls noms encore présents. Ces
 valeurs éphémères restent visibles et continuent d'alimenter le tri pendant le recount ;

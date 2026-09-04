@@ -306,6 +306,7 @@ class MainWindow final : public QMainWindow
     QAction* m_uploadAction{nullptr};
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_resetFileViewAction{nullptr};
     QAction* m_placesDockAction{nullptr};
     QAction* m_operationDockAction{nullptr};
     QAction* m_clipboardCopyAction{nullptr};
