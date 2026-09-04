@@ -41,6 +41,14 @@ target_link_libraries(rfm_ssh_transfer_lifecycle_tests PRIVATE Qt6::Test RemoteF
 rfm_set_project_warnings(rfm_ssh_transfer_lifecycle_tests)
 add_test(NAME unit.ssh_transfer_lifecycle COMMAND rfm_ssh_transfer_lifecycle_tests)
 
+qt_add_executable(rfm_ssh_authentication_policy_tests test_ssh_authentication_policy.cpp)
+target_link_libraries(rfm_ssh_authentication_policy_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+target_compile_definitions(
+    rfm_ssh_authentication_policy_tests PRIVATE RFM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+rfm_set_project_warnings(rfm_ssh_authentication_policy_tests)
+add_test(NAME unit.ssh_authentication_policy COMMAND rfm_ssh_authentication_policy_tests)
+
 qt_add_executable(rfm_local_file_system_tests test_local_file_system.cpp)
 target_link_libraries(rfm_local_file_system_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_local_file_system_tests)
@@ -83,6 +91,12 @@ target_link_libraries(rfm_connection_dialog_tests PRIVATE Qt6::Test RemoteFileMa
 rfm_set_project_warnings(rfm_connection_dialog_tests)
 add_test(NAME ui.connection_dialog COMMAND rfm_connection_dialog_tests)
 set_tests_properties(ui.connection_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(rfm_password_authentication_dialog_tests test_password_authentication_dialog.cpp)
+target_link_libraries(rfm_password_authentication_dialog_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
+rfm_set_project_warnings(rfm_password_authentication_dialog_tests)
+add_test(NAME ui.password_authentication_dialog COMMAND rfm_password_authentication_dialog_tests)
+set_tests_properties(ui.password_authentication_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 qt_add_executable(rfm_home_page_tests test_home_page.cpp)
 target_link_libraries(rfm_home_page_tests PRIVATE Qt6::Test RemoteFileManager::Ui)

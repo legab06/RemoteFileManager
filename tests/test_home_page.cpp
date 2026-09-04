@@ -12,6 +12,7 @@ class HomePageTest final : public QObject
   private slots:
     void showsProfilesAndEmitsConnectionIntent();
     void exposesManualConnectionIntent();
+    void exposesSelectedProfileEditIntent();
 };
 
 void HomePageTest::showsProfilesAndEmitsConnectionIntent()
@@ -50,6 +51,23 @@ void HomePageTest::exposesManualConnectionIntent()
     QSignalSpy requested(&page, &rfm::app::HomePage::newConnectionRequested);
     newConnection->click();
     QCOMPARE(requested.size(), 1);
+}
+
+void HomePageTest::exposesSelectedProfileEditIntent()
+{
+    rfm::app::HomePage page;
+    page.setProfiles({{QStringLiteral("NAS"), QStringLiteral("nas.example.test"),
+                       QStringLiteral("alice"), 22, QStringLiteral("nas-id")}});
+    auto* const list = page.findChild<QListWidget*>(QStringLiteral("homeServerList"));
+    auto* const edit = page.findChild<QPushButton*>(QStringLiteral("homeEditServerButton"));
+    QVERIFY(edit != nullptr);
+    QVERIFY(!edit->isEnabled());
+    list->setCurrentRow(0);
+    QVERIFY(edit->isEnabled());
+    QSignalSpy requested(&page, &rfm::app::HomePage::editProfileRequested);
+    edit->click();
+    QCOMPARE(requested.size(), 1);
+    QCOMPARE(requested.constFirst().constFirst().toString(), QStringLiteral("nas-id"));
 }
 
 QTEST_MAIN(HomePageTest)

@@ -33,8 +33,8 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
     title->setFont(titleFont);
     layout->addWidget(title);
 
-    auto* const description = new QLabel(
-        tr("Connect to a saved server or start a new secure SSH connection."), content);
+    auto* const description =
+        new QLabel(tr("Connect to a saved server or start a new secure SSH connection."), content);
     description->setWordWrap(true);
     layout->addWidget(description);
 
@@ -54,10 +54,14 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
     m_connectButton = new QPushButton(tr("Connect"), content);
     m_connectButton->setObjectName(QStringLiteral("homeConnectButton"));
     m_connectButton->setEnabled(false);
+    m_editButton = new QPushButton(tr("Edit…"), content);
+    m_editButton->setObjectName(QStringLiteral("homeEditServerButton"));
+    m_editButton->setEnabled(false);
     auto* const newConnectionButton = new QPushButton(
         style()->standardIcon(QStyle::SP_ComputerIcon), tr("New connection…"), content);
     newConnectionButton->setObjectName(QStringLiteral("homeNewConnectionButton"));
     buttons->addWidget(m_connectButton);
+    buttons->addWidget(m_editButton);
     buttons->addStretch();
     buttons->addWidget(newConnectionButton);
     layout->addLayout(buttons);
@@ -65,11 +69,15 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
     outerLayout->addWidget(content, 0, Qt::AlignHCenter);
     outerLayout->addStretch();
 
-    connect(m_serverList, &QListWidget::itemSelectionChanged, this,
-            &HomePage::updateConnectButton);
+    connect(m_serverList, &QListWidget::itemSelectionChanged, this, &HomePage::updateConnectButton);
     connect(m_serverList, &QListWidget::itemDoubleClicked, this,
             [this](QListWidgetItem*) { requestSelectedProfile(); });
     connect(m_connectButton, &QPushButton::clicked, this, &HomePage::requestSelectedProfile);
+    connect(m_editButton, &QPushButton::clicked, this, [this] {
+        if (m_serverList->currentItem() != nullptr && m_editButton->isEnabled()) {
+            emit editProfileRequested(m_serverList->currentItem()->data(Qt::UserRole).toString());
+        }
+    });
     connect(newConnectionButton, &QPushButton::clicked, this, &HomePage::newConnectionRequested);
 }
 
@@ -87,12 +95,12 @@ void HomePage::setProfiles(const QList<rfm::core::ConnectionProfile>& profiles)
     }
 
     for (const rfm::core::ConnectionProfile& profile : profiles) {
-        auto* const item = new QListWidgetItem(
-            style()->standardIcon(QStyle::SP_ComputerIcon),
-            tr("%1\n%2@%3:%4")
-                .arg(profile.effectiveDisplayName(), profile.username, profile.host,
-                     QString::number(profile.port)),
-            m_serverList);
+        auto* const item =
+            new QListWidgetItem(style()->standardIcon(QStyle::SP_ComputerIcon),
+                                tr("%1\n%2@%3:%4")
+                                    .arg(profile.effectiveDisplayName(), profile.username,
+                                         profile.host, QString::number(profile.port)),
+                                m_serverList);
         item->setData(Qt::UserRole, profile.id);
         if (profile.id == selectedId) {
             m_serverList->setCurrentItem(item);
@@ -103,12 +111,10 @@ void HomePage::setProfiles(const QList<rfm::core::ConnectionProfile>& profiles)
 
 void HomePage::updateConnectButton()
 {
-    m_connectButton->setEnabled(m_serverList->currentItem() != nullptr &&
-                                !m_serverList->currentItem()
-                                     ->data(Qt::UserRole)
-                                     .toString()
-                                     .trimmed()
-                                     .isEmpty());
+    m_connectButton->setEnabled(
+        m_serverList->currentItem() != nullptr &&
+        !m_serverList->currentItem()->data(Qt::UserRole).toString().trimmed().isEmpty());
+    m_editButton->setEnabled(m_connectButton->isEnabled());
 }
 
 void HomePage::requestSelectedProfile()
@@ -116,8 +122,7 @@ void HomePage::requestSelectedProfile()
     if (!m_connectButton->isEnabled() || m_serverList->currentItem() == nullptr) {
         return;
     }
-    emit connectProfileRequested(
-        m_serverList->currentItem()->data(Qt::UserRole).toString());
+    emit connectProfileRequested(m_serverList->currentItem()->data(Qt::UserRole).toString());
 }
 
 } // namespace rfm::app

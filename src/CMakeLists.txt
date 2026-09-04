@@ -27,6 +27,7 @@ add_library(
     ssh/RemoteStorageScanner.cpp
     ssh/RemoteVolumeService.cpp
     ssh/SshSession.cpp
+    ssh/SshAuthenticationPolicy.cpp
     ssh/SftpTransferBackend.cpp
     ssh/SshTransportHealth.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/LocalFileSystem.hpp
@@ -37,6 +38,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/TransferCoordinator.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshAuthenticationPolicy.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageScanner.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteVolumeService.hpp
 )
@@ -59,6 +61,8 @@ add_library(
     app/FileBrowserPane.cpp
     app/HomePage.cpp
     app/PaneWorkspace.cpp
+    app/PasswordAuthenticationDialog.cpp
+    app/ServerProfileForm.cpp
     app/ServerProfileDialog.cpp
     app/OperationPanel.cpp
     app/TransferRequestFactory.cpp
@@ -69,6 +73,8 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/FileBrowserPane.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/HomePage.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PaneWorkspace.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PasswordAuthenticationDialog.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileForm.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/OperationPanel.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferRequestFactory.hpp

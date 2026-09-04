@@ -8,16 +8,18 @@ class QCheckBox;
 class QCloseEvent;
 class QDialogButtonBox;
 class QLabel;
-class QLineEdit;
 class QProgressBar;
-class QSpinBox;
 
-namespace rfm::app {
+namespace rfm::app
+{
 
-class ConnectionDialog final : public QDialog {
+class ServerProfileForm;
+
+class ConnectionDialog final : public QDialog
+{
     Q_OBJECT
 
-public:
+  public:
     enum class State {
         Idle,
         Connecting,
@@ -28,7 +30,6 @@ public:
     explicit ConnectionDialog(QWidget* parent = nullptr);
 
     [[nodiscard]] rfm::core::ConnectionProfile profile() const;
-    [[nodiscard]] QString password() const;
     [[nodiscard]] bool saveServerRequested() const;
     [[nodiscard]] State state() const;
     void setProfile(const rfm::core::ConnectionProfile& profile);
@@ -36,33 +37,29 @@ public:
     void showConnectionError(const QString& message);
     void clearConnectionError();
     void connectionSucceeded();
+    void connectionCancelled();
 
-signals:
-    void connectionRequested(rfm::core::ConnectionProfile profile, QString password);
+  signals:
+    void connectionRequested(rfm::core::ConnectionProfile profile);
 
-protected:
+  protected:
     void reject() override;
     void closeEvent(QCloseEvent* event) override;
 
-private slots:
+  private slots:
     void updateState();
     void requestConnection();
 
-private:
+  private:
     void applyState();
 
-    QLineEdit* m_hostEdit{nullptr};
-    QLineEdit* m_userEdit{nullptr};
-    QSpinBox* m_portSpin{nullptr};
-    QCheckBox* m_passwordCheck{nullptr};
-    QLineEdit* m_passwordEdit{nullptr};
+    ServerProfileForm* m_profileForm{nullptr};
     QCheckBox* m_saveServerCheck{nullptr};
     QProgressBar* m_activityIndicator{nullptr};
     QLabel* m_statusLabel{nullptr};
     QDialogButtonBox* m_buttons{nullptr};
     QString m_profileId;
-    QString m_displayName;
     State m_state{State::Idle};
 };
 
-}  // namespace rfm::app
+} // namespace rfm::app

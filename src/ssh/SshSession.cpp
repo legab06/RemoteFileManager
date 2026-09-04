@@ -12,6 +12,7 @@
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/RemoteStorageScanner.hpp"
 #include "remotefilemanager/ssh/RemoteVolumeService.hpp"
+#include "remotefilemanager/ssh/SshAuthenticationPolicy.hpp"
 
 #include <libssh/callbacks.h>
 #include <libssh/libssh.h>
@@ -58,6 +59,36 @@ class VolumeAuthenticationEvent final : public QEvent
     quint64 authenticationToken{0};
     rfm::core::SecurePassword password;
 };
+
+QEvent::Type passwordAuthenticationEventType()
+{
+    static const auto type = static_cast<QEvent::Type>(QEvent::registerEventType());
+    return type;
+}
+
+class PasswordAuthenticationEvent final : public QEvent
+{
+  public:
+    explicit PasswordAuthenticationEvent(rfm::core::SecurePassword password)
+        : QEvent(passwordAuthenticationEventType()), password(std::move(password))
+    {}
+
+    rfm::core::SecurePassword password;
+};
+
+rfm::ssh::AuthenticationResult authenticationResult(int result)
+{
+    switch (result) {
+    case SSH_AUTH_SUCCESS:
+        return rfm::ssh::AuthenticationResult::Success;
+    case SSH_AUTH_DENIED:
+        return rfm::ssh::AuthenticationResult::Denied;
+    case SSH_AUTH_PARTIAL:
+        return rfm::ssh::AuthenticationResult::Partial;
+    default:
+        return rfm::ssh::AuthenticationResult::Error;
+    }
+}
 
 rfm::core::RemoteBackendError backendError(int sftpError)
 {
@@ -1705,15 +1736,15 @@ class SshSession::Impl final
             ssh_free(session);
             session = nullptr;
         }
-        password.fill(QChar{'\0'});
-        password.clear();
+        awaitingHostConfirmation = false;
+        awaitingPasswordAuthentication = false;
     }
 
     ssh_session session{nullptr};
     sftp_session sftp{nullptr};
     rfm::core::ConnectionProfile profile;
-    QString password;
     bool awaitingHostConfirmation{false};
+    bool awaitingPasswordAuthentication{false};
     // Declaration order is intentional: the job dies before its backend, and
     // both are reset before the SFTP session in reset().
     std::unique_ptr<rfm::core::RemoteTransferBackend> transferBackend;
@@ -1768,8 +1799,18 @@ void SshSession::postVolumeAuthentication(quint64 operationId, quint64 authentic
         this, new VolumeAuthenticationEvent(operationId, authenticationToken, std::move(password)));
 }
 
+void SshSession::postPasswordAuthentication(rfm::core::SecurePassword password)
+{
+    QCoreApplication::postEvent(this, new PasswordAuthenticationEvent(std::move(password)));
+}
+
 bool SshSession::event(QEvent* event)
 {
+    if (event->type() == passwordAuthenticationEventType()) {
+        auto* const authentication = static_cast<PasswordAuthenticationEvent*>(event);
+        authenticateWithPassword(std::move(authentication->password));
+        return true;
+    }
     if (event->type() == volumeAuthenticationEventType()) {
         auto* const authentication = static_cast<VolumeAuthenticationEvent*>(event);
         authenticateVolume(authentication->operationId, authentication->authenticationToken,
@@ -1779,7 +1820,7 @@ bool SshSession::event(QEvent* event)
     return QObject::event(event);
 }
 
-void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString password)
+void SshSession::connectToHost(rfm::core::ConnectionProfile profile)
 {
     terminalizeTransfer(rfm::core::TransferState::Cancelled,
                         tr("Transfer cancelled because the SSH session was replaced."));
@@ -1789,11 +1830,6 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         return;
     }
 
-    if (profile.allowPasswordFallback) {
-        m_impl->password = std::move(password);
-    }
-    password.fill(QChar{'\0'});
-    password.clear();
     m_impl->profile = std::move(profile);
     m_impl->session = ssh_new();
     if (m_impl->session == nullptr) {
@@ -1812,6 +1848,18 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile, QString pas
         fail(tr("Unable to configure SSH: %1")
                  .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
+    }
+
+    const QString resolvedPrivateKeyPath =
+        SshAuthenticationPolicy::resolvePrivateKeyPath(m_impl->profile.privateKeyPath);
+    if (!resolvedPrivateKeyPath.isEmpty()) {
+        const QByteArray identity = resolvedPrivateKeyPath.toUtf8();
+        if (ssh_options_set(m_impl->session, SSH_OPTIONS_IDENTITY, identity.constData()) !=
+            SSH_OK) {
+            fail(tr("Unable to configure the SSH private key: %1")
+                     .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+            return;
+        }
     }
 
     if (ssh_connect(m_impl->session) != SSH_OK) {
@@ -1877,19 +1925,102 @@ void SshSession::confirmUnknownHost(bool accepted)
 
 void SshSession::authenticateAndOpen()
 {
-    int auth = ssh_userauth_publickey_auto(m_impl->session, nullptr, nullptr);
-    if (auth != SSH_AUTH_SUCCESS && !m_impl->password.isEmpty()) {
-        QByteArray passwordBytes = m_impl->password.toUtf8();
-        auth = ssh_userauth_password(m_impl->session, nullptr, passwordBytes.constData());
-        passwordBytes.fill('\0');
-    }
-    m_impl->password.fill(QChar{'\0'});
-    m_impl->password.clear();
-    if (auth != SSH_AUTH_SUCCESS) {
-        fail(tr("Authentication failed. Check your SSH agent, keys, or password."));
+    if (m_impl->profile.authenticationMode == rfm::core::AuthenticationMode::PasswordOnly) {
+        const int methods = ssh_userauth_list(m_impl->session, nullptr);
+        if (methods < 0) {
+            fail(tr("Unable to determine the server authentication methods: %1")
+                     .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+            return;
+        }
+        if ((static_cast<unsigned int>(methods) & SSH_AUTH_METHOD_PASSWORD) == 0U) {
+            fail(tr("The server does not offer password authentication."));
+            return;
+        }
+        m_impl->awaitingPasswordAuthentication = true;
+        emit passwordAuthenticationRequired(PasswordAuthenticationReason::PasswordOnly);
         return;
     }
 
+    const QString resolvedPrivateKeyPath =
+        SshAuthenticationPolicy::resolvePrivateKeyPath(m_impl->profile.privateKeyPath);
+    if (!resolvedPrivateKeyPath.isEmpty()) {
+        const QByteArray identity = resolvedPrivateKeyPath.toUtf8();
+        ssh_key privateKey = nullptr;
+        const int imported =
+            ssh_pki_import_privkey_file(identity.constData(), "", nullptr, nullptr, &privateKey);
+        if (privateKey != nullptr) {
+            ssh_key_free(privateKey);
+        }
+        if (imported != SSH_OK) {
+            fail(tr("Unable to load the configured private key “%1”. Check the path and file "
+                    "permissions. RFM cannot use a passphrase-protected explicit key: load it in "
+                    "an SSH agent and leave the Private key field empty. RFM does not request or "
+                    "store key passphrases.")
+                     .arg(m_impl->profile.privateKeyPath));
+            return;
+        }
+    }
+
+    // An empty passphrase prevents libssh from invoking a terminal prompt. Unlocked agent keys
+    // and unencrypted identity files remain available to the automatic authentication pass.
+    const int auth = ssh_userauth_publickey_auto(m_impl->session, nullptr, "");
+    const int methods = auth == SSH_AUTH_SUCCESS ? 0 : ssh_userauth_list(m_impl->session, nullptr);
+    const AuthenticationNextStep next = SshAuthenticationPolicy::afterPasswordless(
+        authenticationResult(auth), m_impl->profile.allowPasswordAuthentication,
+        methods >= 0 && (static_cast<unsigned int>(methods) & SSH_AUTH_METHOD_PASSWORD) != 0U);
+    if (next == AuthenticationNextStep::RequestPassword) {
+        m_impl->awaitingPasswordAuthentication = true;
+        emit passwordAuthenticationRequired(SshAuthenticationPolicy::passwordPromptReason(
+            m_impl->profile.authenticationMode, authenticationResult(auth),
+            !m_impl->profile.privateKeyPath.trimmed().isEmpty()));
+        return;
+    }
+    if (next == AuthenticationNextStep::Reject) {
+        fail(tr("Authentication failed. Check your SSH agent, keys, or password."));
+        return;
+    }
+    if (next == AuthenticationNextStep::Fail) {
+        fail(tr("SSH authentication could not be completed: %1")
+                 .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+        return;
+    }
+
+    openSftp();
+}
+
+void SshSession::authenticateWithPassword(rfm::core::SecurePassword password)
+{
+    if (!m_impl->awaitingPasswordAuthentication || m_impl->session == nullptr ||
+        password.isEmpty()) {
+        password.clear();
+        return;
+    }
+
+    const int auth = ssh_userauth_password(m_impl->session, nullptr, password.remainingData());
+    password.clear();
+    if (auth == SSH_AUTH_SUCCESS) {
+        m_impl->awaitingPasswordAuthentication = false;
+        openSftp();
+        return;
+    }
+    if (auth == SSH_AUTH_DENIED) {
+        emit passwordAuthenticationRejected(tr("Incorrect password. Please try again."));
+        return;
+    }
+    fail(tr("SSH password authentication could not be completed: %1")
+             .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
+}
+
+void SshSession::cancelPasswordAuthentication()
+{
+    if (!m_impl->awaitingPasswordAuthentication) {
+        return;
+    }
+    m_impl->reset();
+}
+
+void SshSession::openSftp()
+{
     m_impl->sftp = sftp_new(m_impl->session);
     if (m_impl->sftp == nullptr || sftp_init(m_impl->sftp) != SSH_OK) {
         fail(tr("Unable to start the SFTP subsystem: %1")
@@ -2559,9 +2690,9 @@ void SshSession::compareRemoteFilesystems(quint64 requestId, QString sourceDirec
         emit remoteFilesystemsCompared(requestId, rfm::core::RemoteFilesystemRelation::Unknown);
         return;
     }
-    const rfm::core::RemoteFilesystemRelation relation = rfm::core::remoteFilesystemRelation(
-        remoteFileSystemId(m_impl->sftp, sourceDirectory),
-        remoteFileSystemId(m_impl->sftp, destinationDirectory));
+    const rfm::core::RemoteFilesystemRelation relation =
+        rfm::core::remoteFilesystemRelation(remoteFileSystemId(m_impl->sftp, sourceDirectory),
+                                            remoteFileSystemId(m_impl->sftp, destinationDirectory));
     emit remoteFilesystemsCompared(requestId, relation);
 }
 

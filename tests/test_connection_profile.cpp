@@ -2,13 +2,17 @@
 
 #include <QTest>
 
-class ConnectionProfileTest final : public QObject {
+class ConnectionProfileTest final : public QObject
+{
     Q_OBJECT
 
-private slots:
+  private slots:
     void rejectsMissingRequiredFields();
     void acceptsStandardProfile();
     void buildsFallbackDisplayName();
+    void retainsOptionalPrivateKeyPath();
+    void defaultsToKeyOrAgentAuthentication();
+    void acceptsPasswordOnlyAuthentication();
 };
 
 void ConnectionProfileTest::rejectsMissingRequiredFields()
@@ -49,7 +53,40 @@ void ConnectionProfileTest::buildsFallbackDisplayName()
     QCOMPARE(profile.effectiveDisplayName(), QStringLiteral("gabriel@server.example.test"));
 }
 
+void ConnectionProfileTest::retainsOptionalPrivateKeyPath()
+{
+    const rfm::core::ConnectionProfile profile{QStringLiteral("Windows Server"),
+                                               QStringLiteral("192.0.2.10"),
+                                               QStringLiteral("administrateur"),
+                                               22,
+                                               QStringLiteral("windows-id"),
+                                               true,
+                                               QStringLiteral("~/.ssh/rfm_windows_server")};
+
+    QCOMPARE(profile.privateKeyPath, QStringLiteral("~/.ssh/rfm_windows_server"));
+    QVERIFY(profile.allowPasswordAuthentication);
+}
+
+void ConnectionProfileTest::defaultsToKeyOrAgentAuthentication()
+{
+    const rfm::core::ConnectionProfile profile{
+        {}, QStringLiteral("host.test"), QStringLiteral("alice"), 22};
+    QCOMPARE(profile.authenticationMode, rfm::core::AuthenticationMode::KeyOrAgent);
+}
+
+void ConnectionProfileTest::acceptsPasswordOnlyAuthentication()
+{
+    const rfm::core::ConnectionProfile profile{{},
+                                               QStringLiteral("host.test"),
+                                               QStringLiteral("alice"),
+                                               22,
+                                               {},
+                                               false,
+                                               {},
+                                               rfm::core::AuthenticationMode::PasswordOnly};
+    QCOMPARE(profile.authenticationMode, rfm::core::AuthenticationMode::PasswordOnly);
+}
+
 QTEST_APPLESS_MAIN(ConnectionProfileTest)
 
 #include "test_connection_profile.moc"
-

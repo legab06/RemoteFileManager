@@ -5,6 +5,7 @@
 #include "remotefilemanager/app/NavigationTree.hpp"
 #include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
+#include "remotefilemanager/app/PasswordAuthenticationDialog.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
@@ -37,6 +38,7 @@
 #include <QMimeData>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QScrollBar>
 #include <QSignalSpy>
 #include <QSpinBox>
@@ -252,10 +254,9 @@ void showLocalSplit(rfm::app::MainWindow& window, const QString& source, const Q
     auto* const secondary = workspace->otherVisiblePane();
     QVERIFY(secondary != nullptr);
     primary->showDirectory({rfm::core::FileSource::Local, rfm::core::LocalMachineId, source},
-                            source, sourceEntries, rfm::app::PaneNavigation::Initial);
-    secondary->showDirectory(
-        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, destination}, destination,
-        destinationEntries, rfm::app::PaneNavigation::Initial);
+                           source, sourceEntries, rfm::app::PaneNavigation::Initial);
+    secondary->showDirectory({rfm::core::FileSource::Local, rfm::core::LocalMachineId, destination},
+                             destination, destinationEntries, rfm::app::PaneNavigation::Initial);
     primary->setInteractionEnabled(true);
     secondary->setInteractionEnabled(true);
     auto* const stack = window.findChild<QStackedWidget*>(QStringLiteral("centralStack"));
@@ -335,9 +336,9 @@ void setConnectionIdentity(rfm::app::MainWindow& window,
     window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->trigger();
     auto* dialog = window.findChild<rfm::app::ConnectionDialog*>();
     QVERIFY(dialog != nullptr);
-    dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))->setText(hostName);
-    dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))->setText(userName);
-    dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->setValue(2222);
+    dialog->findChild<QLineEdit*>(QStringLiteral("serverHostEdit"))->setText(hostName);
+    dialog->findChild<QLineEdit*>(QStringLiteral("serverUsernameEdit"))->setText(userName);
+    dialog->findChild<QSpinBox*>(QStringLiteral("serverPortSpin"))->setValue(2222);
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, initialPath),
@@ -414,10 +415,10 @@ class MainWindowTest final : public QObject
     void dockVisibilityActionsTrackPanels();
     void validatesSecureConnectionForm();
     void keepsConnectionDialogOpenAcrossFailureAndRetry();
-    void loadsSavedServersAndPrefillsQuickConnection();
+    void savedServerConnectsDirectlyAndUsesCompactAuthentication();
+    void homeAndNavigationDoubleClickConnectDirectly();
+    void passwordPromptHandlesRejectionAndCancellation();
     void placesButtonTracksActiveAndSelectedProfiles();
-    void matchesSavedProfileAgainstLiveConnectionSettings_data();
-    void matchesSavedProfileAgainstLiveConnectionSettings();
     void addsEditsAndRemovesSavedServers();
     void savesManualServerOnlyAfterSuccessAndAvoidsDuplicates();
     void disconnectActionFollowsSessionLifecycle();
@@ -1106,8 +1107,10 @@ void MainWindowTest::preservesCutAfterIndependentLocalMove()
         file.close();
     }
     rfm::app::MainWindow window;
-    showLocalSplit(window, source, destination, {{QStringLiteral("A"), 1, {}, false, false},
-                                                  {QStringLiteral("B"), 1, {}, false, false}}, {});
+    showLocalSplit(
+        window, source, destination,
+        {{QStringLiteral("A"), 1, {}, false, false}, {QStringLiteral("B"), 1, {}, false, false}},
+        {});
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const primary = workspace->primaryPane();
     primary->fileTable()->selectRow(0);
@@ -1162,8 +1165,8 @@ void MainWindowTest::allowsCopyFromReadOnlyLocalDirectory()
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     rfm::app::MainWindow window;
-    showLocalSplit(window, source, temporary.path(), {{QStringLiteral("kernel"), 0, {}, true, false}},
-                   {});
+    showLocalSplit(window, source, temporary.path(),
+                   {{QStringLiteral("kernel"), 0, {}, true, false}}, {});
     auto* const primary = window.findChild<rfm::app::PaneWorkspace*>()->primaryPane();
     primary->fileTable()->selectRow(0);
     QVERIFY(window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
@@ -1193,10 +1196,10 @@ void MainWindowTest::aggregatesLocalCollisionSkip()
     QVERIFY(existing.write("old") == 3);
     existing.close();
     rfm::app::MainWindow window;
-    showLocalSplit(window, source, destination,
-                   {{QStringLiteral("a"), 1, {}, false, false},
-                    {QStringLiteral("b"), 1, {}, false, false}},
-                   {{QStringLiteral("b"), 3, {}, false, false}});
+    showLocalSplit(
+        window, source, destination,
+        {{QStringLiteral("a"), 1, {}, false, false}, {QStringLiteral("b"), 1, {}, false, false}},
+        {{QStringLiteral("b"), 3, {}, false, false}});
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     auto* const primary = workspace->primaryPane();
     primary->fileTable()->selectAll();
@@ -1205,13 +1208,13 @@ void MainWindowTest::aggregatesLocalCollisionSkip()
     window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->trigger();
     QTRY_VERIFY(QFileInfo(QDir(destination).filePath(QStringLiteral("a"))).exists());
     const auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
-    const int row = rowForId(const_cast<QTableWidget*>(table), topVisibleOperationId(const_cast<QTableWidget*>(table)));
+    const int row = rowForId(const_cast<QTableWidget*>(table),
+                             topVisibleOperationId(const_cast<QTableWidget*>(table)));
     QTRY_COMPARE(table->item(row, 3)->text(), QStringLiteral("Completed"));
     QVERIFY(table->item(row, 4)->text().contains(QStringLiteral("1 / 2")) ||
             table->cellWidget(row, 4) != nullptr);
-    QTRY_VERIFY(std::ranges::any_of(refreshes, [&](const auto& args) {
-        return args.at(1).toString() == destination;
-    }));
+    QTRY_VERIFY(std::ranges::any_of(
+        refreshes, [&](const auto& args) { return args.at(1).toString() == destination; }));
 }
 
 void MainWindowTest::aggregatesLocalCollisionReplace()
@@ -1232,10 +1235,10 @@ void MainWindowTest::aggregatesLocalCollisionReplace()
     QVERIFY(existing.write("old") == 3);
     existing.close();
     rfm::app::MainWindow window;
-    showLocalSplit(window, source, destination,
-                   {{QStringLiteral("a"), 1, {}, false, false},
-                    {QStringLiteral("b"), 1, {}, false, false}},
-                   {{QStringLiteral("b"), 3, {}, false, false}});
+    showLocalSplit(
+        window, source, destination,
+        {{QStringLiteral("a"), 1, {}, false, false}, {QStringLiteral("b"), 1, {}, false, false}},
+        {{QStringLiteral("b"), 3, {}, false, false}});
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     workspace->primaryPane()->fileTable()->selectAll();
     chooseCollisionButton(QStringLiteral("Replace"));
@@ -1267,10 +1270,10 @@ void MainWindowTest::cancelsLocalCollisionAfterPartialSuccess()
     QVERIFY(existing.write("old") == 3);
     existing.close();
     rfm::app::MainWindow window;
-    showLocalSplit(window, source, destination,
-                   {{QStringLiteral("a"), 1, {}, false, false},
-                    {QStringLiteral("b"), 1, {}, false, false}},
-                   {{QStringLiteral("b"), 3, {}, false, false}});
+    showLocalSplit(
+        window, source, destination,
+        {{QStringLiteral("a"), 1, {}, false, false}, {QStringLiteral("b"), 1, {}, false, false}},
+        {{QStringLiteral("b"), 3, {}, false, false}});
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     workspace->primaryPane()->fileTable()->selectAll();
     chooseCollisionButton(QStringLiteral("Cancel"));
@@ -1488,9 +1491,9 @@ void MainWindowTest::enablesMultipleRemoteSelection()
 void MainWindowTest::validatesSecureConnectionForm()
 {
     rfm::app::ConnectionDialog dialog;
-    auto* const host = dialog.findChild<QLineEdit*>(QStringLiteral("hostEdit"));
-    auto* const user = dialog.findChild<QLineEdit*>(QStringLiteral("usernameEdit"));
-    auto* const port = dialog.findChild<QSpinBox*>(QStringLiteral("portSpin"));
+    auto* const host = dialog.findChild<QLineEdit*>(QStringLiteral("serverHostEdit"));
+    auto* const user = dialog.findChild<QLineEdit*>(QStringLiteral("serverUsernameEdit"));
+    auto* const port = dialog.findChild<QSpinBox*>(QStringLiteral("serverPortSpin"));
     auto* const buttons = dialog.findChild<QDialogButtonBox*>();
     QVERIFY(host != nullptr);
     QVERIFY(user != nullptr);
@@ -1514,8 +1517,8 @@ void MainWindowTest::keepsConnectionDialogOpenAcrossFailureAndRetry()
     window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->trigger();
     auto* const dialog = window.findChild<rfm::app::ConnectionDialog*>();
     QVERIFY(dialog != nullptr);
-    auto* const host = dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"));
-    auto* const user = dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"));
+    auto* const host = dialog->findChild<QLineEdit*>(QStringLiteral("serverHostEdit"));
+    auto* const user = dialog->findChild<QLineEdit*>(QStringLiteral("serverUsernameEdit"));
     auto* const buttons = dialog->findChild<QDialogButtonBox*>();
     host->setText(QStringLiteral("wrong.example.test"));
     user->setText(QStringLiteral("alice"));
@@ -1539,20 +1542,24 @@ void MainWindowTest::keepsConnectionDialogOpenAcrossFailureAndRetry()
     QCOMPARE(accepted.size(), 1);
 }
 
-void MainWindowTest::loadsSavedServersAndPrefillsQuickConnection()
+void MainWindowTest::savedServerConnectsDirectlyAndUsesCompactAuthentication()
 {
     QTemporaryDir temporary;
     QVERIFY(temporary.isValid());
     const rfm::core::ServerProfileStore store(temporary.path());
-    const rfm::core::ConnectionProfile saved{
-        QStringLiteral("Home NAS"), QStringLiteral("nas.example.test"),
-        QStringLiteral("alice"),    2222,
-        QStringLiteral("nas-id"),   true};
+    const rfm::core::ConnectionProfile saved{QStringLiteral("Home NAS"),
+                                             QStringLiteral("nas.example.test"),
+                                             QStringLiteral("alice"),
+                                             2222,
+                                             QStringLiteral("nas-id"),
+                                             true,
+                                             QStringLiteral("~/.ssh/rfm_windows_server")};
     QString error;
     QVERIFY2(store.save({saved}, &error), qPrintable(error));
 
     rfm::app::MainWindow window(nullptr, {}, temporary.path());
     QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    QSignalSpy requested(&window, &rfm::app::MainWindow::connectionRequested);
     auto* const list = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
     auto* const homeList = window.findChild<QListWidget*>(QStringLiteral("homeServerList"));
     QVERIFY(list != nullptr);
@@ -1567,16 +1574,107 @@ void MainWindowTest::loadsSavedServersAndPrefillsQuickConnection()
     QVERIFY(connectButton->isEnabled());
     connectButton->click();
 
-    auto* const dialog = window.findChild<rfm::app::ConnectionDialog*>();
-    QVERIFY(dialog != nullptr);
-    QCOMPARE(dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))->text(),
-             QStringLiteral("nas.example.test"));
-    QCOMPARE(dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))->text(),
-             QStringLiteral("alice"));
-    QCOMPARE(dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->value(), 2222);
-    QVERIFY(dialog->profile().allowPasswordFallback);
-    QVERIFY(dialog->password().isEmpty());
-    QVERIFY(dialog->findChild<QCheckBox*>(QStringLiteral("saveServerCheck"))->isHidden());
+    QCOMPARE(requested.size(), 1);
+    QVERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
+    const auto requestedProfile =
+        qvariant_cast<rfm::core::ConnectionProfile>(requested.constFirst().constFirst());
+    QCOMPARE(requestedProfile.id, QStringLiteral("nas-id"));
+    QCOMPARE(requestedProfile.host, QStringLiteral("nas.example.test"));
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "showPasswordAuthentication", Qt::DirectConnection));
+    auto* const authentication = window.findChild<rfm::app::PasswordAuthenticationDialog*>();
+    QVERIFY(authentication != nullptr);
+    QCOMPARE(
+        authentication->findChild<QLabel*>(QStringLiteral("authenticationServerNameLabel"))->text(),
+        QStringLiteral("Home NAS"));
+    QCOMPARE(authentication->findChild<QLabel*>(QStringLiteral("authenticationServerIdentityLabel"))
+                 ->text(),
+             QStringLiteral("alice@nas.example.test"));
+    QCOMPARE(
+        authentication->findChild<QLabel*>(QStringLiteral("authenticationPromptLabel"))->text(),
+        QStringLiteral("SSH key authentication failed. Enter your password to continue."));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showPasswordAuthenticationForReason", Qt::DirectConnection,
+        Q_ARG(rfm::ssh::PasswordAuthenticationReason,
+              rfm::ssh::PasswordAuthenticationReason::AdditionalPasswordRequired)));
+    QCOMPARE(
+        authentication->findChild<QLabel*>(QStringLiteral("authenticationPromptLabel"))->text(),
+        QStringLiteral("Additional password authentication is required."));
+    QVERIFY(authentication->findChild<QLineEdit*>(QStringLiteral("serverHostEdit")) == nullptr);
+}
+
+void MainWindowTest::homeAndNavigationDoubleClickConnectDirectly()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerProfileStore store(temporary.path());
+    QString error;
+    QVERIFY(store.save(
+        {{QStringLiteral("Server"), QStringLiteral("server.example.test"), QStringLiteral("alice"),
+          22, QStringLiteral("server-id"), true, QStringLiteral("~/.ssh/rfm_windows_server")}},
+        &error));
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    QSignalSpy requested(&window, &rfm::app::MainWindow::connectionRequested);
+
+    auto* const homeList = window.findChild<QListWidget*>(QStringLiteral("homeServerList"));
+    homeList->setCurrentRow(0);
+    QVERIFY(QMetaObject::invokeMethod(homeList, "itemDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(QListWidgetItem*, homeList->item(0))));
+    QCOMPARE(requested.size(), 1);
+    QCOMPARE(qvariant_cast<rfm::core::ConnectionProfile>(requested.constFirst().constFirst())
+                 .privateKeyPath,
+             QStringLiteral("~/.ssh/rfm_windows_server"));
+    QVERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    auto* const tree = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
+    selectServerProfile(tree, 0);
+    QTreeWidgetItem* const item = serverProfileItem(tree, 0);
+    QVERIFY(QMetaObject::invokeMethod(tree, "itemDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(QTreeWidgetItem*, item), Q_ARG(int, 0)));
+    QCOMPARE(requested.size(), 2);
+    QVERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
+}
+
+void MainWindowTest::passwordPromptHandlesRejectionAndCancellation()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerProfileStore store(temporary.path());
+    QString error;
+    QVERIFY(store.save({{QStringLiteral("Server"), QStringLiteral("server.example.test"),
+                         QStringLiteral("alice"), 22, QStringLiteral("server-id"), true}},
+                       &error));
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    auto* const homeList = window.findChild<QListWidget*>(QStringLiteral("homeServerList"));
+    homeList->setCurrentRow(0);
+    window.findChild<QPushButton*>(QStringLiteral("homeConnectButton"))->click();
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "showPasswordAuthentication", Qt::DirectConnection));
+    auto* authentication = window.findChild<rfm::app::PasswordAuthenticationDialog*>();
+    QVERIFY(authentication != nullptr);
+    QCOMPARE(
+        authentication->findChild<QLabel*>(QStringLiteral("authenticationPromptLabel"))->text(),
+        QStringLiteral("SSH key or agent authentication failed. Enter your password to continue."));
+    authentication->findChild<QLineEdit*>(QStringLiteral("authenticationPasswordEdit"))
+        ->setText(QStringLiteral("wrong"));
+    authentication->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "showPasswordAuthenticationError", Qt::DirectConnection,
+        Q_ARG(QString, QStringLiteral("Incorrect password. Please try again."))));
+    QVERIFY(authentication->isVisible());
+    QVERIFY(!authentication->isAuthenticating());
+    QCOMPARE(
+        authentication->findChild<QLabel*>(QStringLiteral("authenticationStatusLabel"))->text(),
+        QStringLiteral("Incorrect password. Please try again."));
+    QVERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
+
+    QSignalSpy cancelled(&window, &rfm::app::MainWindow::passwordAuthenticationCancelled);
+    authentication->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Cancel)->click();
+    QCOMPARE(cancelled.size(), 1);
+    QTRY_VERIFY(window.findChild<rfm::app::PasswordAuthenticationDialog*>() == nullptr);
 }
 
 void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
@@ -1595,6 +1693,7 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
 
     rfm::app::MainWindow window(nullptr, {}, temporary.path());
     QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    QSignalSpy connectionRequested(&window, &rfm::app::MainWindow::connectionRequested);
     auto* const list = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
     auto* const button =
         window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton"));
@@ -1604,9 +1703,8 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QCOMPARE(button->text(), QStringLiteral("Connect"));
     QVERIFY(button->isEnabled());
     button->click();
-    auto* dialog = window.findChild<rfm::app::ConnectionDialog*>();
-    QVERIFY(dialog != nullptr);
-    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    QCOMPARE(connectionRequested.size(), 1);
+    QVERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
@@ -1625,11 +1723,8 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QVERIFY(button->isEnabled());
     QVERIFY(!serverProfileItem(list, 0)->text(0).contains(QStringLiteral("Connected")));
 
-    QTRY_VERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
     button->click();
-    dialog = window.findChild<rfm::app::ConnectionDialog*>();
-    QVERIFY(dialog != nullptr);
-    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    QCOMPARE(connectionRequested.size(), 2);
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
@@ -1639,89 +1734,6 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     QSignalSpy secondConnection(&window, &rfm::app::MainWindow::connectionRequested);
     button->click();
     QCOMPARE(secondConnection.size(), 0);
-}
-
-void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings_data()
-{
-    QTest::addColumn<QString>("host");
-    QTest::addColumn<QString>("username");
-    QTest::addColumn<int>("port");
-    QTest::addColumn<bool>("savedProfileIsConnected");
-
-    QTest::newRow("saved profile without edits")
-        << QStringLiteral("saved.example.test") << QStringLiteral("alice") << 22 << true;
-    QTest::newRow("edited host") << QStringLiteral("other.example.test") << QStringLiteral("alice")
-                                 << 22 << false;
-    QTest::newRow("edited username")
-        << QStringLiteral("saved.example.test") << QStringLiteral("bob") << 22 << false;
-    QTest::newRow("edited port") << QStringLiteral("saved.example.test") << QStringLiteral("alice")
-                                 << 2222 << false;
-}
-
-void MainWindowTest::matchesSavedProfileAgainstLiveConnectionSettings()
-{
-    QFETCH(QString, host);
-    QFETCH(QString, username);
-    QFETCH(int, port);
-    QFETCH(bool, savedProfileIsConnected);
-
-    QTemporaryDir temporary;
-    QVERIFY(temporary.isValid());
-    const rfm::core::ServerProfileStore store(temporary.path());
-    const rfm::core::ConnectionProfile saved{
-        QStringLiteral("Saved server"), QStringLiteral("saved.example.test"),
-        QStringLiteral("alice"), 22, QStringLiteral("stable-profile-id")};
-    QString error;
-    QVERIFY2(store.save({saved}, &error), qPrintable(error));
-
-    rfm::app::MainWindow window(nullptr, {}, temporary.path());
-    QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
-    QSignalSpy connectionRequested(&window, &rfm::app::MainWindow::connectionRequested);
-    auto* const list = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
-    auto* const profileButton =
-        window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton"));
-    auto* const disconnectAction = window.findChild<QAction*>(QStringLiteral("disconnectAction"));
-    QVERIFY(list != nullptr);
-    QVERIFY(profileButton != nullptr);
-    QVERIFY(disconnectAction != nullptr);
-
-    selectServerProfile(list, 0);
-    profileButton->click();
-    auto* const dialog = window.findChild<rfm::app::ConnectionDialog*>();
-    QVERIFY(dialog != nullptr);
-    dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))->setText(host);
-    dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))->setText(username);
-    dialog->findChild<QSpinBox*>(QStringLiteral("portSpin"))->setValue(port);
-    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
-
-    QCOMPARE(connectionRequested.size(), 1);
-    const auto liveProfile =
-        qvariant_cast<rfm::core::ConnectionProfile>(connectionRequested.constFirst().constFirst());
-    QCOMPARE(liveProfile.id, saved.id);
-    QCOMPARE(liveProfile.host, host);
-    QCOMPARE(liveProfile.username, username);
-    QCOMPARE(liveProfile.port, static_cast<quint16>(port));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
-
-    QCOMPARE(serverProfileItem(list, 0)->data(0, Qt::UserRole + 4).toBool(),
-             savedProfileIsConnected);
-    QCOMPARE(serverProfileItem(list, 0)->text(0).contains(QStringLiteral("Connected")),
-             savedProfileIsConnected);
-    QCOMPARE(profileButton->text(),
-             savedProfileIsConnected ? QStringLiteral("Disconnect") : QStringLiteral("Connect"));
-    QCOMPARE(profileButton->isEnabled(), savedProfileIsConnected);
-
-    QObject::disconnect(&window, &rfm::app::MainWindow::disconnectionRequested, nullptr, nullptr);
-    QSignalSpy disconnectionRequested(&window, &rfm::app::MainWindow::disconnectionRequested);
-    profileButton->click();
-    QCOMPARE(disconnectionRequested.size(), savedProfileIsConnected ? 1 : 0);
-    if (!savedProfileIsConnected) {
-        QVERIFY(disconnectAction->isEnabled());
-        disconnectAction->trigger();
-        QCOMPARE(disconnectionRequested.size(), 1);
-    }
 }
 
 void MainWindowTest::addsEditsAndRemovesSavedServers()
@@ -1745,12 +1757,14 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
         auto* const dialog =
             qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
         QVERIFY(dialog != nullptr);
-        dialog->findChild<QLineEdit*>(QStringLiteral("profileNameEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverNameEdit"))
             ->setText(QStringLiteral("Test server"));
-        dialog->findChild<QLineEdit*>(QStringLiteral("profileHostEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverHostEdit"))
             ->setText(QStringLiteral("first.example.test"));
-        dialog->findChild<QLineEdit*>(QStringLiteral("profileUsernameEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverUsernameEdit"))
             ->setText(QStringLiteral("alice"));
+        dialog->findChild<QSpinBox*>(QStringLiteral("serverPortSpin"))->setValue(2222);
+        dialog->findChild<QRadioButton*>(QStringLiteral("passwordOnlyRadio"))->click();
         dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
     });
     add->click();
@@ -1758,6 +1772,13 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     QCOMPARE(serverProfileItem(list, 0)->text(0), QStringLiteral("Test server"));
     QCOMPARE(homeList->count(), 1);
     QVERIFY(homeList->item(0)->text().startsWith(QStringLiteral("Test server\n")));
+    QString error;
+    const rfm::core::ServerProfileStore store(temporary.path());
+    const QList passwordOnlySaved = store.load(&error);
+    QVERIFY(error.isEmpty());
+    QCOMPARE(passwordOnlySaved.constFirst().authenticationMode,
+             rfm::core::AuthenticationMode::PasswordOnly);
+    QVERIFY(passwordOnlySaved.constFirst().privateKeyPath.isEmpty());
 
     selectServerProfile(list, 0);
     QVERIFY(edit->isEnabled());
@@ -1765,10 +1786,18 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
         auto* const dialog =
             qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
         QVERIFY(dialog != nullptr);
-        dialog->findChild<QLineEdit*>(QStringLiteral("profileNameEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverNameEdit"))
             ->setText(QStringLiteral("Updated server"));
-        dialog->findChild<QLineEdit*>(QStringLiteral("profileHostEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverHostEdit"))
             ->setText(QStringLiteral("updated.example.test"));
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverUsernameEdit"))
+            ->setText(QStringLiteral("bob"));
+        dialog->findChild<QSpinBox*>(QStringLiteral("serverPortSpin"))->setValue(2200);
+        dialog->findChild<QRadioButton*>(QStringLiteral("keyOrAgentRadio"))->click();
+        dialog->findChild<QLineEdit*>(QStringLiteral("privateKeyPathEdit"))
+            ->setText(QStringLiteral("~/.ssh/rfm_windows_server"));
+        dialog->findChild<QCheckBox*>(QStringLiteral("passwordAuthenticationCheck"))
+            ->setChecked(true);
         dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
     });
     edit->click();
@@ -1776,12 +1805,15 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     QCOMPARE(serverProfileItem(list, 0)->text(0), QStringLiteral("Updated server"));
     QCOMPARE(homeList->count(), 1);
     QVERIFY(homeList->item(0)->text().startsWith(QStringLiteral("Updated server\n")));
-    QString error;
-    const rfm::core::ServerProfileStore store(temporary.path());
     const QList saved = store.load(&error);
     QVERIFY(error.isEmpty());
     QCOMPARE(saved.size(), 1);
     QCOMPARE(saved.constFirst().host, QStringLiteral("updated.example.test"));
+    QCOMPARE(saved.constFirst().username, QStringLiteral("bob"));
+    QCOMPARE(saved.constFirst().port, quint16{2200});
+    QCOMPARE(saved.constFirst().privateKeyPath, QStringLiteral("~/.ssh/rfm_windows_server"));
+    QCOMPARE(saved.constFirst().authenticationMode, rfm::core::AuthenticationMode::KeyOrAgent);
+    QVERIFY(saved.constFirst().allowPasswordAuthentication);
 
     acceptNextQuestion();
     remove->click();
@@ -1801,18 +1833,22 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QString error;
     const QString ephemeralSecret(18, QChar{'x'});
 
-    const auto openManualConnection = [&window, &ephemeralSecret] {
+    const auto openManualConnection = [&window] {
         window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->trigger();
         auto* const dialog = window.findChild<rfm::app::ConnectionDialog*>();
         if (dialog == nullptr) {
             return dialog;
         }
-        dialog->findChild<QLineEdit*>(QStringLiteral("hostEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverNameEdit"))
+            ->setText(QStringLiteral("Saved server"));
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverHostEdit"))
             ->setText(QStringLiteral("saved.example.test"));
-        dialog->findChild<QLineEdit*>(QStringLiteral("usernameEdit"))
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverUsernameEdit"))
             ->setText(QStringLiteral("alice"));
-        dialog->findChild<QCheckBox*>(QStringLiteral("passwordFallbackCheck"))->setChecked(true);
-        dialog->findChild<QLineEdit*>(QStringLiteral("passwordEdit"))->setText(ephemeralSecret);
+        dialog->findChild<QLineEdit*>(QStringLiteral("privateKeyPathEdit"))
+            ->setText(QStringLiteral("~/.ssh/saved_server"));
+        dialog->findChild<QCheckBox*>(QStringLiteral("passwordAuthenticationCheck"))
+            ->setChecked(true);
         dialog->findChild<QCheckBox*>(QStringLiteral("saveServerCheck"))->setChecked(true);
         dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
         return dialog;
@@ -1828,6 +1864,12 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QVERIFY(error.isEmpty());
 
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    QVERIFY(QMetaObject::invokeMethod(&window, "showPasswordAuthentication", Qt::DirectConnection));
+    auto* const authentication = window.findChild<rfm::app::PasswordAuthenticationDialog*>();
+    QVERIFY(authentication != nullptr);
+    authentication->findChild<QLineEdit*>(QStringLiteral("authenticationPasswordEdit"))
+        ->setText(ephemeralSecret);
+    authentication->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
@@ -1836,7 +1878,8 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QCOMPARE(saved.size(), 1);
     QVERIFY(saved.constFirst().isValidSavedProfile());
     QCOMPARE(saved.constFirst().host, QStringLiteral("saved.example.test"));
-    QVERIFY(saved.constFirst().allowPasswordFallback);
+    QVERIFY(saved.constFirst().allowPasswordAuthentication);
+    QCOMPARE(saved.constFirst().privateKeyPath, QStringLiteral("~/.ssh/saved_server"));
     QFile serialized(store.filePath());
     QVERIFY(serialized.open(QIODevice::ReadOnly));
     QVERIFY(!serialized.readAll().contains(ephemeralSecret.toUtf8()));
@@ -1885,9 +1928,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     QVERIFY(connectServer != nullptr);
     selectServerProfile(serverList, 0);
     connectServer->click();
-    auto* const dialog = window.findChild<rfm::app::ConnectionDialog*>();
-    QVERIFY(dialog != nullptr);
-    dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    QVERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
@@ -2705,12 +2746,10 @@ void MainWindowTest::manualRefreshShowsStatusMessage()
     rfm::app::MainWindow window;
     auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
     QVERIFY(pane != nullptr);
-    pane->showDirectory(
-        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
-         QStringLiteral("/tmp")},
-        QStringLiteral("/tmp"), {});
-    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
-                        nullptr);
+    pane->showDirectory({rfm::core::FileSource::Local,
+                         QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/tmp")},
+                        QStringLiteral("/tmp"), {});
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::localDirectoryRequested);
     window.statusBar()->clearMessage();
     window.findChild<QAction*>(QStringLiteral("refreshAction"))->trigger();
@@ -2727,10 +2766,10 @@ void MainWindowTest::localAndRemoteNavigationShowOpeningStatusMessage()
     QObject::disconnect(&localWindow, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
                         nullptr);
     QSignalSpy localRequested(&localWindow, &rfm::app::MainWindow::localDirectoryRequested);
-    localPane->locationNavigationRequested(
-        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
-         QStringLiteral("/tmp")},
-        rfm::app::PaneNavigation::Normal);
+    localPane->locationNavigationRequested({rfm::core::FileSource::Local,
+                                            QString::fromLatin1(rfm::core::LocalMachineId),
+                                            QStringLiteral("/tmp")},
+                                           rfm::app::PaneNavigation::Normal);
     QCOMPARE(localWindow.statusBar()->currentMessage(), QStringLiteral("Opening folder /tmp…"));
     QCOMPARE(localRequested.size(), 1);
     QTRY_VERIFY_WITH_TIMEOUT(localWindow.statusBar()->currentMessage().isEmpty(), 4000);
@@ -2739,8 +2778,7 @@ void MainWindowTest::localAndRemoteNavigationShowOpeningStatusMessage()
     QVERIFY(QMetaObject::invokeMethod(&remoteWindow, "showRemoteDirectory", Qt::DirectConnection,
                                       Q_ARG(QString, QStringLiteral("/srv")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QObject::disconnect(&remoteWindow, &rfm::app::MainWindow::directoryRequested, nullptr,
-                        nullptr);
+    QObject::disconnect(&remoteWindow, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
     QSignalSpy remoteRequested(&remoteWindow, &rfm::app::MainWindow::directoryRequested);
     auto* const remotePane = remoteWindow.findChild<rfm::app::FileBrowserPane*>();
     QVERIFY(remotePane != nullptr);
@@ -4231,8 +4269,8 @@ void MainWindowTest::remoteDragDropRoutesModifierIntentionsToExistingRequests()
 
     QObject::disconnect(&window, &rfm::app::MainWindow::copyRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::moveRequested, nullptr, nullptr);
-    QObject::disconnect(&window, &rfm::app::MainWindow::remoteFilesystemRelationRequested,
-                        nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteFilesystemRelationRequested, nullptr,
+                        nullptr);
     QSignalSpy copies(&window, &rfm::app::MainWindow::copyRequested);
     QSignalSpy moves(&window, &rfm::app::MainWindow::moveRequested);
     QSignalSpy filesystemRequests(&window,
@@ -4261,11 +4299,11 @@ void MainWindowTest::remoteDragDropRoutesModifierIntentionsToExistingRequests()
             const QList<QVariant> filesystemRequest = filesystemRequests.takeFirst();
             QCOMPARE(filesystemRequest.at(1).toString(), QStringLiteral("/source"));
             QCOMPARE(filesystemRequest.at(2).toString(), QStringLiteral("/destination"));
-            QVERIFY(QMetaObject::invokeMethod(
-                &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
-                Q_ARG(quint64, filesystemRequest.at(0).toULongLong()),
-                Q_ARG(rfm::core::RemoteFilesystemRelation,
-                      rfm::core::RemoteFilesystemRelation::Same)));
+            QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteFilesystemRelation",
+                                              Qt::DirectConnection,
+                                              Q_ARG(quint64, filesystemRequest.at(0).toULongLong()),
+                                              Q_ARG(rfm::core::RemoteFilesystemRelation,
+                                                    rfm::core::RemoteFilesystemRelation::Same)));
         } else {
             QCOMPARE(filesystemRequests.size(), 0);
         }
@@ -4331,8 +4369,8 @@ void MainWindowTest::remoteCrossFilesystemPreflightRoutesOriginalDrop()
     QVERIFY(destinationPane != nullptr);
     sourcePane->fileTable()->selectAll();
 
-    QObject::disconnect(&window, &rfm::app::MainWindow::remoteFilesystemRelationRequested,
-                        nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteFilesystemRelationRequested, nullptr,
+                        nullptr);
     QSignalSpy filesystemRequests(&window,
                                   &rfm::app::MainWindow::remoteFilesystemRelationRequested);
     QSignalSpy remoteRequests(&window, &rfm::app::MainWindow::remoteOperationRequested);
@@ -4367,10 +4405,12 @@ void MainWindowTest::remoteCrossFilesystemPreflightRoutesOriginalDrop()
         remoteCoordinator->handleRemoteExecutorResult(
             {request.id,
              expectedKind,
-             {{QStringLiteral("/source/a.txt"), expectedDestination + QStringLiteral("/a.txt"),
+             {{QStringLiteral("/source/a.txt"),
+               expectedDestination + QStringLiteral("/a.txt"),
                true,
                {}},
-              {QStringLiteral("/source/folder"), expectedDestination + QStringLiteral("/folder"),
+              {QStringLiteral("/source/folder"),
+               expectedDestination + QStringLiteral("/folder"),
                true,
                {}}}});
         QApplication::processEvents();
@@ -4378,29 +4418,29 @@ void MainWindowTest::remoteCrossFilesystemPreflightRoutesOriginalDrop()
 
     beginDrop();
     chooseCrossFilesystemDropButton(QStringLiteral("crossFilesystemDropCopyButton"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
-        Q_ARG(quint64, request.at(0).toULongLong()),
-        Q_ARG(rfm::core::RemoteFilesystemRelation,
-              rfm::core::RemoteFilesystemRelation::Different)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteFilesystemRelation",
+                                      Qt::DirectConnection,
+                                      Q_ARG(quint64, request.at(0).toULongLong()),
+                                      Q_ARG(rfm::core::RemoteFilesystemRelation,
+                                            rfm::core::RemoteFilesystemRelation::Different)));
     finishRequest(rfm::core::RemoteOperationKind::Copy, QStringLiteral("/destination"));
 
     beginDrop();
     chooseCrossFilesystemDropButton(QStringLiteral("crossFilesystemDropMoveButton"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
-        Q_ARG(quint64, request.at(0).toULongLong()),
-        Q_ARG(rfm::core::RemoteFilesystemRelation,
-              rfm::core::RemoteFilesystemRelation::Different)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteFilesystemRelation",
+                                      Qt::DirectConnection,
+                                      Q_ARG(quint64, request.at(0).toULongLong()),
+                                      Q_ARG(rfm::core::RemoteFilesystemRelation,
+                                            rfm::core::RemoteFilesystemRelation::Different)));
     finishRequest(rfm::core::RemoteOperationKind::Move, QStringLiteral("/destination"));
 
     beginDrop();
     chooseCrossFilesystemDropButton(QStringLiteral("crossFilesystemDropCancelButton"));
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
-        Q_ARG(quint64, request.at(0).toULongLong()),
-        Q_ARG(rfm::core::RemoteFilesystemRelation,
-              rfm::core::RemoteFilesystemRelation::Different)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteFilesystemRelation",
+                                      Qt::DirectConnection,
+                                      Q_ARG(quint64, request.at(0).toULongLong()),
+                                      Q_ARG(rfm::core::RemoteFilesystemRelation,
+                                            rfm::core::RemoteFilesystemRelation::Different)));
     QCOMPARE(remoteRequests.size(), 0);
 
     beginDrop();
@@ -4412,8 +4452,7 @@ void MainWindowTest::remoteCrossFilesystemPreflightRoutesOriginalDrop()
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleRemoteFilesystemRelation", Qt::DirectConnection,
         Q_ARG(quint64, request.at(0).toULongLong()),
-        Q_ARG(rfm::core::RemoteFilesystemRelation,
-              rfm::core::RemoteFilesystemRelation::Unknown)));
+        Q_ARG(rfm::core::RemoteFilesystemRelation, rfm::core::RemoteFilesystemRelation::Unknown)));
     finishRequest(rfm::core::RemoteOperationKind::Copy, QStringLiteral("/destination"));
 }
 
@@ -4555,8 +4594,8 @@ void MainWindowTest::promptsForConfirmedCrossVolumeLocalDragDrop()
     QTimer::singleShot(0, [] {
         auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
         QVERIFY(messageBox != nullptr);
-        auto* const moveButton =
-            messageBox->findChild<QAbstractButton*>(QStringLiteral("crossFilesystemDropMoveButton"));
+        auto* const moveButton = messageBox->findChild<QAbstractButton*>(
+            QStringLiteral("crossFilesystemDropMoveButton"));
         QVERIFY(moveButton != nullptr);
         moveButton->click();
     });
@@ -4658,7 +4697,8 @@ void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
     destinationPane->showDirectory(
         {rfm::core::FileSource::Ssh, remoteDestination.machineId, QStringLiteral("/elsewhere")},
         QStringLiteral("/elsewhere"), {});
-    const auto secondUpload = uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder")));
+    const auto secondUpload =
+        uploads.value(QDir(sourceDirectory).filePath(QStringLiteral("folder")));
     auto uploadAfterNavigation =
         progress(secondUpload.id, rfm::core::TransferState::Completed, 1, 1);
     uploadAfterNavigation.source = secondUpload.source;
@@ -4745,8 +4785,7 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
     QCOMPARE(downloads.value(QStringLiteral("/source/folder")).destination,
              QDir(destinationDirectory).filePath(QStringLiteral("folder")));
 
-    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr,
-                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
     QSignalSpy localRefreshes(&window, &rfm::app::MainWindow::localDirectoryRequested);
     auto* const debounce = window.findChild<QTimer*>(QStringLiteral("refreshDebounceTimer"));
     QVERIFY(debounce != nullptr);

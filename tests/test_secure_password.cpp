@@ -24,6 +24,7 @@ class SecurePasswordTest final : public QObject
     void clearWipesTheControlledCapacity();
     void partialWritesRetainThenWipeTheSecret();
     void queuedHandoffConsumesUniqueOwnership();
+    void connectionPasswordHandoffConsumesUniqueOwnership();
     void destructorAndHandoffDoNotUseSharedPasswordPayloads();
 };
 
@@ -33,6 +34,7 @@ void SecurePasswordTest::encodesDirectlyIntoUniqueStorage()
     QVERIFY(!password.isEmpty());
     const std::string_view bytes(password.remainingData(), password.remainingSize());
     QCOMPARE(bytes, std::string_view("p\xc3\xa4ss\xf0\x9f\x94\x92", 9));
+    QCOMPARE(password.remainingData()[password.remainingSize()], '\0');
     QVERIFY(!password.storageIsWiped());
 }
 
@@ -85,6 +87,15 @@ void SecurePasswordTest::queuedHandoffConsumesUniqueOwnership()
     QCoreApplication::sendPostedEvents(&session);
 }
 
+void SecurePasswordTest::connectionPasswordHandoffConsumesUniqueOwnership()
+{
+    rfm::ssh::SshSession session;
+    auto password = rfm::core::SecurePassword::fromUtf16(QStringLiteral("connection fixture"));
+    session.postPasswordAuthentication(std::move(password));
+    QVERIFY(password.isEmpty());
+    QCoreApplication::sendPostedEvents(&session);
+}
+
 void SecurePasswordTest::destructorAndHandoffDoNotUseSharedPasswordPayloads()
 {
     QFile implementation(QStringLiteral(RFM_SOURCE_DIR "/src/core/SecurePassword.cpp"));
@@ -104,7 +115,9 @@ void SecurePasswordTest::destructorAndHandoffDoNotUseSharedPasswordPayloads()
     QVERIFY(sessionHeader.open(QIODevice::ReadOnly));
     const QByteArray sessionApi = sessionHeader.readAll();
     QVERIFY(sessionApi.contains("postVolumeAuthentication"));
+    QVERIFY(sessionApi.contains("postPasswordAuthentication"));
     QVERIFY(sessionApi.contains("rfm::core::SecurePassword password"));
+    QVERIFY(!sessionApi.contains("connectToHost(rfm::core::ConnectionProfile profile, QString"));
     QVERIFY(!sessionApi.contains("authenticationToken, QByteArray password"));
 }
 

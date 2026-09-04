@@ -87,6 +87,7 @@ SecurePassword SecurePassword::fromUtf16(QStringView value)
         }
         appendUtf8(storage.get(), outputOffset, codePoint);
     }
+    storage[outputOffset] = '\0';
     return SecurePassword(std::move(storage), outputOffset, capacity);
 }
 

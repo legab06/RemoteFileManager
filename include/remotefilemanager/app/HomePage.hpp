@@ -22,6 +22,7 @@ class HomePage final : public QWidget
 
   signals:
     void connectProfileRequested(QString id);
+    void editProfileRequested(QString id);
     void newConnectionRequested();
 
   private:
@@ -30,6 +31,7 @@ class HomePage final : public QWidget
 
     QListWidget* m_serverList{nullptr};
     QPushButton* m_connectButton{nullptr};
+    QPushButton* m_editButton{nullptr};
 };
 
 } // namespace rfm::app
