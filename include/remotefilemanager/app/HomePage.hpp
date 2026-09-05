@@ -6,6 +6,7 @@
 #include <QWidget>
 
 class QListWidget;
+class QLayout;
 class QPushButton;
 
 namespace rfm::app
@@ -19,6 +20,7 @@ class HomePage final : public QWidget
     explicit HomePage(QWidget* parent = nullptr);
 
     void setProfiles(const QList<rfm::core::ConnectionProfile>& profiles);
+    QSize minimumSizeHint() const override;
 
   signals:
     void connectProfileRequested(QString id);
@@ -30,6 +32,7 @@ class HomePage final : public QWidget
     void requestSelectedProfile();
 
     QListWidget* m_serverList{nullptr};
+    QLayout* m_actionsLayout{nullptr};
     QPushButton* m_connectButton{nullptr};
     QPushButton* m_editButton{nullptr};
 };

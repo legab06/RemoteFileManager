@@ -11,6 +11,61 @@
 
 namespace rfm::app
 {
+namespace
+{
+
+class HomeActionsLayout final : public QHBoxLayout
+{
+  public:
+    bool hasHeightForWidth() const override { return true; }
+
+    int heightForWidth(int width) const override
+    {
+        if (width >= QHBoxLayout::minimumSize().width()) {
+            return QHBoxLayout::sizeHint().height();
+        }
+        int height = 0;
+        int buttonCount = 0;
+        for (int index = 0; index < count(); ++index) {
+            if (itemAt(index)->widget() != nullptr) {
+                height += itemAt(index)->sizeHint().height();
+                ++buttonCount;
+            }
+        }
+        return height + qMax(0, buttonCount - 1) * spacing();
+    }
+
+    QSize minimumSize() const override
+    {
+        QSize size = QHBoxLayout::minimumSize();
+        int width = 0;
+        for (int index = 0; index < count(); ++index) {
+            width = qMax(width, itemAt(index)->minimumSize().width());
+        }
+        size.setWidth(width);
+        return size;
+    }
+
+    void setGeometry(const QRect& rect) override
+    {
+        if (rect.width() >= QHBoxLayout::minimumSize().width()) {
+            QHBoxLayout::setGeometry(rect);
+            return;
+        }
+        QLayout::setGeometry(rect);
+        int top = rect.top();
+        for (int index = 0; index < count(); ++index) {
+            auto* const item = itemAt(index);
+            if (item->widget() != nullptr) {
+                const int height = item->sizeHint().height();
+                item->setGeometry(QRect(rect.left(), top, rect.width(), height));
+                top += height + spacing();
+            }
+        }
+    }
+};
+
+} // namespace
 
 HomePage::HomePage(QWidget* parent) : QWidget(parent)
 {
@@ -50,7 +105,8 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
     m_serverList->setMinimumHeight(170);
     layout->addWidget(m_serverList);
 
-    auto* const buttons = new QHBoxLayout;
+    auto* const buttons = new HomeActionsLayout;
+    m_actionsLayout = buttons;
     m_connectButton = new QPushButton(tr("Connect"), content);
     m_connectButton->setObjectName(QStringLiteral("homeConnectButton"));
     m_connectButton->setEnabled(false);
@@ -79,6 +135,19 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
         }
     });
     connect(newConnectionButton, &QPushButton::clicked, this, &HomePage::newConnectionRequested);
+}
+
+QSize HomePage::minimumSizeHint() const
+{
+    QSize size = QWidget::minimumSizeHint();
+    if (m_actionsLayout == nullptr) {
+        return size;
+    }
+    const int horizontalHeight = m_actionsLayout->sizeHint().height();
+    const int compactHeight =
+        m_actionsLayout->heightForWidth(m_actionsLayout->minimumSize().width());
+    size.setHeight(size.height() + qMax(0, compactHeight - horizontalHeight));
+    return size;
 }
 
 void HomePage::setProfiles(const QList<rfm::core::ConnectionProfile>& profiles)
