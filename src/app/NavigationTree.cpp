@@ -353,8 +353,10 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->setAnimated(true);
     m_tree->setUniformRowHeights(true);
+    m_tree->header()->setStretchLastSection(false);
     m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-    m_tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_tree->header()->setSectionResizeMode(1, QHeaderView::Fixed);
+    m_tree->setColumnWidth(1, 28);
     layout->addWidget(m_tree);
 
     auto* const volumeActions = new QHBoxLayout;
@@ -383,6 +385,9 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     addServerButton->setFocusPolicy(Qt::NoFocus);
     addServerButton->setToolTip(tr("New connection"));
     addServerButton->setAccessibleName(tr("New connection"));
+    addServerButton->setIconSize(QSize(16, 16));
+    addServerButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
     connect(addServerButton, &QToolButton::clicked, this, &NavigationTree::newConnectionRequested);
     m_tree->setItemWidget(m_remoteCategoryItem, 1, addServerButton);
     buildLocalMachine();
@@ -1056,6 +1061,9 @@ void NavigationTree::rebuildServers()
             editButton->setFocusPolicy(Qt::NoFocus);
             editButton->setToolTip(tr("Edit server"));
             editButton->setAccessibleName(tr("Edit server"));
+            editButton->setIconSize(QSize(16, 16));
+            editButton->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
             connect(editButton, &QToolButton::clicked, this,
                     [this, savedProfileId] { emit editProfileRequested(savedProfileId); });
             m_tree->setItemWidget(item, 1, editButton);

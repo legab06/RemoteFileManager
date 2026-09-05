@@ -162,7 +162,9 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
     QCOMPARE(localMachine->parent(), localCategory);
     QCOMPARE(tree->columnCount(), 2);
     QCOMPARE(tree->header()->sectionResizeMode(0), QHeaderView::Stretch);
-    QCOMPARE(tree->header()->sectionResizeMode(1), QHeaderView::ResizeToContents);
+    QCOMPARE(tree->header()->sectionResizeMode(1), QHeaderView::Fixed);
+    // Vérification que la colonne 1 est bien fixe (pas ResizeToContents)
+    QVERIFY(tree->header()->sectionResizeMode(1) != QHeaderView::ResizeToContents);
     QVERIFY(tree->itemWidget(localCategory, 1) == nullptr);
     auto* const addServer =
         qobject_cast<QToolButton*>(tree->itemWidget(remoteCategory, 1));
