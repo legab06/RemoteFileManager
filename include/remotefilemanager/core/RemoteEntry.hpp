@@ -13,6 +13,7 @@ struct RemoteEntry {
     QDateTime modifiedAt;
     bool directory{false};
     bool symbolicLink{false};
+    bool hidden{false};
 };
 
 }  // namespace rfm::core

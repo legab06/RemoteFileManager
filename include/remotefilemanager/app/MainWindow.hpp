@@ -138,8 +138,6 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void showConnectionError(const QString& message);
     void loadServerProfiles();
     void refreshServerProfileViews();
-    void updateSelectedServerAction();
-    void addServerProfile();
     void editSelectedServerProfile();
     void editServerProfile(const QString& id);
     void removeSelectedServerProfile();
@@ -307,6 +305,7 @@ class MainWindow final : public QMainWindow
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
     QAction* m_resetFileViewAction{nullptr};
+    QAction* m_showHiddenFilesAction{nullptr};
     QAction* m_placesDockAction{nullptr};
     QAction* m_operationDockAction{nullptr};
     QAction* m_clipboardCopyAction{nullptr};
@@ -322,7 +321,6 @@ class MainWindow final : public QMainWindow
     OperationPanel* m_operationPanel{nullptr};
     NavigationTree* m_navigationTree{nullptr};
     QLabel* m_serverProfileErrorLabel{nullptr};
-    QPushButton* m_connectServerProfileButton{nullptr};
     QTimer* m_autoRefreshTimer{nullptr};
     QTimer* m_refreshDebounceTimer{nullptr};
     QTimer* m_historySaveTimer{nullptr};

@@ -67,7 +67,7 @@ rfm::core::ConnectionProfile ConnectionDialog::profile() const
 
 bool ConnectionDialog::saveServerRequested() const
 {
-    return !m_saveServerCheck->isHidden() && m_saveServerCheck->isChecked();
+    return m_saveServerCheck->isChecked();
 }
 
 ConnectionDialog::State ConnectionDialog::state() const { return m_state; }
@@ -80,7 +80,7 @@ void ConnectionDialog::setProfile(const rfm::core::ConnectionProfile& profile)
     m_profileId = profile.id;
     m_profileForm->setProfile(profile);
     m_saveServerCheck->setChecked(false);
-    m_saveServerCheck->setVisible(profile.id.trimmed().isEmpty());
+    m_saveServerCheck->setVisible(true);
     updateState();
 }
 

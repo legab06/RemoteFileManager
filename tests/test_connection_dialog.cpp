@@ -58,6 +58,11 @@ void ConnectionDialogTest::validatesSharedProfileFieldsIncludingName()
     QVERIFY(connect->isEnabled());
     QCOMPARE(dialog.profile().displayName, QStringLiteral("Home server"));
     QCOMPARE(dialog.profile().privateKeyPath, QStringLiteral("~/.ssh/rfm_windows_server"));
+
+    rfm::core::ConnectionProfile savedProfile = dialog.profile();
+    savedProfile.id = QStringLiteral("saved-profile");
+    dialog.setProfile(savedProfile);
+    QVERIFY(!save->isHidden());
 }
 
 void ConnectionDialogTest::browsesForAnOptionalPrivateKey()

@@ -75,6 +75,7 @@ class FileBrowserPane final : public QWidget
     void requestForward();
     void requestRefresh();
     void resetFileView();
+    void setShowHiddenFiles(bool show);
 
   signals:
     void activated();
@@ -152,6 +153,7 @@ class FileBrowserPane final : public QWidget
     int m_dropHighlightRow{-1};
     int m_contextMenuRow{-1};
     bool m_restoreTableFocus{false};
+    bool m_showHiddenFiles{false};
 };
 
 } // namespace rfm::app

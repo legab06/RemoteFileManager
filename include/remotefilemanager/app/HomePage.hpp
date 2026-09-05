@@ -6,8 +6,9 @@
 #include <QWidget>
 
 class QListWidget;
-class QLayout;
+class QHBoxLayout;
 class QPushButton;
+class QResizeEvent;
 
 namespace rfm::app
 {
@@ -28,13 +29,19 @@ class HomePage final : public QWidget
     void newConnectionRequested();
 
   private:
+    void resizeEvent(QResizeEvent* event) override;
+    void updateActionPresentation();
+    void updateContentWidth();
     void updateConnectButton();
     void requestSelectedProfile();
 
     QListWidget* m_serverList{nullptr};
-    QLayout* m_actionsLayout{nullptr};
+    QHBoxLayout* m_actionsLayout{nullptr};
+    QWidget* m_content{nullptr};
+    int m_compactContentWidth{0};
     QPushButton* m_connectButton{nullptr};
     QPushButton* m_editButton{nullptr};
+    QPushButton* m_newConnectionButton{nullptr};
 };
 
 } // namespace rfm::app

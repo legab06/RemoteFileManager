@@ -568,7 +568,8 @@ LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
         const qint64 signedSize = info.size();
         entries.push_back({info.fileName(),
                            signedSize > 0 ? static_cast<quint64>(signedSize) : quint64{0},
-                           info.lastModified(), info.isDir(), info.isSymbolicLink()});
+                           info.lastModified(), info.isDir(), info.isSymbolicLink(),
+                           info.isHidden()});
     }
     return {directory.absolutePath(), std::move(entries), {}};
 }

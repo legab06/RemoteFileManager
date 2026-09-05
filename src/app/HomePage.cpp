@@ -6,6 +6,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QStyle>
 #include <QVBoxLayout>
 
@@ -14,54 +15,41 @@ namespace rfm::app
 namespace
 {
 
+class HomeContent final : public QWidget
+{
+  public:
+    explicit HomeContent(QWidget* parent = nullptr) : QWidget(parent) {}
+
+    void setPreferredWidth(int width)
+    {
+        if (m_preferredWidth == width) {
+            return;
+        }
+        m_preferredWidth = width;
+        updateGeometry();
+    }
+
+    QSize sizeHint() const override
+    {
+        QSize size = QWidget::sizeHint();
+        size.setWidth(qMax(size.width(), m_preferredWidth));
+        return size;
+    }
+
+  private:
+    int m_preferredWidth{0};
+};
+
 class HomeActionsLayout final : public QHBoxLayout
 {
   public:
-    bool hasHeightForWidth() const override { return true; }
-
-    int heightForWidth(int width) const override
-    {
-        if (width >= QHBoxLayout::minimumSize().width()) {
-            return QHBoxLayout::sizeHint().height();
-        }
-        int height = 0;
-        int buttonCount = 0;
-        for (int index = 0; index < count(); ++index) {
-            if (itemAt(index)->widget() != nullptr) {
-                height += itemAt(index)->sizeHint().height();
-                ++buttonCount;
-            }
-        }
-        return height + qMax(0, buttonCount - 1) * spacing();
-    }
+    int textMinimumWidth() const { return QHBoxLayout::minimumSize().width(); }
 
     QSize minimumSize() const override
     {
         QSize size = QHBoxLayout::minimumSize();
-        int width = 0;
-        for (int index = 0; index < count(); ++index) {
-            width = qMax(width, itemAt(index)->minimumSize().width());
-        }
-        size.setWidth(width);
+        size.setWidth(0);
         return size;
-    }
-
-    void setGeometry(const QRect& rect) override
-    {
-        if (rect.width() >= QHBoxLayout::minimumSize().width()) {
-            QHBoxLayout::setGeometry(rect);
-            return;
-        }
-        QLayout::setGeometry(rect);
-        int top = rect.top();
-        for (int index = 0; index < count(); ++index) {
-            auto* const item = itemAt(index);
-            if (item->widget() != nullptr) {
-                const int height = item->sizeHint().height();
-                item->setGeometry(QRect(rect.left(), top, rect.width(), height));
-                top += height + spacing();
-            }
-        }
     }
 };
 
@@ -72,11 +60,13 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
     setObjectName(QStringLiteral("homePage"));
 
     auto* const outerLayout = new QVBoxLayout(this);
+    outerLayout->setSizeConstraint(QLayout::SetMinimumSize);
     outerLayout->setContentsMargins(48, 36, 48, 36);
     outerLayout->addStretch();
 
-    auto* const content = new QWidget(this);
-    content->setMaximumWidth(620);
+    auto* const content = new HomeContent(this);
+    m_content = content;
+    content->setMaximumWidth(720);
     auto* const layout = new QVBoxLayout(content);
     layout->setSpacing(12);
 
@@ -107,23 +97,42 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
 
     auto* const buttons = new HomeActionsLayout;
     m_actionsLayout = buttons;
-    m_connectButton = new QPushButton(tr("Connect"), content);
+    buttons->setDirection(QBoxLayout::LeftToRight);
+    buttons->setSizeConstraint(QLayout::SetNoConstraint);
+    m_connectButton = new QPushButton(style()->standardIcon(QStyle::SP_DialogApplyButton),
+                                      tr("Connect"), content);
     m_connectButton->setObjectName(QStringLiteral("homeConnectButton"));
+    m_connectButton->setIconSize(QSize(24, 24));
+    m_connectButton->setToolTip(tr("Connect"));
+    m_connectButton->setAccessibleName(tr("Connect"));
     m_connectButton->setEnabled(false);
-    m_editButton = new QPushButton(tr("Edit…"), content);
+    m_editButton = new QPushButton(style()->standardIcon(QStyle::SP_FileDialogDetailedView),
+                                   tr("Edit…"), content);
     m_editButton->setObjectName(QStringLiteral("homeEditServerButton"));
+    m_editButton->setIconSize(QSize(24, 24));
+    m_editButton->setToolTip(tr("Edit server"));
+    m_editButton->setAccessibleName(tr("Edit server"));
     m_editButton->setEnabled(false);
-    auto* const newConnectionButton = new QPushButton(
+    m_newConnectionButton = new QPushButton(
         style()->standardIcon(QStyle::SP_ComputerIcon), tr("New connection…"), content);
-    newConnectionButton->setObjectName(QStringLiteral("homeNewConnectionButton"));
+    m_newConnectionButton->setObjectName(QStringLiteral("homeNewConnectionButton"));
+    m_newConnectionButton->setIconSize(QSize(24, 24));
+    m_newConnectionButton->setToolTip(tr("New connection"));
+    m_newConnectionButton->setAccessibleName(tr("New connection"));
     buttons->addWidget(m_connectButton);
     buttons->addWidget(m_editButton);
     buttons->addStretch();
-    buttons->addWidget(newConnectionButton);
+    buttons->addWidget(m_newConnectionButton);
     layout->addLayout(buttons);
 
     outerLayout->addWidget(content, 0, Qt::AlignHCenter);
     outerLayout->addStretch();
+
+    m_compactContentWidth = content->sizeHint().width();
+    updateContentWidth();
+    updateActionPresentation();
+    content->layout()->activate();
+    setMinimumHeight(minimumSizeHint().height());
 
     connect(m_serverList, &QListWidget::itemSelectionChanged, this, &HomePage::updateConnectButton);
     connect(m_serverList, &QListWidget::itemDoubleClicked, this,
@@ -134,20 +143,60 @@ HomePage::HomePage(QWidget* parent) : QWidget(parent)
             emit editProfileRequested(m_serverList->currentItem()->data(Qt::UserRole).toString());
         }
     });
-    connect(newConnectionButton, &QPushButton::clicked, this, &HomePage::newConnectionRequested);
+    connect(m_newConnectionButton, &QPushButton::clicked, this, &HomePage::newConnectionRequested);
 }
 
 QSize HomePage::minimumSizeHint() const
 {
     QSize size = QWidget::minimumSizeHint();
-    if (m_actionsLayout == nullptr) {
+    if (m_content == nullptr) {
         return size;
     }
-    const int horizontalHeight = m_actionsLayout->sizeHint().height();
-    const int compactHeight =
-        m_actionsLayout->heightForWidth(m_actionsLayout->minimumSize().width());
-    size.setHeight(size.height() + qMax(0, compactHeight - horizontalHeight));
+    const auto* const contentLayout = m_content->layout();
+    const int contentHeight = qMax(contentLayout->sizeHint().height(),
+                                   contentLayout->heightForWidth(m_compactContentWidth));
+    const QMargins outerMargins = layout()->contentsMargins();
+    size.setHeight(
+        qMax(size.height(), contentHeight + outerMargins.top() + outerMargins.bottom()));
     return size;
+}
+
+void HomePage::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    updateContentWidth();
+    updateActionPresentation();
+    setMinimumHeight(qMax(minimumHeight(), minimumSizeHint().height()));
+}
+
+void HomePage::updateActionPresentation()
+{
+    m_content->layout()->activate();
+    const QString connectText = tr("Connect");
+    const QString editText = tr("Edit…");
+    const QString newConnectionText = tr("New connection…");
+    m_connectButton->setText(connectText);
+    m_editButton->setText(editText);
+    m_newConnectionButton->setText(newConnectionText);
+    m_actionsLayout->activate();
+    const auto* const actions = static_cast<HomeActionsLayout*>(m_actionsLayout);
+    const bool showText =
+        actions->textMinimumWidth() <= m_actionsLayout->geometry().width();
+    if (!showText) {
+        m_connectButton->setText({});
+        m_editButton->setText({});
+        m_newConnectionButton->setText({});
+    }
+    updateGeometry();
+}
+
+void HomePage::updateContentWidth()
+{
+    constexpr int expansionStartWidth = 1000;
+    constexpr int maximumContentWidth = 720;
+    auto* const content = static_cast<HomeContent*>(m_content);
+    const int extraWidth = qMax(0, width() - expansionStartWidth) / 2;
+    content->setPreferredWidth(qMin(m_compactContentWidth + extraWidth, maximumContentWidth));
 }
 
 void HomePage::setProfiles(const QList<rfm::core::ConnectionProfile>& profiles)

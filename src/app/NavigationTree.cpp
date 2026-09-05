@@ -11,7 +11,9 @@
 #include <QHBoxLayout>
 #include <QHash>
 #include <QHeaderView>
+#include <QKeyEvent>
 #include <QLocale>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSet>
@@ -19,10 +21,12 @@
 #include <QStringList>
 #include <QStyle>
 #include <QTextDocument>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <utility>
 
@@ -30,6 +34,166 @@ namespace rfm::app
 {
 namespace
 {
+
+enum class PlaceKind {
+    Home,
+    Desktop,
+    Documents,
+    Downloads,
+    Music,
+    Pictures,
+    Videos,
+    PublicShare,
+    Templates,
+    Folder
+};
+
+struct StandardLocalPlace {
+    QStandardPaths::StandardLocation location;
+    PlaceKind kind;
+};
+
+constexpr std::array<StandardLocalPlace, 9> standardLocalPlaces{{
+    {QStandardPaths::HomeLocation, PlaceKind::Home},
+    {QStandardPaths::DesktopLocation, PlaceKind::Desktop},
+    {QStandardPaths::DocumentsLocation, PlaceKind::Documents},
+    {QStandardPaths::DownloadLocation, PlaceKind::Downloads},
+    {QStandardPaths::MusicLocation, PlaceKind::Music},
+    {QStandardPaths::PicturesLocation, PlaceKind::Pictures},
+    {QStandardPaths::MoviesLocation, PlaceKind::Videos},
+    {QStandardPaths::PublicShareLocation, PlaceKind::PublicShare},
+    {QStandardPaths::TemplatesLocation, PlaceKind::Templates},
+}};
+
+bool isCategoryItem(const QTreeWidgetItem* item)
+{
+    if (item == nullptr) {
+        return false;
+    }
+    const QVariant kindData = item->data(0, Qt::UserRole);
+    if (!kindData.isValid()) {
+        return false;
+    }
+    const auto kind = static_cast<NavigationTree::NodeKind>(kindData.toInt());
+    return kind == NavigationTree::NodeKind::LocalCategory ||
+           kind == NavigationTree::NodeKind::RemoteCategory;
+}
+
+class PlacesTreeWidget final : public QTreeWidget
+{
+  public:
+    explicit PlacesTreeWidget(QWidget* parent) : QTreeWidget(parent) {}
+
+  protected:
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (isCategoryItem(itemAt(event->position().toPoint()))) {
+            event->accept();
+            return;
+        }
+        QTreeWidget::mousePressEvent(event);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        if (isCategoryItem(itemAt(event->position().toPoint()))) {
+            event->accept();
+            return;
+        }
+        QTreeWidget::mouseDoubleClickEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (isCategoryItem(currentItem())) {
+            event->accept();
+            return;
+        }
+        QTreeWidget::keyPressEvent(event);
+    }
+};
+
+QString comparableLocalPath(const QString& path)
+{
+    const QFileInfo info(path);
+    const QString canonical = info.canonicalFilePath();
+    const QString normalized =
+        QDir::cleanPath(canonical.isEmpty() ? info.absoluteFilePath() : canonical);
+#ifdef Q_OS_WIN
+    return normalized.toCaseFolded();
+#else
+    return normalized;
+#endif
+}
+
+QIcon placeIcon(PlaceKind kind, const QWidget* widget)
+{
+    QFileIconProvider provider;
+    const QIcon folder = provider.icon(QFileIconProvider::Folder);
+    switch (kind) {
+    case PlaceKind::Home:
+        return QIcon::fromTheme(QStringLiteral("user-home"),
+                                widget->style()->standardIcon(QStyle::SP_DirHomeIcon));
+    case PlaceKind::Desktop:
+        return QIcon::fromTheme(QStringLiteral("user-desktop"),
+                                widget->style()->standardIcon(QStyle::SP_DesktopIcon));
+    case PlaceKind::Documents:
+        return QIcon::fromTheme(QStringLiteral("folder-documents"), folder);
+    case PlaceKind::Downloads:
+        return QIcon::fromTheme(QStringLiteral("folder-download"), folder);
+    case PlaceKind::Music:
+        return QIcon::fromTheme(QStringLiteral("folder-music"), folder);
+    case PlaceKind::Pictures:
+        return QIcon::fromTheme(QStringLiteral("folder-pictures"), folder);
+    case PlaceKind::Videos:
+        return QIcon::fromTheme(QStringLiteral("folder-videos"), folder);
+    case PlaceKind::PublicShare:
+        return QIcon::fromTheme(QStringLiteral("folder-publicshare"), folder);
+    case PlaceKind::Templates:
+        return QIcon::fromTheme(QStringLiteral("folder-templates"), folder);
+    case PlaceKind::Folder:
+        return QIcon::fromTheme(QStringLiteral("folder"), folder);
+    }
+    return folder;
+}
+
+PlaceKind placeKindForRemoteName(const QString& name)
+{
+    const QString folded = name.toCaseFolded();
+    if (folded == QStringLiteral("desktop")) return PlaceKind::Desktop;
+    if (folded == QStringLiteral("documents")) return PlaceKind::Documents;
+    if (folded == QStringLiteral("downloads")) return PlaceKind::Downloads;
+    if (folded == QStringLiteral("music")) return PlaceKind::Music;
+    if (folded == QStringLiteral("pictures")) return PlaceKind::Pictures;
+    if (folded == QStringLiteral("videos") || folded == QStringLiteral("movies"))
+        return PlaceKind::Videos;
+    return PlaceKind::Folder;
+}
+
+PlaceKind placeKindForLocalPath(const QString& path)
+{
+    const QString localPath = comparableLocalPath(path);
+    if (localPath.isEmpty()) {
+        return PlaceKind::Folder;
+    }
+
+    QSet<QString> assignedPaths;
+    for (const StandardLocalPlace& place : standardLocalPlaces) {
+        const QString configuredPath = QStandardPaths::writableLocation(place.location);
+        if (configuredPath.isEmpty() || !QFileInfo(configuredPath).isDir()) {
+            continue;
+        }
+        const QString configuredLocalPath = comparableLocalPath(configuredPath);
+        if (configuredLocalPath.isEmpty() || assignedPaths.contains(configuredLocalPath)) {
+            continue;
+        }
+        assignedPaths.insert(configuredLocalPath);
+        if (localPath == configuredLocalPath) {
+            return place.kind;
+        }
+    }
+    return PlaceKind::Folder;
+}
 
 QTreeWidgetItem* createItem(QTreeWidgetItem* parent, const QString& text,
                             NavigationTree::NodeKind kind, const QIcon& icon = {})
@@ -39,6 +203,17 @@ QTreeWidgetItem* createItem(QTreeWidgetItem* parent, const QString& text,
     if (!icon.isNull()) {
         item->setIcon(0, icon);
     }
+    return item;
+}
+
+QTreeWidgetItem* createCategory(QTreeWidgetItem* parent, const QString& text,
+                                NavigationTree::NodeKind kind)
+{
+    auto* const item = createItem(parent, text, kind);
+    QFont font = item->font(0);
+    font.setBold(true);
+    item->setFont(0, font);
+    item->setFlags(Qt::ItemIsEnabled);
     return item;
 }
 
@@ -169,14 +344,17 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     setObjectName(QStringLiteral("navigationTreeWidget"));
     auto* const layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    m_tree = new QTreeWidget(this);
+    m_tree = new PlacesTreeWidget(this);
     m_tree->setObjectName(QStringLiteral("navigationTree"));
     m_tree->setHeaderHidden(true);
+    m_tree->setRootIsDecorated(false);
+    m_tree->setColumnCount(2);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->setAnimated(true);
     m_tree->setUniformRowHeights(true);
-    m_tree->header()->setStretchLastSection(true);
+    m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     layout->addWidget(m_tree);
 
     auto* const volumeActions = new QHBoxLayout;
@@ -193,16 +371,35 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     volumeActions->addStretch();
     layout->addLayout(volumeActions);
 
+    auto* const localCategory =
+        createCategory(m_tree->invisibleRootItem(), tr("Local"), NodeKind::LocalCategory);
+    m_remoteCategoryItem =
+        createCategory(m_tree->invisibleRootItem(), tr("Distant"), NodeKind::RemoteCategory);
+    auto* const addServerButton = new QToolButton(m_tree);
+    addServerButton->setObjectName(QStringLiteral("placesNewConnectionButton"));
+    addServerButton->setIcon(QIcon::fromTheme(
+        QStringLiteral("list-add"), style()->standardIcon(QStyle::SP_FileDialogNewFolder)));
+    addServerButton->setAutoRaise(true);
+    addServerButton->setFocusPolicy(Qt::NoFocus);
+    addServerButton->setToolTip(tr("New connection"));
+    addServerButton->setAccessibleName(tr("New connection"));
+    connect(addServerButton, &QToolButton::clicked, this, &NavigationTree::newConnectionRequested);
+    m_tree->setItemWidget(m_remoteCategoryItem, 1, addServerButton);
     buildLocalMachine();
-    m_serversItem = createItem(m_tree->invisibleRootItem(), tr("Servers"), NodeKind::Servers,
-                               style()->standardIcon(QStyle::SP_DriveNetIcon));
+    localCategory->addChild(m_localMachineItem);
     m_localMachineItem->setExpanded(true);
-    m_serversItem->setExpanded(true);
+    localCategory->setExpanded(true);
+    m_remoteCategoryItem->setExpanded(true);
 
     connect(m_tree, &QTreeWidget::itemActivated, this,
             [this](QTreeWidgetItem* item, int) { activateItem(item); });
     connect(m_tree, &QTreeWidget::itemExpanded, this,
             [this](QTreeWidgetItem* item) { expandItem(item); });
+    connect(m_tree, &QTreeWidget::itemCollapsed, this, [](QTreeWidgetItem* item) {
+        if (isCategoryItem(item)) {
+            item->setExpanded(true);
+        }
+    });
     connect(m_tree, &QTreeWidget::currentItemChanged, this,
             [this](QTreeWidgetItem*, QTreeWidgetItem*) {
                 updateVolumeActions();
@@ -267,7 +464,7 @@ NavigationTree::contextActionsAt(const QPoint& viewportPosition) const
         !item->data(0, SavedProfileIdRole).toString().isEmpty()) {
         return {item->data(0, ActiveRole).toBool() ? ContextAction::Disconnect
                                                    : ContextAction::Connect,
-                ContextAction::Properties};
+                ContextAction::Properties, ContextAction::RemoveServer};
     }
     if (kind == NodeKind::LocalLocation || kind == NodeKind::LocalDirectory ||
         kind == NodeKind::RemoteDirectory) {
@@ -311,6 +508,9 @@ QString NavigationTree::selectedPropertiesText() const
 void NavigationTree::selectItemAt(const QPoint& viewportPosition)
 {
     if (QTreeWidgetItem* const item = m_tree->itemAt(viewportPosition)) {
+        if (isCategoryItem(item)) {
+            return;
+        }
         m_tree->setCurrentItem(item);
     }
 }
@@ -628,11 +828,11 @@ QTreeWidgetItem* NavigationTree::directChild(QTreeWidgetItem* parent, NodeKind k
 
 QTreeWidgetItem* NavigationTree::serverItem(const QString& machineId) const
 {
-    if (m_serversItem == nullptr || machineId.isEmpty()) {
+    if (m_remoteCategoryItem == nullptr || machineId.isEmpty()) {
         return nullptr;
     }
-    for (int index = 0; index < m_serversItem->childCount(); ++index) {
-        QTreeWidgetItem* const item = m_serversItem->child(index);
+    for (int index = 0; index < m_remoteCategoryItem->childCount(); ++index) {
+        QTreeWidgetItem* const item = m_remoteCategoryItem->child(index);
         if (itemKind(item) == NodeKind::ServerProfile &&
             item->data(0, ProfileIdRole).toString() == machineId) {
             return item;
@@ -706,7 +906,7 @@ void NavigationTree::setVolumeOperation(const QString& machineId, const QString&
 
     QList<QTreeWidgetItem*> pending;
     pending.push_back(m_localMachineItem);
-    pending.push_back(m_serversItem);
+    pending.push_back(m_remoteCategoryItem);
     while (!pending.isEmpty()) {
         QTreeWidgetItem* const item = pending.takeLast();
         if (item->data(0, VolumeRole).isValid()) {
@@ -791,28 +991,39 @@ QString NavigationTree::volumeOperationIdentity(const QString& machineId, const 
 void NavigationTree::buildLocalMachine()
 {
     m_localMachineItem =
-        createItem(m_tree->invisibleRootItem(), tr("This Computer"), NodeKind::LocalMachine,
+        createItem(nullptr, tr("This Computer"), NodeKind::LocalMachine,
                    style()->standardIcon(QStyle::SP_ComputerIcon));
-    QFileIconProvider icons;
-    auto addLocation = [this, &icons](const QString& name, const QString& path) {
+    auto addLocation = [this](QTreeWidgetItem* parent, const QString& name, const QString& path,
+                              PlaceKind kind) -> QTreeWidgetItem* {
         if (path.isEmpty() || !QFileInfo(path).isDir()) {
-            return;
+            return nullptr;
         }
-        auto* const item = createItem(m_localMachineItem, name, NodeKind::LocalLocation,
-                                      icons.icon(QFileIconProvider::Folder));
+        auto* const item = createItem(parent, name, NodeKind::LocalLocation, placeIcon(kind, this));
         item->setData(0, PathRole, normalizedLocalPath(path));
         item->setToolTip(0, path);
         addLazyPlaceholder(item);
+        return item;
     };
-    addLocation(tr("Home"), QDir::homePath());
-    const QString documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-    if (normalizedLocalPath(documents) != normalizedLocalPath(QDir::homePath())) {
-        addLocation(tr("Documents"), documents);
-    }
-    const QString downloads = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
-    if (normalizedLocalPath(downloads) != normalizedLocalPath(QDir::homePath()) &&
-        normalizedLocalPath(downloads) != normalizedLocalPath(documents)) {
-        addLocation(tr("Downloads"), downloads);
+    QTreeWidgetItem* const home =
+        addLocation(m_localMachineItem, tr("Home"),
+                    QStandardPaths::writableLocation(QStandardPaths::HomeLocation), PlaceKind::Home);
+    QSet<QString> paths{comparableLocalPath(
+        QStandardPaths::writableLocation(QStandardPaths::HomeLocation))};
+    if (home != nullptr) {
+        for (const StandardLocalPlace& place : standardLocalPlaces) {
+            const QString path = QStandardPaths::writableLocation(place.location);
+            const QString normalized = comparableLocalPath(path);
+            if (place.kind == PlaceKind::Home || normalized.isEmpty() ||
+                paths.contains(normalized) || !QFileInfo(path).isDir()) {
+                continue;
+            }
+            const QString name = QFileInfo(path).fileName();
+            if (name.isEmpty()) {
+                continue;
+            }
+            addLocation(home, name, path, place.kind);
+            paths.insert(normalized);
+        }
     }
     m_volumesItem = createItem(m_localMachineItem, tr("Volumes"), NodeKind::Volumes,
                                style()->standardIcon(QStyle::SP_DriveHDIcon));
@@ -821,19 +1032,34 @@ void NavigationTree::buildLocalMachine()
 void NavigationTree::rebuildServers()
 {
     const QString selectedId = selectedProfileId();
-    qDeleteAll(m_serversItem->takeChildren());
+    qDeleteAll(m_remoteCategoryItem->takeChildren());
     auto addServer = [this, &selectedId](const QString& machineId, const QString& savedProfileId,
                                          const QString& displayName, const QString& username,
                                          const QString& host, quint16 port, bool active) {
         const QString label = active ? tr("%1 — Connected").arg(displayName) : displayName;
         auto* const item = createItem(
-            m_serversItem, label, NodeKind::ServerProfile,
+            m_remoteCategoryItem, label, NodeKind::ServerProfile,
             style()->standardIcon(active ? QStyle::SP_DialogApplyButton : QStyle::SP_ComputerIcon));
         item->setData(0, ProfileIdRole, machineId);
         item->setData(0, SavedProfileIdRole, savedProfileId);
         item->setData(0, ActiveRole, active);
         item->setToolTip(
             0, Qt::convertFromPlainText(tr("%1@%2:%3").arg(username, host, QString::number(port))));
+        if (!savedProfileId.isEmpty()) {
+            auto* const editButton = new QToolButton(m_tree);
+            editButton->setObjectName(QStringLiteral("placesEditServerButton"));
+            editButton->setProperty("profileId", savedProfileId);
+            editButton->setIcon(QIcon::fromTheme(
+                QStringLiteral("document-edit"),
+                style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
+            editButton->setAutoRaise(true);
+            editButton->setFocusPolicy(Qt::NoFocus);
+            editButton->setToolTip(tr("Edit server"));
+            editButton->setAccessibleName(tr("Edit server"));
+            connect(editButton, &QToolButton::clicked, this,
+                    [this, savedProfileId] { emit editProfileRequested(savedProfileId); });
+            m_tree->setItemWidget(item, 1, editButton);
+        }
         if (active) {
             QFont font = item->font(0);
             font.setBold(true);
@@ -967,7 +1193,6 @@ void NavigationTree::replaceDirectoryChildren(QTreeWidgetItem* item,
         }
     }
 
-    QFileIconProvider icons;
     int directoryIndex = 0;
     for (const rfm::core::RemoteEntry& entry : entries) {
         if (!entry.directory) {
@@ -980,15 +1205,21 @@ void NavigationTree::replaceDirectoryChildren(QTreeWidgetItem* item,
             local ? normalizedLocalPath(childPath) : rfm::core::RemotePath::normalize(childPath);
         QTreeWidgetItem* child = existingChildren.take(childKey(normalizedPath));
         if (child == nullptr) {
-            child =
-                createItem(item, entry.name, expectedKind, icons.icon(QFileIconProvider::Folder));
+            const PlaceKind placeKind =
+                local ? placeKindForLocalPath(normalizedPath) : placeKindForRemoteName(entry.name);
+            child = createItem(item, entry.name, expectedKind, placeIcon(placeKind, this));
             addLazyPlaceholder(child);
         } else {
             child->setText(0, entry.name);
-            child->setIcon(0, icons.icon(QFileIconProvider::Folder));
+            const PlaceKind placeKind =
+                local ? placeKindForLocalPath(normalizedPath) : placeKindForRemoteName(entry.name);
+            child->setIcon(0, placeIcon(placeKind, this));
         }
         child->setData(0, PathRole, normalizedPath);
         child->setData(0, ProfileIdRole, profileId);
+        const bool hidden = entry.hidden || entry.name.startsWith(QChar{'.'});
+        child->setData(0, HiddenRole, hidden);
+        child->setHidden(hidden && !m_showHiddenFiles);
         const int currentIndex = item->indexOfChild(child);
         if (currentIndex != directoryIndex) {
             item->takeChild(currentIndex);
@@ -1004,6 +1235,22 @@ void NavigationTree::replaceDirectoryChildren(QTreeWidgetItem* item,
     item->setData(0, LoadedRole, true);
     m_tree->verticalScrollBar()->setValue(scrollPosition);
     m_tree->setUpdatesEnabled(updatesEnabled);
+}
+
+void NavigationTree::setShowHiddenFiles(bool show)
+{
+    m_showHiddenFiles = show;
+    QList<QTreeWidgetItem*> pending;
+    for (int index = 0; index < m_tree->topLevelItemCount(); ++index) {
+        pending.push_back(m_tree->topLevelItem(index));
+    }
+    while (!pending.isEmpty()) {
+        QTreeWidgetItem* const item = pending.takeLast();
+        item->setHidden(item->data(0, HiddenRole).toBool() && !show);
+        for (int index = 0; index < item->childCount(); ++index) {
+            pending.push_back(item->child(index));
+        }
+    }
 }
 
 QList<QTreeWidgetItem*> NavigationTree::matchingItems(NodeKind kind, const QString& path,

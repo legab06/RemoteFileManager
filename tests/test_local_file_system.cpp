@@ -52,6 +52,7 @@ class LocalFileSystemTest final : public QObject
 
   private slots:
     void listsOnlyImmediateEntriesFromTemporaryDirectory();
+    void reportsNativeHiddenMetadata();
     void countsOnlyImmediateDirectoryEntries();
     void rejectsMissingDirectory();
     void createsLocalFoldersWithValidation();
@@ -110,6 +111,22 @@ void LocalFileSystemTest::listsOnlyImmediateEntriesFromTemporaryDirectory()
     QVERIFY(std::ranges::none_of(result.entries, [](const rfm::core::RemoteEntry& entry) {
         return entry.name == QStringLiteral("nested");
     }));
+}
+
+void LocalFileSystemTest::reportsNativeHiddenMetadata()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString path = QDir(temporary.path()).filePath(QStringLiteral(".hidden"));
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+
+    const auto result = rfm::core::LocalFileSystem::listDirectory(temporary.path());
+    QVERIFY(result.succeeded());
+    QCOMPARE(result.entries.size(), 1);
+    QCOMPARE(result.entries.constFirst().name, QStringLiteral(".hidden"));
+    QCOMPARE(result.entries.constFirst().hidden, QFileInfo(path).isHidden());
 }
 
 void LocalFileSystemTest::countsOnlyImmediateDirectoryEntries()

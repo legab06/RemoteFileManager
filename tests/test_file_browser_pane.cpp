@@ -33,6 +33,7 @@ class FileBrowserPaneTest final : public QObject
   private slots:
     void init();
     void displaysDirectoryAndBuildsRemoteSelection();
+    void togglesHiddenEntriesForLocalAndSsh();
     void presentsFileTypesIconsAndModificationTimesConsistently();
     void configuresIndependentMovableColumns();
     void sortsEveryColumnUsingRawValues();
@@ -86,6 +87,35 @@ constexpr auto tableSortColumnKey = "ui/fileBrowserPane/sortColumn";
 constexpr auto tableSortOrderKey = "ui/fileBrowserPane/sortOrder";
 constexpr auto tableLayoutModeKey = "ui/fileBrowserPane/layoutMode";
 
+}
+
+void FileBrowserPaneTest::togglesHiddenEntriesForLocalAndSsh()
+{
+    rfm::app::FileBrowserPane pane;
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("visible"), 0, {}, false, false, false},
+        {QStringLiteral(".dotfile"), 0, {}, false, false, false},
+        {QStringLiteral("native-hidden"), 0, {}, false, false, true}};
+    const rfm::core::BrowserLocation local{rfm::core::FileSource::Local,
+                                           QString::fromLatin1(rfm::core::LocalMachineId),
+                                           QStringLiteral("/fixture")};
+    pane.showDirectory(local, QStringLiteral("/fixture"), entries);
+    QVERIFY(!pane.fileTable()->isRowHidden(0));
+    QVERIFY(pane.fileTable()->isRowHidden(1));
+    QVERIFY(pane.fileTable()->isRowHidden(2));
+    pane.setShowHiddenFiles(true);
+    QVERIFY(!pane.fileTable()->isRowHidden(1));
+    QVERIFY(!pane.fileTable()->isRowHidden(2));
+    pane.setShowHiddenFiles(false);
+    QVERIFY(pane.fileTable()->isRowHidden(1));
+    QVERIFY(pane.fileTable()->isRowHidden(2));
+
+    const rfm::core::BrowserLocation ssh{rfm::core::FileSource::Ssh,
+                                         QStringLiteral("remote-id"), QStringLiteral("/home")};
+    pane.showDirectory(ssh, QStringLiteral("sftp://remote/home"), entries);
+    QVERIFY(pane.fileTable()->isRowHidden(1));
+    pane.setShowHiddenFiles(true);
+    QVERIFY(!pane.fileTable()->isRowHidden(1));
 }
 
 void FileBrowserPaneTest::init()

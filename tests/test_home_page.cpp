@@ -16,9 +16,9 @@ class HomePageTest final : public QObject
     void showsProfilesAndEmitsConnectionIntent();
     void exposesManualConnectionIntent();
     void exposesSelectedProfileEditIntent();
-    void adaptsOnlyActionsToAvailableWidth_data();
-    void adaptsOnlyActionsToAvailableWidth();
+    void adaptsActionsToAvailableWidth();
     void propagatesMinimumHeightThroughStack();
+    void growsServerListWithinBounds();
 };
 
 void HomePageTest::showsProfilesAndEmitsConnectionIntent()
@@ -76,103 +76,57 @@ void HomePageTest::exposesSelectedProfileEditIntent()
     QCOMPARE(requested.constFirst().constFirst().toString(), QStringLiteral("nas-id"));
 }
 
-void HomePageTest::adaptsOnlyActionsToAvailableWidth_data()
+void HomePageTest::adaptsActionsToAvailableWidth()
 {
-    QTest::addColumn<int>("height");
-    QTest::newRow("normal-height") << 700;
-    QTest::newRow("short-window") << 480;
-}
-
-void HomePageTest::adaptsOnlyActionsToAvailableWidth()
-{
-    QFETCH(int, height);
-    rfm::app::HomePage page;
-    rfm::app::HomePage reference;
-    auto* const list = page.findChild<QListWidget*>(QStringLiteral("homeServerList"));
-    auto* const referenceList =
-        reference.findChild<QListWidget*>(QStringLiteral("homeServerList"));
+    QStackedWidget stack;
+    auto* const page = new rfm::app::HomePage(&stack);
+    stack.addWidget(page);
+    stack.setCurrentWidget(page);
+    auto* const list = page->findChild<QListWidget*>(QStringLiteral("homeServerList"));
     auto* const contentLayout = qobject_cast<QVBoxLayout*>(list->parentWidget()->layout());
     auto* const actions = contentLayout->itemAt(contentLayout->count() - 1)->layout();
-
-    // Restore HEAD's ordinary QHBoxLayout in the reference page.
-    auto* const referenceLayout =
-        qobject_cast<QVBoxLayout*>(referenceList->parentWidget()->layout());
-    auto* const oldActions = referenceLayout->takeAt(referenceLayout->count() - 1)->layout();
-    auto* const historicalActions = new QHBoxLayout;
-    while (oldActions->count() > 0) {
-        historicalActions->addItem(oldActions->takeAt(0));
-    }
-    historicalActions->setStretch(2, 1);
-    delete oldActions;
-    referenceLayout->addLayout(historicalActions);
-
-    const auto buttons = page.findChildren<QPushButton*>();
-    const auto referenceButtons = reference.findChildren<QPushButton*>();
+    const auto buttons = page->findChildren<QPushButton*>();
     QCOMPARE(buttons.size(), 3);
-    QCOMPARE(referenceButtons.size(), 3);
-    page.resize(900, height);
-    reference.resize(900, height);
-    page.show();
-    reference.show();
+    stack.resize(1200, 700);
+    stack.show();
     QCoreApplication::processEvents();
 
-    const auto checkListProperties = [&] {
-        QCOMPARE(list->minimumSize(), referenceList->minimumSize());
-        QCOMPARE(list->maximumSize(), referenceList->maximumSize());
-        QCOMPARE(list->sizePolicy(), referenceList->sizePolicy());
-        QCOMPARE(list->frameStyle(), referenceList->frameStyle());
-        QCOMPARE(list->lineWidth(), referenceList->lineWidth());
-        QCOMPARE(list->midLineWidth(), referenceList->midLineWidth());
-        QCOMPARE(list->frameWidth(), referenceList->frameWidth());
-        QCOMPARE(list->styleSheet(), referenceList->styleSheet());
-        QCOMPARE(list->contentsMargins(), referenceList->contentsMargins());
-        QCOMPARE(list->focusPolicy(), referenceList->focusPolicy());
-    };
-    checkListProperties();
-    QCOMPARE(list->geometry(), referenceList->geometry());
-    for (int index = 0; index < buttons.size(); ++index) {
-        QCOMPARE(buttons[index]->geometry(), referenceButtons[index]->geometry());
-    }
+    auto* const actionLayout = qobject_cast<QHBoxLayout*>(actions);
+    QVERIFY(actionLayout != nullptr);
+    QCOMPARE(actionLayout->direction(), QBoxLayout::LeftToRight);
+    QCOMPARE(buttons[0]->text(), QStringLiteral("Connect"));
+    QCOMPARE(buttons[1]->text(), QStringLiteral("Edit…"));
+    QCOMPARE(buttons[2]->text(), QStringLiteral("New connection…"));
+    const int actionHeight = actions->geometry().height();
+    const int serverListWidth = list->width();
 
-    // Use the action row's actual threshold, independent of font and platform.
-    const int threshold = historicalActions->minimumSize().width();
-    const auto outerMargins = page.layout()->contentsMargins();
-    const auto contentMargins = contentLayout->contentsMargins();
-    page.resize(outerMargins.left() + outerMargins.right() + contentMargins.left() +
-                    contentMargins.right() + threshold - 1,
-                height);
+    stack.resize(1, 700);
     QCoreApplication::processEvents();
-    QVERIFY(actions->geometry().width() < threshold);
-    QVERIFY(actions->geometry().height() >= actions->heightForWidth(actions->geometry().width()));
+    QCOMPARE(actionLayout->direction(), QBoxLayout::LeftToRight);
+    QVERIFY(buttons[0]->text().isEmpty());
+    QVERIFY(buttons[1]->text().isEmpty());
+    QVERIFY(buttons[2]->text().isEmpty());
+    QCOMPARE(actions->geometry().height(), actionHeight);
     for (int index = 0; index < buttons.size(); ++index) {
         QVERIFY(buttons[index]->geometry().top() > list->geometry().bottom());
         QVERIFY(actions->geometry().contains(buttons[index]->geometry()));
         if (index > 0) {
-            QVERIFY(buttons[index]->geometry().top() > buttons[index - 1]->geometry().bottom());
+            QCOMPARE(buttons[index]->geometry().top(), buttons[index - 1]->geometry().top());
         }
     }
-    checkListProperties();
 
-    page.setProfiles({{QStringLiteral("NAS"), QStringLiteral("nas.example.test"),
-                       QStringLiteral("alice"), 22, QStringLiteral("nas-id")}});
-    list->setCurrentRow(0);
-    QSignalSpy connectRequested(&page, &rfm::app::HomePage::connectProfileRequested);
-    QSignalSpy editRequested(&page, &rfm::app::HomePage::editProfileRequested);
-    QSignalSpy newRequested(&page, &rfm::app::HomePage::newConnectionRequested);
-    for (auto* const button : buttons) {
-        QTest::mouseClick(button, Qt::LeftButton);
-    }
-    QCOMPARE(connectRequested.size(), 1);
-    QCOMPARE(editRequested.size(), 1);
-    QCOMPARE(newRequested.size(), 1);
-
-    page.resize(900, height);
+    stack.resize(1200, 700);
     QCoreApplication::processEvents();
-    checkListProperties();
-    QCOMPARE(list->geometry(), referenceList->geometry());
-    for (int index = 0; index < buttons.size(); ++index) {
-        QCOMPARE(buttons[index]->geometry(), referenceButtons[index]->geometry());
-    }
+    QCOMPARE(buttons[0]->text(), QStringLiteral("Connect"));
+    QCOMPARE(buttons[1]->text(), QStringLiteral("Edit…"));
+    QCOMPARE(buttons[2]->text(), QStringLiteral("New connection…"));
+    QCOMPARE(list->width(), serverListWidth);
+    QCOMPARE(buttons[0]->toolTip(), QStringLiteral("Connect"));
+    QCOMPARE(buttons[0]->accessibleName(), QStringLiteral("Connect"));
+    QCOMPARE(buttons[1]->toolTip(), QStringLiteral("Edit server"));
+    QCOMPARE(buttons[1]->accessibleName(), QStringLiteral("Edit server"));
+    QCOMPARE(buttons[2]->toolTip(), QStringLiteral("New connection"));
+    QCOMPARE(buttons[2]->accessibleName(), QStringLiteral("New connection"));
 }
 
 void HomePageTest::propagatesMinimumHeightThroughStack()
@@ -181,18 +135,69 @@ void HomePageTest::propagatesMinimumHeightThroughStack()
     auto* const page = new rfm::app::HomePage(&stack);
     stack.addWidget(page);
     stack.setCurrentWidget(page);
-    stack.resize(744, 395);
+    stack.resize(744, 700);
     stack.show();
     QCoreApplication::processEvents();
 
     const int minimumHeight = stack.minimumSizeHint().height();
-    QVERIFY(minimumHeight > 395);
-    stack.resize(744, 1);
+    QVERIFY(minimumHeight >= 395);
+    stack.resize(744, minimumHeight);
     QCoreApplication::processEvents();
-    QVERIFY(stack.height() >= minimumHeight);
 
     const auto* const list = page->findChild<QListWidget*>(QStringLiteral("homeServerList"));
     auto* const content = list->parentWidget();
+    page->layout()->activate();
+    content->layout()->activate();
+    const auto* const actions = content->layout()->itemAt(content->layout()->count() - 1);
+    QVERIFY(actions != nullptr);
+    QVERIFY(actions->geometry().top() - list->geometry().bottom() - 1 >= 0);
+
+    stack.resize(744, 1);
+    QCoreApplication::processEvents();
+    QVERIFY(stack.height() >= minimumHeight);
+    QVERIFY(actions->geometry().top() - list->geometry().bottom() - 1 >= 0);
+}
+
+void HomePageTest::growsServerListWithinBounds()
+{
+    QStackedWidget stack;
+    auto* const page = new rfm::app::HomePage(&stack);
+    stack.addWidget(page);
+    stack.setCurrentWidget(page);
+    stack.resize(900, 700);
+    stack.show();
+    QCoreApplication::processEvents();
+
+    auto* const list = page->findChild<QListWidget*>(QStringLiteral("homeServerList"));
+    const int compactWidth = list->width();
+    const int compactHeight = list->height();
+    const int frameStyle = list->frameStyle();
+    const QString styleSheet = list->styleSheet();
+    const QSize minimumSize = list->minimumSize();
+    const QSize maximumSize = list->maximumSize();
+    const QSizePolicy sizePolicy = list->sizePolicy();
+    const QMargins contentsMargins = list->contentsMargins();
+    const Qt::FocusPolicy focusPolicy = list->focusPolicy();
+
+    stack.resize(1920, 1080);
+    QCoreApplication::processEvents();
+    QVERIFY(list->width() > compactWidth);
+    QVERIFY(list->width() <= 702);
+    QVERIFY(list->height() >= compactHeight);
+    QVERIFY(list->height() <= 260);
+    QCOMPARE(list->frameStyle(), frameStyle);
+    QCOMPARE(list->styleSheet(), styleSheet);
+    QCOMPARE(list->minimumSize(), minimumSize);
+    QCOMPARE(list->maximumSize(), maximumSize);
+    QCOMPARE(list->sizePolicy(), sizePolicy);
+    QCOMPARE(list->contentsMargins(), contentsMargins);
+    QCOMPARE(list->focusPolicy(), focusPolicy);
+    const auto buttons = page->findChildren<QPushButton*>();
+    QCOMPARE(buttons[0]->text(), QStringLiteral("Connect"));
+    QCOMPARE(buttons[1]->text(), QStringLiteral("Edit…"));
+    QCOMPARE(buttons[2]->text(), QStringLiteral("New connection…"));
+
+    const auto* const content = list->parentWidget();
     content->layout()->activate();
     const auto* const actions = content->layout()->itemAt(content->layout()->count() - 1);
     QVERIFY(actions != nullptr);

@@ -1359,6 +1359,9 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
                              new SortableFileItem(modifiedDisplayText(entry.modifiedAt),
                                                   SortKind::Modified, entry.modifiedAt, entry.name,
                                                   entry.directory));
+        m_fileTable->setRowHidden(static_cast<int>(row),
+                                  !m_showHiddenFiles &&
+                                      (entry.hidden || entry.name.startsWith(QChar{'.'})));
     }
     m_fileTable->setSortingEnabled(sortingEnabled);
     if (sortingEnabled) {
@@ -1380,6 +1383,23 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     updateCutAppearance();
     emit historyChanged();
     QTimer::singleShot(0, this, &FileBrowserPane::requestNextDirectoryItemCount);
+}
+
+void FileBrowserPane::setShowHiddenFiles(bool show)
+{
+    if (m_showHiddenFiles == show) {
+        return;
+    }
+    m_showHiddenFiles = show;
+    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+        const QTableWidgetItem* const item = m_fileTable->item(row, 0);
+        if (item == nullptr) {
+            continue;
+        }
+        const auto entry = item->data(Qt::UserRole + 2).value<rfm::core::RemoteEntry>();
+        m_fileTable->setRowHidden(row,
+                                  !show && (entry.hidden || entry.name.startsWith(QChar{'.'})));
+    }
 }
 
 void FileBrowserPane::clear()

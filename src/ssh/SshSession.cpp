@@ -2083,7 +2083,8 @@ void SshSession::openSftp()
         if (name != QStringLiteral(".") && name != QStringLiteral("..")) {
             entries.push_back({name, attributes->size, remoteModificationTime(attributes),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
-                               attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
+                               attributes->type == SSH_FILEXFER_TYPE_SYMLINK,
+                               name.startsWith(QChar{'.'})});
         }
         sftp_attributes_free(attributes);
     }
@@ -2131,7 +2132,8 @@ void SshSession::listDirectory(quint64 requestId, QString path)
              !m_impl->activeCopyJob->hidesListingEntry(path, name))) {
             entries.push_back({name, attributes->size, remoteModificationTime(attributes),
                                attributes->type == SSH_FILEXFER_TYPE_DIRECTORY,
-                               attributes->type == SSH_FILEXFER_TYPE_SYMLINK});
+                               attributes->type == SSH_FILEXFER_TYPE_SYMLINK,
+                               name.startsWith(QChar{'.'})});
         }
         sftp_attributes_free(attributes);
     }
