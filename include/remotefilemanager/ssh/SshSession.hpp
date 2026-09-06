@@ -3,8 +3,8 @@
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
-#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
@@ -23,6 +23,8 @@ class RemoteTransferBackend;
 namespace rfm::ssh
 {
 
+enum class PasswordAuthenticationReason;
+
 class SshSessionTransferTest;
 
 class SshSession final : public QObject
@@ -35,11 +37,14 @@ class SshSession final : public QObject
     // Thread-safe: ownership is moved into a private Qt event for this object's thread.
     void postVolumeAuthentication(quint64 operationId, quint64 authenticationToken,
                                   rfm::core::SecurePassword password);
+    void postPasswordAuthentication(rfm::core::SecurePassword password);
 
   public slots:
-    void connectToHost(rfm::core::ConnectionProfile profile, QString password);
+    void connectToHost(rfm::core::ConnectionProfile profile);
     void confirmUnknownHost(bool accepted);
+    void cancelPasswordAuthentication();
     void listDirectory(quint64 requestId, QString path);
+    void countDirectoryEntries(quint64 requestId, QString path);
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
     void operateVolume(rfm::core::VolumeOperationRequest request);
@@ -60,11 +65,14 @@ class SshSession final : public QObject
 
   signals:
     void hostKeyConfirmationRequired(QString host, QString fingerprint);
+    void passwordAuthenticationRequired(rfm::ssh::PasswordAuthenticationReason reason);
+    void passwordAuthenticationRejected(QString message);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
-    void remoteFilesystemsCompared(quint64 requestId,
-                                   rfm::core::RemoteFilesystemRelation relation);
+    void directoryCounted(quint64 requestId, QString path, quint64 count);
+    void directoryCountFailed(quint64 requestId, QString path);
+    void remoteFilesystemsCompared(quint64 requestId, rfm::core::RemoteFilesystemRelation relation);
     void storageVolumesListed(quint64 requestId, QList<rfm::core::StorageVolume> volumes);
     void storageMountInfoFingerprint(quint64 requestId, QByteArray fingerprint);
     void storageMountsProbed(quint64 requestId, QByteArray fingerprint);
@@ -97,6 +105,8 @@ class SshSession final : public QObject
                std::function<bool()> transferConnectionAvailable, QObject* parent);
 
     void authenticateAndOpen();
+    void authenticateWithPassword(rfm::core::SecurePassword password);
+    void openSftp();
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();

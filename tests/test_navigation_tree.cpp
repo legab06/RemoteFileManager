@@ -1,12 +1,18 @@
 #include "remotefilemanager/app/NavigationTree.hpp"
 
 #include <QDir>
+#include <QFileIconProvider>
+#include <QFileInfo>
+#include <QHeaderView>
+#include <QIcon>
 #include <QPushButton>
 #include <QSet>
 #include <QSignalSpy>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
+#include <QToolButton>
 #include <QTreeWidget>
 
 #include <utility>
@@ -17,6 +23,9 @@ class NavigationTreeTest final : public QObject
 
   private slots:
     void buildsMachinesProfilesAndMachineScopedVolumes();
+    void organizesLocalPlacesUnderHome();
+    void classifiesLocalizedMoviesPathWithoutClassifyingVideosName();
+    void showsRealRemoteHomeChildrenAndFiltersHidden();
     void loadsLocalChildrenOnlyWhenExpanded();
     void refreshesDirectoryChildrenWithoutLosingValidTreeState();
     void exposesOnlyTheActiveServerFileTree();
@@ -58,6 +67,27 @@ QTreeWidgetItem* childNamed(QTreeWidgetItem* parent, const QString& name)
         }
     }
     return nullptr;
+}
+
+QTreeWidgetItem* categoryNamed(QTreeWidget* tree, const QString& name)
+{
+    for (int index = 0; index < tree->topLevelItemCount(); ++index) {
+        QTreeWidgetItem* const item = tree->topLevelItem(index);
+        if (item->text(0) == name) {
+            return item;
+        }
+    }
+    return nullptr;
+}
+
+QTreeWidgetItem* localPlacesRoot(QTreeWidget* tree)
+{
+    return categoryNamed(tree, QStringLiteral("Local"));
+}
+
+QTreeWidgetItem* remoteCategoryItem(QTreeWidget* tree)
+{
+    return categoryNamed(tree, QStringLiteral("Distant"));
 }
 
 QTreeWidgetItem* volumeItemByDevice(QTreeWidgetItem* root, const QString& device)
@@ -121,8 +151,56 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
     rfm::app::NavigationTree navigation;
     QTreeWidget* const tree = navigation.tree();
     QCOMPARE(tree->topLevelItemCount(), 2);
-    QCOMPARE(tree->topLevelItem(0)->text(0), QStringLiteral("This Computer"));
-    QCOMPARE(tree->topLevelItem(1)->text(0), QStringLiteral("Servers"));
+    QTreeWidgetItem* const localCategory = categoryNamed(tree, QStringLiteral("Local"));
+    QTreeWidgetItem* const remoteCategory = remoteCategoryItem(tree);
+    QTreeWidgetItem* const localPlaces = localPlacesRoot(tree);
+    QVERIFY(localCategory != nullptr);
+    QVERIFY(remoteCategory != nullptr);
+    QVERIFY(localPlaces != nullptr);
+    QCOMPARE(tree->topLevelItem(0), localCategory);
+    QCOMPARE(tree->topLevelItem(1), remoteCategory);
+    QCOMPARE(localPlaces, localCategory);
+    QCOMPARE(tree->columnCount(), 2);
+    QCOMPARE(tree->header()->sectionResizeMode(0), QHeaderView::Stretch);
+    QCOMPARE(tree->header()->sectionResizeMode(1), QHeaderView::Fixed);
+    QCOMPARE(tree->iconSize(), QSize(20, 20));
+    // Vérification que la colonne 1 est bien fixe (pas ResizeToContents)
+    QVERIFY(tree->header()->sectionResizeMode(1) != QHeaderView::ResizeToContents);
+    QVERIFY(tree->itemWidget(localCategory, 1) == nullptr);
+    auto* const addServer =
+        qobject_cast<QToolButton*>(tree->itemWidget(remoteCategory, 1));
+    QVERIFY(addServer != nullptr);
+    QCOMPARE(addServer->toolTip(), QStringLiteral("New connection"));
+    QCOMPARE(addServer->accessibleName(), QStringLiteral("New connection"));
+    QSignalSpy newConnections(&navigation, &rfm::app::NavigationTree::newConnectionRequested);
+    addServer->click();
+    QCOMPARE(newConnections.size(), 1);
+    QVERIFY(!(localCategory->flags() & Qt::ItemIsSelectable));
+    QVERIFY(!(remoteCategory->flags() & Qt::ItemIsSelectable));
+    QVERIFY(!tree->rootIsDecorated());
+    QVERIFY(localCategory->isExpanded());
+    QVERIFY(remoteCategory->isExpanded());
+    QVERIFY(childNamed(localCategory, QStringLiteral("This Computer")) == nullptr);
+    QTreeWidgetItem* const home = childNamed(localPlaces, QStringLiteral("Home"));
+    QVERIFY(home != nullptr);
+    QVERIFY(home->childIndicatorPolicy() != QTreeWidgetItem::DontShowIndicator);
+    QSignalSpy localActivations(&navigation, &rfm::app::NavigationTree::localLocationActivated);
+    QSignalSpy remoteActivations(&navigation, &rfm::app::NavigationTree::remoteLocationActivated);
+    tree->setCurrentItem(localCategory);
+    QVERIFY(navigation.selectedProfileId().isEmpty());
+    navigation.activateSelectedItem();
+    QCOMPARE(localActivations.size(), 0);
+    QCOMPARE(remoteActivations.size(), 0);
+    tree->setCurrentItem(remoteCategory);
+    QVERIFY(navigation.selectedProfileId().isEmpty());
+    navigation.activateSelectedItem();
+    QCOMPARE(localActivations.size(), 0);
+    QCOMPARE(remoteActivations.size(), 0);
+    tree->setCurrentItem(home);
+    navigation.activateSelectedItem();
+    QCOMPARE(localActivations.size(), 1);
+    QCOMPARE(localActivations.constFirst().constFirst().toString(),
+             QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)));
 
     navigation.setStorageVolumes(
         {storageVolume(QStringLiteral("Fixture volume"), temporary.path(),
@@ -131,9 +209,9 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
                        rfm::core::StorageKind::External, true),
          storageVolume(QStringLiteral("Unknown fixture"), unknownTemporary.path(),
                        rfm::core::StorageKind::Unknown)});
-    QTreeWidgetItem* const volumes = childNamed(tree->topLevelItem(0), QStringLiteral("Volumes"));
+    QTreeWidgetItem* const volumes = childNamed(localPlaces, QStringLiteral("Volumes"));
     QTreeWidgetItem* const externalDevices =
-        childNamed(tree->topLevelItem(0), QStringLiteral("External devices"));
+        childNamed(localPlaces, QStringLiteral("External devices"));
     QVERIFY(volumes != nullptr);
     QVERIFY(externalDevices != nullptr);
     QCOMPARE(volumes->childCount(), 2);
@@ -142,15 +220,152 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
         regularNames.insert(volumes->child(index)->text(0));
     }
     QCOMPARE(regularNames, QSet<QString>({temporary.path(), unknownTemporary.path()}));
-    QVERIFY(volumes->parent() == tree->topLevelItem(0));
+    QVERIFY(volumes->parent() == localPlaces);
     QCOMPARE(externalDevices->childCount(), 1);
     QCOMPARE(externalDevices->child(0)->text(0), externalTemporary.path());
-    QVERIFY(externalDevices->parent() == tree->topLevelItem(0));
+    QVERIFY(externalDevices->parent() == localPlaces);
 
     navigation.setProfiles({{QStringLiteral("NAS"), QStringLiteral("nas.test"),
                              QStringLiteral("alice"), 22, QStringLiteral("nas-id")}});
-    QCOMPARE(tree->topLevelItem(1)->childCount(), 1);
-    QCOMPARE(tree->topLevelItem(1)->child(0)->text(0), QStringLiteral("NAS"));
+    QCOMPARE(remoteCategory->childCount(), 1);
+    QCOMPARE(remoteCategory->child(0)->text(0), QStringLiteral("NAS"));
+    QTreeWidgetItem* const server = remoteCategory->child(0);
+    auto* const editServer = qobject_cast<QToolButton*>(tree->itemWidget(server, 1));
+    QVERIFY(editServer != nullptr);
+    QCOMPARE(editServer->toolTip(), QStringLiteral("Edit server"));
+    QCOMPARE(editServer->accessibleName(), QStringLiteral("Edit server"));
+    QCOMPARE(editServer->property("profileId").toString(), QStringLiteral("nas-id"));
+    QSignalSpy edits(&navigation, &rfm::app::NavigationTree::editProfileRequested);
+    editServer->click();
+    QCOMPARE(edits.size(), 1);
+    QCOMPARE(edits.constFirst().constFirst().toString(), QStringLiteral("nas-id"));
+    QVERIFY(server->childIndicatorPolicy() != QTreeWidgetItem::DontShowIndicator);
+
+    navigation.resize(240, 500);
+    navigation.show();
+    QApplication::processEvents();
+    QVERIFY(tree->visualItemRect(localCategory).height() >= 30);
+    QVERIFY(tree->visualItemRect(home).height() >= 30);
+    QVERIFY(addServer->isVisibleTo(tree));
+    QVERIFY(editServer->isVisibleTo(tree));
+    QVERIFY(tree->columnWidth(1) >= editServer->sizeHint().width());
+    tree->setCurrentItem(home);
+    QTest::mouseClick(tree->viewport(), Qt::LeftButton,
+                      Qt::NoModifier, tree->visualItemRect(localCategory).center());
+    QCOMPARE(tree->currentItem(), home);
+    QTest::mouseDClick(tree->viewport(), Qt::LeftButton,
+                       Qt::NoModifier, tree->visualItemRect(localCategory).center());
+    QVERIFY(localCategory->isExpanded());
+    QVERIFY(!tree->visualItemRect(home).isEmpty());
+    QTest::mouseDClick(tree->viewport(), Qt::LeftButton,
+                       Qt::NoModifier, tree->visualItemRect(remoteCategory).center());
+    QVERIFY(remoteCategory->isExpanded());
+    QVERIFY(!tree->visualItemRect(server).isEmpty());
+
+    localCategory->setExpanded(false);
+    remoteCategory->setExpanded(false);
+    QVERIFY(localCategory->isExpanded());
+    QVERIFY(remoteCategory->isExpanded());
+}
+
+void NavigationTreeTest::organizesLocalPlacesUnderHome()
+{
+    rfm::app::NavigationTree navigation;
+    QTreeWidgetItem* const machine = localPlacesRoot(navigation.tree());
+    QTreeWidgetItem* const home = childNamed(machine, QStringLiteral("Home"));
+    QTreeWidgetItem* const volumes = childNamed(machine, QStringLiteral("Volumes"));
+    QVERIFY(home != nullptr);
+    QVERIFY(volumes != nullptr);
+    QVERIFY(!home->icon(0).isNull());
+    QVERIFY(!volumes->icon(0).isNull());
+    QVERIFY(childNamed(machine, QStringLiteral("Documents")) == nullptr);
+    QVERIFY(childNamed(machine, QStringLiteral("Downloads")) == nullptr);
+
+    const QList<QStandardPaths::StandardLocation> locations{
+        QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation,
+        QStandardPaths::DownloadLocation, QStandardPaths::MusicLocation,
+        QStandardPaths::PicturesLocation, QStandardPaths::MoviesLocation};
+    for (const auto location : locations) {
+        const QString path = QStandardPaths::writableLocation(location);
+        if (!path.isEmpty() && QFileInfo(path).isDir() && QDir::cleanPath(path) != QDir::homePath()) {
+            bool found = false;
+            for (int index = 0; index < home->childCount(); ++index) {
+                if (home->child(index)->data(0, Qt::UserRole + 1).toString() ==
+                    QDir::cleanPath(path)) {
+                    QVERIFY(!home->child(index)->icon(0).isNull());
+                    found = true;
+                }
+            }
+            QVERIFY(found);
+        }
+    }
+
+    QSignalSpy expansion(&navigation, &rfm::app::NavigationTree::localDirectoryExpansionRequested);
+    home->setExpanded(true);
+    QCOMPARE(expansion.size(), 1);
+    QCOMPARE(expansion.constFirst().constFirst().toString(),
+             QDir::cleanPath(QStandardPaths::writableLocation(QStandardPaths::HomeLocation)));
+}
+
+void NavigationTreeTest::classifiesLocalizedMoviesPathWithoutClassifyingVideosName()
+{
+    const QString homePath = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+    const QString moviesPath = QStandardPaths::writableLocation(QStandardPaths::MoviesLocation);
+    const QFileInfo homeInfo(homePath);
+    const QFileInfo moviesInfo(moviesPath);
+    if (homePath.isEmpty() || !homeInfo.isDir() || moviesPath.isEmpty() || !moviesInfo.isDir() ||
+        moviesInfo.dir().canonicalPath() != homeInfo.canonicalFilePath() ||
+        moviesInfo.fileName().toCaseFolded() == QStringLiteral("videos")) {
+        QSKIP("MoviesLocation is not a localized direct child of Home on this platform");
+    }
+
+    rfm::app::NavigationTree navigation;
+    navigation.setLocalDirectory(
+        homePath, {{moviesInfo.fileName(), 0, {}, true, false, false},
+                   {QStringLiteral("videos"), 0, {}, true, false, false}});
+    QTreeWidgetItem* const home =
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("Home"));
+    QVERIFY(home != nullptr);
+    QTreeWidgetItem* const movies = childNamed(home, moviesInfo.fileName());
+    QTreeWidgetItem* const genericVideos = childNamed(home, QStringLiteral("videos"));
+    QVERIFY(movies != nullptr);
+    QVERIFY(genericVideos != nullptr);
+
+    QFileIconProvider provider;
+    const QIcon folder = provider.icon(QFileIconProvider::Folder);
+    const QImage expectedMovies = QIcon::fromTheme(QStringLiteral("folder-videos"), folder)
+                                      .pixmap(16, 16)
+                                      .toImage();
+    const QImage expectedFolder = QIcon::fromTheme(QStringLiteral("folder"), folder)
+                                      .pixmap(16, 16)
+                                      .toImage();
+    QCOMPARE(movies->icon(0).pixmap(16, 16).toImage(), expectedMovies);
+    QCOMPARE(genericVideos->icon(0).pixmap(16, 16).toImage(), expectedFolder);
+}
+
+void NavigationTreeTest::showsRealRemoteHomeChildrenAndFiltersHidden()
+{
+    rfm::app::NavigationTree navigation;
+    navigation.setActiveServer(remoteMachine(QStringLiteral("remote-id")),
+                               QStringLiteral("/home/alice"));
+    QTreeWidgetItem* const server = remoteCategoryItem(navigation.tree())->child(0);
+    QTreeWidgetItem* const home = childNamed(server, QStringLiteral("Home"));
+    QVERIFY(home != nullptr);
+    QVERIFY(childNamed(server, QStringLiteral("/")) != nullptr);
+    QVERIFY(childNamed(server, QStringLiteral("Volumes")) != nullptr);
+
+    navigation.setRemoteDirectory(
+        QStringLiteral("remote-id"), QStringLiteral("/home/alice"),
+        {{QStringLiteral("Documents"), 0, {}, true, false, false},
+         {QStringLiteral(".ssh"), 0, {}, true, false, true},
+         {QStringLiteral("ordinary"), 0, {}, true, false, false}});
+    QCOMPARE(home->childCount(), 3);
+    QVERIFY(!childNamed(home, QStringLiteral("Documents"))->icon(0).isNull());
+    QVERIFY(childNamed(home, QStringLiteral(".ssh"))->isHidden());
+    navigation.setShowHiddenFiles(true);
+    QVERIFY(!childNamed(home, QStringLiteral(".ssh"))->isHidden());
+    navigation.setShowHiddenFiles(false);
+    QVERIFY(childNamed(home, QStringLiteral(".ssh"))->isHidden());
 }
 
 void NavigationTreeTest::loadsLocalChildrenOnlyWhenExpanded()
@@ -161,7 +376,7 @@ void NavigationTreeTest::loadsLocalChildrenOnlyWhenExpanded()
     navigation.setStorageVolumes({storageVolume(QStringLiteral("Fixture"), temporary.path(),
                                                 rfm::core::StorageKind::Internal)});
     QTreeWidgetItem* const volumes =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("Volumes"));
     QVERIFY(volumes != nullptr);
     QTreeWidgetItem* const fixture = volumes->child(0);
     QVERIFY(!navigation.hasLoadedLocalDirectory(temporary.path()));
@@ -196,7 +411,7 @@ void NavigationTreeTest::refreshesDirectoryChildrenWithoutLosingValidTreeState()
     navigation.setStorageVolumes({storageVolume(QStringLiteral("Fixture"), temporary.path(),
                                                 rfm::core::StorageKind::Internal)});
     QTreeWidgetItem* const volumes =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("Volumes"));
     QVERIFY(volumes != nullptr);
     QTreeWidgetItem* const fixture = volumes->child(0);
     fixture->setExpanded(true);
@@ -235,10 +450,12 @@ void NavigationTreeTest::exposesOnlyTheActiveServerFileTree()
     navigation.setActiveServer(remoteMachine(QStringLiteral("active-id"), QStringLiteral("Active"),
                                              QStringLiteral("active.test")),
                                QStringLiteral("/home/alice"));
-    QTreeWidgetItem* const servers = navigation.tree()->topLevelItem(1);
+    QTreeWidgetItem* const servers = remoteCategoryItem(navigation.tree());
     QCOMPARE(servers->childCount(), 2);
     QVERIFY(servers->child(0)->text(0).contains(QStringLiteral("Connected")));
     QVERIFY(servers->child(0)->childCount() >= 1);
+    QVERIFY(qobject_cast<QToolButton*>(navigation.tree()->itemWidget(servers->child(0), 1)) !=
+            nullptr);
     QCOMPARE(servers->child(1)->childCount(), 0);
 
     QSignalSpy expansion(&navigation, &rfm::app::NavigationTree::remoteDirectoryExpansionRequested);
@@ -280,11 +497,11 @@ void NavigationTreeTest::omitsEmptyExternalDevicesCategory()
     rfm::app::NavigationTree navigation;
     navigation.setStorageVolumes({storageVolume(
         QStringLiteral("Temporary external"), temporary.path(), rfm::core::StorageKind::External)});
-    QVERIFY(childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices")) !=
+    QVERIFY(childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices")) !=
             nullptr);
     navigation.setStorageVolumes({storageVolume(QStringLiteral("Internal"), temporary.path(),
                                                 rfm::core::StorageKind::Internal)});
-    QVERIFY(childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices")) ==
+    QVERIFY(childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices")) ==
             nullptr);
 }
 
@@ -297,7 +514,7 @@ void NavigationTreeTest::deduplicatesAndNavigatesExternalDevice()
                                                 temporary.path(), rfm::core::StorageKind::Internal),
                                   storageVolume(QStringLiteral("USB SSD"), temporary.path(),
                                                 rfm::core::StorageKind::External, false)});
-    QTreeWidgetItem* const machine = navigation.tree()->topLevelItem(0);
+    QTreeWidgetItem* const machine = localPlacesRoot(navigation.tree());
     QTreeWidgetItem* const volumes = childNamed(machine, QStringLiteral("Volumes"));
     QTreeWidgetItem* const externalDevices =
         childNamed(machine, QStringLiteral("External devices"));
@@ -349,8 +566,8 @@ void NavigationTreeTest::exposesContextActionsForItemUnderCursor()
     navigation.show();
     QApplication::processEvents();
 
-    QTreeWidgetItem* const machine = navigation.tree()->topLevelItem(0);
-    QTreeWidgetItem* const servers = navigation.tree()->topLevelItem(1);
+    QTreeWidgetItem* const machine = localPlacesRoot(navigation.tree());
+    QTreeWidgetItem* const servers = remoteCategoryItem(navigation.tree());
     QTreeWidgetItem* const offline = servers->child(0);
     QTreeWidgetItem* const online = servers->child(1);
     QTreeWidgetItem* const localFolder = machine->child(0);
@@ -363,9 +580,11 @@ void NavigationTreeTest::exposesContextActionsForItemUnderCursor()
 
     navigation.tree()->setCurrentItem(online);
     QCOMPARE(contextActionsFor(navigation, offline),
-             QList<ContextAction>({ContextAction::Connect, ContextAction::Properties}));
+             QList<ContextAction>({ContextAction::Connect, ContextAction::Properties,
+                                   ContextAction::RemoveServer}));
     QCOMPARE(contextActionsFor(navigation, online),
-             QList<ContextAction>({ContextAction::Disconnect, ContextAction::Properties}));
+             QList<ContextAction>({ContextAction::Disconnect, ContextAction::Properties,
+                                   ContextAction::RemoveServer}));
     QCOMPARE(contextActionsFor(navigation, localFolder),
              QList<ContextAction>({ContextAction::Open, ContextAction::Properties}));
     QCOMPARE(contextActionsFor(navigation, remoteFolder),
@@ -376,10 +595,13 @@ void NavigationTreeTest::exposesContextActionsForItemUnderCursor()
     QCOMPARE(contextActionsFor(navigation, availableItem),
              QList<ContextAction>({ContextAction::Mount, ContextAction::Properties}));
 
+    QCOMPARE(contextActionsFor(navigation, categoryNamed(navigation.tree(), QStringLiteral("Local"))),
+             QList<ContextAction>{});
     QCOMPARE(contextActionsFor(navigation, machine), QList<ContextAction>{});
     QCOMPARE(contextActionsFor(navigation, servers), QList<ContextAction>{});
     QCOMPARE(contextActionsFor(navigation, childNamed(machine, QStringLiteral("Volumes"))),
              QList<ContextAction>{});
+    QVERIFY(navigation.tree()->itemWidget(remoteFolder, 1) == nullptr);
     QCOMPARE(navigation.tree()->currentItem(), online);
 }
 
@@ -404,7 +626,7 @@ void NavigationTreeTest::deduplicatesLocalBlockAliasesByDeviceNumber()
 
     navigation.setStorageVolumes({mounted, alias, distinct});
 
-    QTreeWidgetItem* const machine = navigation.tree()->topLevelItem(0);
+    QTreeWidgetItem* const machine = localPlacesRoot(navigation.tree());
     QCOMPARE(volumeItemsByDevice(machine, mounted.device).size(), 1);
     QCOMPARE(volumeItemsByDevice(machine, alias.device).size(), 0);
     QCOMPARE(volumeItemsByDevice(machine, distinct.device).size(), 1);
@@ -424,8 +646,8 @@ void NavigationTreeTest::refreshesRemoteStorageWithoutMixingMachines()
          storageVolume(QStringLiteral("Remote USB"), QStringLiteral("/media/usb"),
                        rfm::core::StorageKind::External)});
 
-    QTreeWidgetItem* const localMachine = navigation.tree()->topLevelItem(0);
-    QTreeWidgetItem* const remoteMachine = navigation.tree()->topLevelItem(1)->child(0);
+    QTreeWidgetItem* const localMachine = localPlacesRoot(navigation.tree());
+    QTreeWidgetItem* const remoteMachine = remoteCategoryItem(navigation.tree())->child(0);
     QCOMPARE(childNamed(localMachine, QStringLiteral("Volumes"))->childCount(), 0);
     QCOMPARE(childNamed(remoteMachine, QStringLiteral("Volumes"))->childCount(), 1);
     QCOMPARE(childNamed(remoteMachine, QStringLiteral("External devices"))->childCount(), 1);
@@ -434,7 +656,7 @@ void NavigationTreeTest::refreshesRemoteStorageWithoutMixingMachines()
         QStringLiteral("remote-id"),
         {storageVolume(QStringLiteral("Replacement"), QStringLiteral("/data"),
                        rfm::core::StorageKind::Internal)});
-    QTreeWidgetItem* const refreshedRemote = navigation.tree()->topLevelItem(1)->child(0);
+    QTreeWidgetItem* const refreshedRemote = remoteCategoryItem(navigation.tree())->child(0);
     QTreeWidgetItem* const volumes = childNamed(refreshedRemote, QStringLiteral("Volumes"));
     QVERIFY(volumes != nullptr);
     QCOMPARE(volumes->childCount(), 1);
@@ -470,7 +692,7 @@ void NavigationTreeTest::preservesRemoteMountpointsForOneDevice()
     rfm::core::StorageVolume duplicate = first;
 
     navigation.setRemoteStorageVolumes(QStringLiteral("remote-id"), {first, second, duplicate});
-    QTreeWidgetItem* const server = navigation.tree()->topLevelItem(1)->child(0);
+    QTreeWidgetItem* const server = remoteCategoryItem(navigation.tree())->child(0);
     QList<QTreeWidgetItem*> items = volumeItemsByDevice(server, first.device);
     QCOMPARE(items.size(), 2);
     QSet<QString> paths;
@@ -541,7 +763,7 @@ void NavigationTreeTest::exposesRemoteVolumeActionsInTheActiveServerNamespace()
     auto* const openButton = navigation.findChild<QPushButton*>(QStringLiteral("openVolumeButton"));
     auto* const unmountButton =
         navigation.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"));
-    QTreeWidgetItem* const server = navigation.tree()->topLevelItem(1)->child(0);
+    QTreeWidgetItem* const server = remoteCategoryItem(navigation.tree())->child(0);
     QTreeWidgetItem* const external = childNamed(server, QStringLiteral("External devices"));
     QTreeWidgetItem* const volumes = childNamed(server, QStringLiteral("Volumes"));
     QVERIFY(external != nullptr);
@@ -596,7 +818,7 @@ void NavigationTreeTest::showsHumanMetadataAndRefreshesWithoutChangingNavigation
                                                        volume.device, volume.rootPath);
     navigation.setStorageVolumes({volume});
 
-    QTreeWidgetItem* const machine = navigation.tree()->topLevelItem(0);
+    QTreeWidgetItem* const machine = localPlacesRoot(navigation.tree());
     QTreeWidgetItem* externalDevices = childNamed(machine, QStringLiteral("External devices"));
     QVERIFY(externalDevices != nullptr);
     QCOMPARE(externalDevices->childCount(), 1);
@@ -652,7 +874,7 @@ void NavigationTreeTest::preservesLoadedTreeStateDuringStorageRefresh()
         QStringLiteral("Local volume"), localMount.path(), rfm::core::StorageKind::Internal);
     navigation.setStorageVolumes({local});
     QTreeWidgetItem* const localVolumes =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("Volumes"));
     QTreeWidgetItem* const localItem = localVolumes->child(0);
     localItem->setExpanded(true);
     navigation.setLocalDirectory(localMount.path(), {{QStringLiteral("kept"), 0, {}, true, false}});
@@ -669,7 +891,7 @@ void NavigationTreeTest::preservesLoadedTreeStateDuringStorageRefresh()
                              QStringLiteral("alice"), 22, QStringLiteral("remote-id")}});
     navigation.setActiveServer(remoteMachine(QStringLiteral("remote-id")),
                                QStringLiteral("/home/alice"));
-    QTreeWidgetItem* const server = navigation.tree()->topLevelItem(1)->child(0);
+    QTreeWidgetItem* const server = remoteCategoryItem(navigation.tree())->child(0);
     QTreeWidgetItem* const home = childNamed(server, QStringLiteral("Home"));
     home->setExpanded(true);
     navigation.setRemoteDirectory(QStringLiteral("remote-id"), QStringLiteral("/home/alice"),
@@ -679,7 +901,7 @@ void NavigationTreeTest::preservesLoadedTreeStateDuringStorageRefresh()
     navigation.setRemoteStorageVolumes(
         QStringLiteral("remote-id"), {storageVolume(QStringLiteral("Data"), QStringLiteral("/data"),
                                                     rfm::core::StorageKind::Internal)});
-    QCOMPARE(navigation.tree()->topLevelItem(1)->child(0), server);
+    QCOMPARE(remoteCategoryItem(navigation.tree())->child(0), server);
     QVERIFY(home->isExpanded());
     QCOMPARE(home->child(0), remoteChild);
     QCOMPARE(navigation.tree()->currentItem(), remoteChild);
@@ -702,7 +924,7 @@ void NavigationTreeTest::escapesTooltipMetadataAndDisambiguatesLabels()
     navigation.setStorageVolumes({firstVolume, secondVolume});
 
     QTreeWidgetItem* const external =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     QCOMPARE(external->childCount(), 2);
     QCOMPARE(external->child(0)->text(0), first.path());
     QCOMPARE(external->child(1)->text(0), second.path());
@@ -744,7 +966,7 @@ void NavigationTreeTest::exposesOnlyAppropriateLocalVolumeActions()
     available.mounted = false;
     navigation.setStorageVolumes({available});
     QTreeWidgetItem* const external =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));
     QVERIFY(mountButton->isVisibleTo(&navigation));
     QVERIFY(mountButton->isEnabled());
@@ -758,7 +980,7 @@ void NavigationTreeTest::exposesOnlyAppropriateLocalVolumeActions()
     mounted.mounted = true;
     navigation.setStorageVolumes({mounted});
     QTreeWidgetItem* mountedItem =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"))
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"))
             ->child(0);
     navigation.tree()->setCurrentItem(mountedItem);
     QVERIFY(!mountButton->isVisibleTo(&navigation));
@@ -772,7 +994,7 @@ void NavigationTreeTest::exposesOnlyAppropriateLocalVolumeActions()
     mounted.kind = rfm::core::StorageKind::System;
     navigation.setStorageVolumes({mounted});
     mountedItem =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("Volumes"))->child(0);
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("Volumes"))->child(0);
     navigation.tree()->setCurrentItem(mountedItem);
     QVERIFY(openButton->isVisibleTo(&navigation));
     QVERIFY(!unmountButton->isVisibleTo(&navigation));
@@ -795,7 +1017,7 @@ void NavigationTreeTest::showsPerVolumeBusyStates()
     volume.mounted = false;
     navigation.setStorageVolumes({volume});
     QTreeWidgetItem* external =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));
     navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Mount);
     QVERIFY(external->child(0)->text(0).contains(QStringLiteral("Mounting")));
@@ -805,7 +1027,7 @@ void NavigationTreeTest::showsPerVolumeBusyStates()
     volume.rootPath = mountedPath.path();
     volume.mounted = true;
     navigation.setStorageVolumes({volume});
-    external = childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    external = childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));
     navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Unmount);
     QVERIFY(external->child(0)->text(0).contains(QStringLiteral("Unmounting")));
@@ -827,7 +1049,7 @@ void NavigationTreeTest::opensVolumeOnlyFromRefreshedMountPoint()
     volume.mounted = false;
     navigation.setStorageVolumes({volume});
     QTreeWidgetItem* external =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));
 
     QSignalSpy opened(&navigation, &rfm::app::NavigationTree::localLocationActivated);
@@ -842,7 +1064,7 @@ void NavigationTreeTest::opensVolumeOnlyFromRefreshedMountPoint()
     volume.mounted = true;
     navigation.setLocalVolumeOperation(volume.device, std::nullopt);
     navigation.setStorageVolumes({volume});
-    external = childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+    external = childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));
     openButton->click();
     QCOMPARE(opened.size(), 1);
@@ -859,14 +1081,14 @@ void NavigationTreeTest::toleratesVolumeDisappearingDuringOperation()
     volume.mounted = false;
     navigation.setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));
     navigation.setLocalVolumeOperation(volume.device, rfm::core::VolumeOperation::Mount);
 
     navigation.setStorageVolumes({});
     navigation.setLocalVolumeOperation(volume.device, std::nullopt);
 
-    QVERIFY(childNamed(navigation.tree()->topLevelItem(0), QStringLiteral("External devices")) ==
+    QVERIFY(childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices")) ==
             nullptr);
     QVERIFY(!navigation.selectedLocalStorageVolume().has_value());
 }

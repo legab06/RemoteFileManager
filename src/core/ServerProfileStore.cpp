@@ -21,14 +21,47 @@ namespace
 
 constexpr qint64 maximumFileSize = 1024 * 1024;
 
+QString authenticationModeValue(AuthenticationMode mode)
+{
+    return mode == AuthenticationMode::PasswordOnly ? QStringLiteral("passwordOnly")
+                                                    : QStringLiteral("keyOrAgent");
+}
+
+std::optional<AuthenticationMode> authenticationModeFromValue(const QJsonValue& value)
+{
+    if (value.isUndefined()) {
+        return AuthenticationMode::KeyOrAgent;
+    }
+    if (!value.isString()) {
+        return std::nullopt;
+    }
+    if (value.toString() == QStringLiteral("passwordOnly")) {
+        return AuthenticationMode::PasswordOnly;
+    }
+    if (value.toString() == QStringLiteral("keyOrAgent")) {
+        return AuthenticationMode::KeyOrAgent;
+    }
+    return std::nullopt;
+}
+
 QJsonObject serialize(const ConnectionProfile& profile)
 {
-    return {{QStringLiteral("id"), profile.id.trimmed()},
-            {QStringLiteral("name"), profile.displayName.trimmed()},
-            {QStringLiteral("host"), profile.host.trimmed()},
-            {QStringLiteral("username"), profile.username.trimmed()},
-            {QStringLiteral("port"), static_cast<int>(profile.port)},
-            {QStringLiteral("allowPasswordFallback"), profile.allowPasswordFallback}};
+    const bool keyOrAgent = profile.authenticationMode == AuthenticationMode::KeyOrAgent;
+    QJsonObject object{{QStringLiteral("id"), profile.id.trimmed()},
+                       {QStringLiteral("name"), profile.displayName.trimmed()},
+                       {QStringLiteral("host"), profile.host.trimmed()},
+                       {QStringLiteral("username"), profile.username.trimmed()},
+                       {QStringLiteral("port"), static_cast<int>(profile.port)},
+                       {QStringLiteral("allowPasswordFallback"),
+                        keyOrAgent && profile.allowPasswordAuthentication}};
+    if (keyOrAgent && !profile.privateKeyPath.trimmed().isEmpty()) {
+        object.insert(QStringLiteral("privateKeyPath"), profile.privateKeyPath.trimmed());
+    }
+    if (profile.authenticationMode == AuthenticationMode::PasswordOnly) {
+        object.insert(QStringLiteral("authenticationMode"),
+                      authenticationModeValue(profile.authenticationMode));
+    }
+    return object;
 }
 
 std::optional<ConnectionProfile> deserialize(const QJsonValue& value)
@@ -38,8 +71,12 @@ std::optional<ConnectionProfile> deserialize(const QJsonValue& value)
     }
     const QJsonObject object = value.toObject();
     const QJsonValue portValue = object.value(QStringLiteral("port"));
-    const QJsonValue fallbackValue = object.value(QStringLiteral("allowPasswordFallback"));
-    if (!portValue.isDouble() || !fallbackValue.isBool()) {
+    QJsonValue passwordAuthenticationValue =
+        object.value(QStringLiteral("allowPasswordAuthentication"));
+    if (passwordAuthenticationValue.isUndefined()) {
+        passwordAuthenticationValue = object.value(QStringLiteral("allowPasswordFallback"));
+    }
+    if (!portValue.isDouble() || !passwordAuthenticationValue.isBool()) {
         return std::nullopt;
     }
     const int port = portValue.toInt(0);
@@ -53,7 +90,19 @@ std::optional<ConnectionProfile> deserialize(const QJsonValue& value)
     profile.host = object.value(QStringLiteral("host")).toString().trimmed();
     profile.username = object.value(QStringLiteral("username")).toString().trimmed();
     profile.port = static_cast<quint16>(port);
-    profile.allowPasswordFallback = fallbackValue.toBool();
+    const auto authenticationMode =
+        authenticationModeFromValue(object.value(QStringLiteral("authenticationMode")));
+    if (!authenticationMode.has_value()) {
+        return std::nullopt;
+    }
+    profile.authenticationMode = *authenticationMode;
+    profile.allowPasswordAuthentication =
+        profile.authenticationMode == AuthenticationMode::KeyOrAgent &&
+        passwordAuthenticationValue.toBool();
+    profile.privateKeyPath =
+        profile.authenticationMode == AuthenticationMode::KeyOrAgent
+            ? object.value(QStringLiteral("privateKeyPath")).toString().trimmed()
+            : QString{};
     return profile.isValidSavedProfile() ? std::optional{profile} : std::nullopt;
 }
 
@@ -70,8 +119,7 @@ ServerProfileStore::ServerProfileStore(QString storageDirectory)
     : m_storageDirectory(storageDirectory.isEmpty()
                              ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
                              : std::move(storageDirectory))
-{
-}
+{}
 
 QString ServerProfileStore::filePath() const
 {
@@ -140,9 +188,8 @@ bool ServerProfileStore::save(const QList<ConnectionProfile>& profiles, QString*
         return false;
     }
 
-    const QJsonDocument document(
-        QJsonObject{{QStringLiteral("version"), formatVersion},
-                    {QStringLiteral("servers"), serialized}});
+    const QJsonDocument document(QJsonObject{{QStringLiteral("version"), formatVersion},
+                                             {QStringLiteral("servers"), serialized}});
     const QByteArray contents = document.toJson(QJsonDocument::Indented);
     QSaveFile file(filePath());
     if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() ||
@@ -193,9 +240,8 @@ bool ServerProfileStore::remove(const QString& id, QString* error) const
         return false;
     }
     const qsizetype originalSize = profiles.size();
-    profiles.removeIf([&normalizedId](const ConnectionProfile& profile) {
-        return profile.id == normalizedId;
-    });
+    profiles.removeIf(
+        [&normalizedId](const ConnectionProfile& profile) { return profile.id == normalizedId; });
     if (profiles.size() == originalSize) {
         setError(error, QStringLiteral("The server profile was not found."));
         return false;

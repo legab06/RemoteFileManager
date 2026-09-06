@@ -7,7 +7,6 @@
 #include <QWidget>
 
 class QTableWidget;
-class QPushButton;
 
 namespace rfm::app
 {
@@ -34,12 +33,12 @@ class OperationPanel final : public QWidget
     void cancelRequested(quint64 id);
     void removeTerminalRequested(quint64 id);
     void clearTerminalRequested();
+    void terminalOperationsAvailableChanged(bool available);
 
   private:
     [[nodiscard]] static QString stateText(rfm::core::OperationState state);
     [[nodiscard]] QList<quint64> orderedOperationIds() const;
     [[nodiscard]] QList<quint64> currentOperationIds() const;
-    [[nodiscard]] quint64 selectedOperationId() const;
     bool storeOperation(rfm::core::OperationProgress progress);
     void rebuildRows(const QList<quint64>& operationIds);
     void rebuildRowMappings();
@@ -47,8 +46,6 @@ class OperationPanel final : public QWidget
     void updateHistoryActions();
 
     QTableWidget* m_table{nullptr};
-    QPushButton* m_removeButton{nullptr};
-    QPushButton* m_clearButton{nullptr};
     QHash<quint64, int> m_rows;
     QHash<quint64, rfm::core::OperationProgress> m_progress;
     QHash<quint64, quint64> m_admissionOrder;

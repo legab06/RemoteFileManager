@@ -7,11 +7,12 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
-#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
+#include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 #include "remotefilemanager/core/VolumeService.hpp"
+#include "remotefilemanager/ssh/SshAuthenticationPolicy.hpp"
 
 #include <QHash>
 #include <QList>
@@ -52,6 +53,7 @@ namespace rfm::app
 class PaneWorkspace;
 class OperationPanel;
 class ConnectionDialog;
+class PasswordAuthenticationDialog;
 class HomePage;
 class NavigationTree;
 class VolumeAuthenticationDialog;
@@ -68,10 +70,13 @@ class MainWindow final : public QMainWindow
     ~MainWindow() override;
 
   signals:
-    void connectionRequested(rfm::core::ConnectionProfile profile, QString password);
+    void connectionRequested(rfm::core::ConnectionProfile profile);
+    void passwordAuthenticationCancelled();
     void hostKeyDecision(bool accepted);
     void directoryRequested(quint64 requestId, QString path);
     void localDirectoryRequested(quint64 requestId, QString path);
+    void remoteDirectoryCountRequested(quint64 requestId, QString path);
+    void localDirectoryCountRequested(quint64 requestId, QString path);
     void localFileOperationRequested(rfm::core::LocalFileOperationRequest request);
     void localVolumesRequested();
     void localStorageProbeRequested(quint64 requestId);
@@ -81,7 +86,7 @@ class MainWindow final : public QMainWindow
     void remoteStorageRequested(quint64 requestId);
     void remoteStorageProbeRequested(quint64 requestId);
     void remoteFilesystemRelationRequested(quint64 requestId, QString sourceDirectory,
-                                            QString destinationDirectory);
+                                           QString destinationDirectory);
     void createDirectoryRequested(quint64 id, QString parent, QString name);
     void renameRequested(quint64 id, QString source, QString newName);
     void moveRequested(quint64 id, QList<rfm::core::RemoteSelection> sources,
@@ -108,8 +113,13 @@ class MainWindow final : public QMainWindow
     void createOperationDock();
     void createCentralPages();
     void showConnectionDialog();
-    void showConnectionDialogForProfile(const rfm::core::ConnectionProfile& profile);
-    void beginConnection(const rfm::core::ConnectionProfile& profile, const QString& password);
+    void beginConnection(const rfm::core::ConnectionProfile& profile);
+    Q_INVOKABLE void showPasswordAuthentication();
+    Q_INVOKABLE void
+    showPasswordAuthenticationForReason(rfm::ssh::PasswordAuthenticationReason reason);
+    Q_INVOKABLE void showPasswordAuthenticationError(const QString& message);
+    void submitPasswordAuthentication();
+    void cancelPasswordAuthentication();
     [[nodiscard]] QString saveConnectedProfileIfRequested();
     Q_INVOKABLE void handleConnected(const QString& path,
                                      const QList<rfm::core::RemoteEntry>& entries);
@@ -121,12 +131,15 @@ class MainWindow final : public QMainWindow
                                            const QList<rfm::core::RemoteEntry>& entries);
     Q_INVOKABLE void handleDirectoryListingError(quint64 requestId, const QString& path,
                                                  const QString& error);
+    void requestDirectoryItemCount(quint64 paneId, const rfm::core::BrowserLocation& location,
+                                   quint64 generation, const QString& name);
+    Q_INVOKABLE void handleDirectoryCounted(quint64 requestId, const QString& path, quint64 count);
+    Q_INVOKABLE void handleDirectoryCountFailed(quint64 requestId, const QString& path);
     Q_INVOKABLE void showConnectionError(const QString& message);
     void loadServerProfiles();
     void refreshServerProfileViews();
-    void updateSelectedServerAction();
-    void addServerProfile();
     void editSelectedServerProfile();
+    void editServerProfile(const QString& id);
     void removeSelectedServerProfile();
     void connectToSelectedServerProfile();
     void connectToServerProfile(const QString& id);
@@ -156,8 +169,8 @@ class MainWindow final : public QMainWindow
                                         rfm::core::InternalTransferAction action,
                                         quint64 destinationPaneId, QString destinationDirectory,
                                         bool actionWasExplicitlyRequested);
-    Q_INVOKABLE void handleRemoteFilesystemRelation(
-        quint64 requestId, rfm::core::RemoteFilesystemRelation relation);
+    Q_INVOKABLE void handleRemoteFilesystemRelation(quint64 requestId,
+                                                    rfm::core::RemoteFilesystemRelation relation);
     void removeSelectedEntries();
     void chooseUploads();
     void chooseDownloadDirectory();
@@ -291,6 +304,8 @@ class MainWindow final : public QMainWindow
     QAction* m_uploadAction{nullptr};
     QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_resetFileViewAction{nullptr};
+    QAction* m_showHiddenFilesAction{nullptr};
     QAction* m_placesDockAction{nullptr};
     QAction* m_operationDockAction{nullptr};
     QAction* m_clipboardCopyAction{nullptr};
@@ -306,7 +321,6 @@ class MainWindow final : public QMainWindow
     OperationPanel* m_operationPanel{nullptr};
     NavigationTree* m_navigationTree{nullptr};
     QLabel* m_serverProfileErrorLabel{nullptr};
-    QPushButton* m_connectServerProfileButton{nullptr};
     QTimer* m_autoRefreshTimer{nullptr};
     QTimer* m_refreshDebounceTimer{nullptr};
     QTimer* m_historySaveTimer{nullptr};
@@ -336,6 +350,14 @@ class MainWindow final : public QMainWindow
     QHash<quint64, DirectoryRequest> m_directoryRequests;
     QQueue<quint64> m_directoryQueue;
     QHash<quint64, quint64> m_expectedDirectoryRequests;
+    struct DirectoryCountRequest {
+        quint64 paneId{0};
+        rfm::core::BrowserLocation location;
+        quint64 generation{0};
+        QString name;
+        QString path;
+    };
+    QHash<quint64, DirectoryCountRequest> m_directoryCountRequests;
     struct PendingRemoteFilesystemPreflight {
         rfm::core::InternalTransferPayload payload;
         quint64 destinationPaneId{0};
@@ -394,6 +416,7 @@ class MainWindow final : public QMainWindow
     std::unique_ptr<rfm::core::ServerProfileStore> m_serverProfileStore;
     QList<rfm::core::ConnectionProfile> m_serverProfiles;
     QPointer<ConnectionDialog> m_connectionDialog;
+    QPointer<PasswordAuthenticationDialog> m_passwordAuthenticationDialog;
     QString m_applicationInstanceId;
     QString m_activeRemoteMachineId;
     QString m_remoteInitialPath;
@@ -412,6 +435,7 @@ class MainWindow final : public QMainWindow
     QList<rfm::core::StorageVolume> m_localStorageVolumes;
     QList<rfm::core::StorageVolume> m_remoteStorageVolumes;
     bool m_connected{false};
+    bool m_connecting{false};
     bool m_connectionErrorNotificationActive{false};
     bool m_busy{false};
     bool m_localStorageRefreshPending{false};

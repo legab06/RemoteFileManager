@@ -119,6 +119,13 @@ void PaneWorkspace::activateOtherPane()
     otherPane->fileTable()->setFocus(Qt::ShortcutFocusReason);
 }
 
+void PaneWorkspace::resetFileView()
+{
+    if (m_primaryPane != nullptr) {
+        m_primaryPane->resetFileView();
+    }
+}
+
 FileBrowserPane* PaneWorkspace::createPane(PaneId id)
 {
     auto* const pane = new FileBrowserPane(m_splitter);

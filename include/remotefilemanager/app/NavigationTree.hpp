@@ -44,8 +44,8 @@ class NavigationTree final : public QWidget
 
   public:
     enum class NodeKind {
-        LocalMachine,
-        Servers,
+        LocalCategory,
+        RemoteCategory,
         LocalLocation,
         LocalVolume,
         LocalDirectory,
@@ -56,7 +56,15 @@ class NavigationTree final : public QWidget
         Placeholder
     };
 
-    enum class ContextAction { Connect, Disconnect, Open, Mount, Unmount, Properties };
+    enum class ContextAction {
+        Connect,
+        Disconnect,
+        RemoveServer,
+        Open,
+        Mount,
+        Unmount,
+        Properties
+    };
 
     explicit NavigationTree(QWidget* parent = nullptr);
 
@@ -83,6 +91,7 @@ class NavigationTree final : public QWidget
     void setLocalDirectory(const QString& path, const QList<rfm::core::RemoteEntry>& entries);
     void setRemoteDirectory(const QString& profileId, const QString& path,
                             const QList<rfm::core::RemoteEntry>& entries);
+    void setShowHiddenFiles(bool show);
     void setDirectoryError(bool local, const QString& profileId, const QString& path,
                            const QString& error);
     void setLocalVolumeOperation(const QString& device,
@@ -91,6 +100,8 @@ class NavigationTree final : public QWidget
                             std::optional<rfm::core::VolumeOperation> operation);
 
   signals:
+    void newConnectionRequested();
+    void editProfileRequested(QString id);
     void localLocationActivated(QString path);
     void remoteLocationActivated(QString profileId, QString path);
     void localDirectoryExpansionRequested(QString path);
@@ -111,8 +122,9 @@ class NavigationTree final : public QWidget
     static constexpr int VolumeRole = Qt::UserRole + 6;
     static constexpr int StorageIdentityRole = Qt::UserRole + 7;
     static constexpr int BaseTextRole = Qt::UserRole + 8;
+    static constexpr int HiddenRole = Qt::UserRole + 9;
 
-    void buildLocalMachine();
+    void buildLocalPlaces();
     void rebuildServers();
     void activateItem(QTreeWidgetItem* item);
     void expandItem(QTreeWidgetItem* item);
@@ -142,16 +154,17 @@ class NavigationTree final : public QWidget
     QPushButton* m_mountVolumeButton{nullptr};
     QPushButton* m_openVolumeButton{nullptr};
     QPushButton* m_unmountVolumeButton{nullptr};
-    QTreeWidgetItem* m_localMachineItem{nullptr};
+    QTreeWidgetItem* m_localCategoryItem{nullptr};
     QTreeWidgetItem* m_volumesItem{nullptr};
     QTreeWidgetItem* m_externalDevicesItem{nullptr};
-    QTreeWidgetItem* m_serversItem{nullptr};
+    QTreeWidgetItem* m_remoteCategoryItem{nullptr};
     QList<rfm::core::ConnectionProfile> m_profiles;
     QList<rfm::core::StorageVolume> m_remoteStorageVolumes;
     QHash<QString, rfm::core::VolumeOperation> m_volumeOperations;
     QString m_remoteStorageProfileId;
     RemoteMachineDescriptor m_activeMachine;
     QString m_activeInitialPath;
+    bool m_showHiddenFiles{false};
 };
 
 } // namespace rfm::app

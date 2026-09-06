@@ -14,6 +14,8 @@
 #include <optional>
 
 class QLineEdit;
+class QResizeEvent;
+class QTimer;
 class QTableWidget;
 
 namespace rfm::app
@@ -32,6 +34,7 @@ class FileBrowserPane final : public QWidget
 
   public:
     explicit FileBrowserPane(QWidget* parent = nullptr);
+    ~FileBrowserPane() override;
 
     [[nodiscard]] QString currentPath() const;
     [[nodiscard]] rfm::core::BrowserLocation currentLocation() const;
@@ -57,6 +60,8 @@ class FileBrowserPane final : public QWidget
     void removeHistoryUnderPath(rfm::core::FileSource source, const QString& machineId,
                                 const QString& rootPath);
     void setPendingSelectionNames(QStringList names);
+    void setDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
+                               const QString& name, std::optional<quint64> count);
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
     void setTransferContext(QString applicationInstanceId,
@@ -69,6 +74,8 @@ class FileBrowserPane final : public QWidget
     void requestBack();
     void requestForward();
     void requestRefresh();
+    void resetFileView();
+    void setShowHiddenFiles(bool show);
 
   signals:
     void activated();
@@ -83,9 +90,12 @@ class FileBrowserPane final : public QWidget
                                rfm::core::InternalTransferAction action,
                                QString destinationDirectory, bool actionWasExplicitlyRequested);
     void crossSourceMoveUnsupported();
+    void directoryItemCountRequested(rfm::core::BrowserLocation location, quint64 generation,
+                                     QString name);
 
   private:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void openEntry(int row);
     void prepareContextMenu(const QPoint& position);
     void startInternalDrag(Qt::DropActions supportedActions);
@@ -95,6 +105,20 @@ class FileBrowserPane final : public QWidget
                  const QString& destination) const;
     void updateDropAppearance(bool active, bool valid, int folderRow = -1);
     void updateCutAppearance();
+    void restoreTableHeaderState();
+    void applyTableHeaderState(const QByteArray& state, int sortColumn, Qt::SortOrder sortOrder,
+                               bool adaptiveLayout);
+    void resetTableHeaderState();
+    void applyAdaptiveLayout();
+    void markManualLayout();
+    void applyDefaultFileView();
+    void handleHeaderSectionClicked(int logicalIndex);
+    void handleSortIndicatorChanged(int logicalIndex, Qt::SortOrder order);
+    void applySortState();
+    void restoreNaturalOrder();
+    void scheduleTableHeaderStateSave();
+    void saveTableHeaderState();
+    void requestNextDirectoryItemCount();
     [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
     void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
@@ -102,15 +126,34 @@ class FileBrowserPane final : public QWidget
     QTableWidget* m_fileTable{nullptr};
     rfm::core::BrowserLocation m_currentLocation;
     QStringList m_pendingSelectionNames;
+    QStringList m_pendingDirectoryCountNames;
+    rfm::core::BrowserLocation m_activeDirectoryCountLocation;
+    QString m_activeDirectoryCountName;
+    quint64 m_directoryCountGeneration{0};
+    quint64 m_activeDirectoryCountGeneration{0};
     QList<rfm::core::BrowserLocation> m_backHistory;
     QList<rfm::core::BrowserLocation> m_forwardHistory;
     QString m_applicationInstanceId;
     rfm::core::RemoteConnectionIdentity m_connectionIdentity;
     quint64 m_paneId{0};
     QSet<QString> m_cutPaths;
+    QTimer* m_tableHeaderSaveTimer{nullptr};
+    bool m_tableHeaderStateDirty{false};
+    bool m_restoringTableHeaderState{false};
+    bool m_applyingLayoutState{false};
+    bool m_applyingAdaptiveLayout{false};
+    bool m_adaptiveLayout{true};
+    bool m_headerDragActive{false};
+    int m_headerDragLogicalIndex{-1};
+    QPoint m_headerDragStartPosition;
+    bool m_applyingSortState{false};
+    bool m_headerClickInProgress{false};
+    int m_sortColumn{-1};
+    Qt::SortOrder m_sortOrder{Qt::DescendingOrder};
     int m_dropHighlightRow{-1};
     int m_contextMenuRow{-1};
     bool m_restoreTableFocus{false};
+    bool m_showHiddenFiles{false};
 };
 
 } // namespace rfm::app

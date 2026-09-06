@@ -50,3 +50,24 @@ ctest --preset debug
 ## Définition de terminé
 
 Une modification est terminée lorsque le comportement demandé fonctionne, respecte les frontières d’architecture et les invariants de sécurité, garde l’interface réactive, gère clairement les erreurs, possède les tests pertinents, compile sans avertissement sur la configuration stricte, passe toute la suite de tests et inclut la documentation nécessaire. Le diff doit rester ciblé, sans secret, artefact de compilation ni changement étranger à la tâche.
+
+## File editing rules
+
+When modifying source files:
+
+1. ALWAYS use the Edit files tool as the primary method.
+2. NEVER use sed, awk, perl, python, cat, echo, head/tail, cp or shell
+   redirections to rewrite source-code files.
+3. Reading/searching with tools or terminal is allowed.
+4. Terminal commands may be used for build, tests, git diff and inspection,
+   but NEVER for editing source code.
+5. If an Edit files operation fails:
+   - reread the exact target region;
+   - retry Edit files with a smaller and more precise change.
+6. If Edit files still fails after two attempts:
+   STOP and report the failure.
+   Do NOT fall back to shell-based editing.
+7. Never claim a modification succeeded without verifying the resulting diff.
+8. After editing, run:
+   git diff -- <modified files>
+   and inspect the result before continuing.

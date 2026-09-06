@@ -33,6 +33,7 @@ class PaneWorkspace final : public QWidget
     void clear();
     void setSplit(bool enabled);
     void activateOtherPane();
+    void resetFileView();
 
   signals:
     void activePaneChanged(quint64 paneId);

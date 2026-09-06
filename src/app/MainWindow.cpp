@@ -6,6 +6,7 @@
 #include "remotefilemanager/app/NavigationTree.hpp"
 #include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
+#include "remotefilemanager/app/PasswordAuthenticationDialog.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
@@ -38,6 +39,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QSettings>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyle>
@@ -89,7 +91,10 @@ bool profilesHaveSameConnectionSettings(const rfm::core::ConnectionProfile& firs
                                         const rfm::core::ConnectionProfile& second)
 {
     return first.host.trimmed().compare(second.host.trimmed(), Qt::CaseInsensitive) == 0 &&
-           first.username.trimmed() == second.username.trimmed() && first.port == second.port;
+           first.username.trimmed() == second.username.trimmed() && first.port == second.port &&
+           first.privateKeyPath.trimmed() == second.privateKeyPath.trimmed() &&
+           first.allowPasswordAuthentication == second.allowPasswordAuthentication &&
+           first.authenticationMode == second.authenticationMode;
 }
 
 QStringList knownMountPointsForDevice(const QList<rfm::core::StorageVolume>& volumes,
@@ -220,6 +225,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     });
 
     qRegisterMetaType<rfm::core::ConnectionProfile>();
+    qRegisterMetaType<rfm::ssh::PasswordAuthenticationReason>();
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
     qRegisterMetaType<rfm::core::InternalTransferPayload>();
@@ -243,6 +249,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     connect(m_localThread, &QThread::finished, m_localFileSystem, &QObject::deleteLater);
     connect(this, &MainWindow::localDirectoryRequested, m_localFileSystem,
             &rfm::core::LocalFileSystemWorker::listDirectory);
+    connect(this, &MainWindow::localDirectoryCountRequested, m_localFileSystem,
+            &rfm::core::LocalFileSystemWorker::countDirectoryEntries);
     connect(this, &MainWindow::localVolumesRequested, m_localFileSystem,
             &rfm::core::LocalFileSystemWorker::listVolumes);
     connect(this, &MainWindow::localStorageProbeRequested, m_localFileSystem,
@@ -251,6 +259,10 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleLocalDirectoryListed);
     connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::directoryListingFailed, this,
             &MainWindow::handleLocalDirectoryListingError);
+    connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::directoryCounted, this,
+            &MainWindow::handleDirectoryCounted);
+    connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::directoryCountFailed, this,
+            &MainWindow::handleDirectoryCountFailed);
     connect(m_localFileSystem, &rfm::core::LocalFileSystemWorker::volumesListed, this,
             [this](const QList<rfm::core::StorageVolume>& volumes, const QByteArray& fingerprint) {
                 m_localStorageFingerprint = fingerprint;
@@ -295,8 +307,12 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::ssh::SshSession::connectToHost);
     connect(this, &MainWindow::hostKeyDecision, m_sshSession,
             &rfm::ssh::SshSession::confirmUnknownHost);
+    connect(this, &MainWindow::passwordAuthenticationCancelled, m_sshSession,
+            &rfm::ssh::SshSession::cancelPasswordAuthentication);
     connect(this, &MainWindow::directoryRequested, m_sshSession,
             &rfm::ssh::SshSession::listDirectory);
+    connect(this, &MainWindow::remoteDirectoryCountRequested, m_sshSession,
+            &rfm::ssh::SshSession::countDirectoryEntries);
     connect(this, &MainWindow::remoteStorageRequested, m_sshSession,
             &rfm::ssh::SshSession::listStorageVolumes);
     connect(this, &MainWindow::remoteStorageProbeRequested, m_sshSession,
@@ -346,11 +362,19 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             m_sshSession, &rfm::ssh::SshSession::disconnectFromHost);
     connect(m_sshSession, &rfm::ssh::SshSession::hostKeyConfirmationRequired, this,
             &MainWindow::showHostKeyConfirmation);
+    connect(m_sshSession, &rfm::ssh::SshSession::passwordAuthenticationRequired, this,
+            &MainWindow::showPasswordAuthenticationForReason);
+    connect(m_sshSession, &rfm::ssh::SshSession::passwordAuthenticationRejected, this,
+            &MainWindow::showPasswordAuthenticationError);
     connect(m_sshSession, &rfm::ssh::SshSession::connected, this, &MainWindow::handleConnected);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListed, this,
             &MainWindow::handleDirectoryListed);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListingFailed, this,
             &MainWindow::handleDirectoryListingError);
+    connect(m_sshSession, &rfm::ssh::SshSession::directoryCounted, this,
+            &MainWindow::handleDirectoryCounted);
+    connect(m_sshSession, &rfm::ssh::SshSession::directoryCountFailed, this,
+            &MainWindow::handleDirectoryCountFailed);
     connect(m_sshSession, &rfm::ssh::SshSession::remoteFilesystemsCompared, this,
             &MainWindow::handleRemoteFilesystemRelation);
     connect(m_sshSession, &rfm::ssh::SshSession::storageVolumesListed, this,
@@ -564,6 +588,25 @@ void MainWindow::createActions()
     m_splitViewAction->setObjectName(QStringLiteral("splitViewAction"));
     m_splitViewAction->setCheckable(true);
     connect(m_splitViewAction, &QAction::toggled, m_paneWorkspace, &PaneWorkspace::setSplit);
+    m_resetFileViewAction = new QAction(tr("Reset file view"), this);
+    m_resetFileViewAction->setObjectName(QStringLiteral("resetFileViewAction"));
+    connect(m_resetFileViewAction, &QAction::triggered, m_paneWorkspace,
+            &PaneWorkspace::resetFileView);
+    m_showHiddenFilesAction = new QAction(tr("Show hidden files"), this);
+    m_showHiddenFilesAction->setObjectName(QStringLiteral("showHiddenFilesAction"));
+    m_showHiddenFilesAction->setCheckable(true);
+    m_showHiddenFilesAction->setChecked(
+        QSettings{}.value(QStringLiteral("ui/showHiddenFiles"), false).toBool());
+    connect(m_showHiddenFilesAction, &QAction::toggled, this, [this](bool show) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("ui/showHiddenFiles"), show);
+        for (const quint64 paneId : m_paneWorkspace->paneIds()) {
+            m_paneWorkspace->pane(paneId)->setShowHiddenFiles(show);
+        }
+        if (m_navigationTree != nullptr) {
+            m_navigationTree->setShowHiddenFiles(show);
+        }
+    });
     updateOperationActions();
 }
 
@@ -598,6 +641,9 @@ void MainWindow::createMenus()
     viewMenu->addAction(m_operationDockAction);
     viewMenu->addSeparator();
     viewMenu->addAction(m_splitViewAction);
+    viewMenu->addAction(m_showHiddenFilesAction);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_resetFileViewAction);
     viewMenu->addAction(m_focusLocationAction);
     viewMenu->addAction(m_switchPaneAction);
 
@@ -644,6 +690,9 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         return;
     }
     pane->setProperty("mainWindowConnected", true);
+    if (m_showHiddenFilesAction != nullptr) {
+        pane->setShowHiddenFiles(m_showHiddenFilesAction->isChecked());
+    }
     connect(pane, &FileBrowserPane::locationNavigationRequested, this,
             [this, paneId](const rfm::core::BrowserLocation& location, PaneNavigation navigation) {
                 requestLocationListing(paneId, location, true, navigation);
@@ -660,6 +709,11 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         }
     });
     connect(pane, &FileBrowserPane::contextMenuRequested, this, &MainWindow::showFileContextMenu);
+    connect(pane, &FileBrowserPane::directoryItemCountRequested, this,
+            [this, paneId](const rfm::core::BrowserLocation& location, quint64 generation,
+                           const QString& name) {
+                requestDirectoryItemCount(paneId, location, generation, name);
+            });
     connect(pane, &FileBrowserPane::internalDropRequested, this,
             [this, paneId](rfm::core::InternalTransferPayload payload,
                            rfm::core::InternalTransferAction action, const QString& destination,
@@ -671,6 +725,74 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         statusBar()->showMessage(tr("Moving between local and SSH locations is not supported yet."),
                                  8000);
     });
+}
+
+void MainWindow::requestDirectoryItemCount(quint64 paneId,
+                                           const rfm::core::BrowserLocation& location,
+                                           quint64 generation, const QString& name)
+{
+    FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
+    if (pane == nullptr || pane->currentLocation() != location || name.isEmpty()) {
+        return;
+    }
+
+    QString path;
+    if (location.source == rfm::core::FileSource::Local &&
+        location.machineId == QString::fromLatin1(rfm::core::LocalMachineId)) {
+        if (!rfm::core::LocalFileSystem::isValidName(name)) {
+            pane->setDirectoryItemCount(location, generation, name, std::nullopt);
+            return;
+        }
+        path = QDir(location.path).filePath(name);
+    } else if (location.source == rfm::core::FileSource::Ssh && m_connected &&
+               location.machineId == activeRemoteMachineId()) {
+        if (!rfm::core::RemotePath::isValidName(name)) {
+            pane->setDirectoryItemCount(location, generation, name, std::nullopt);
+            return;
+        }
+        path = rfm::core::RemotePath::join(location.path, name);
+    } else {
+        pane->setDirectoryItemCount(location, generation, name, std::nullopt);
+        return;
+    }
+
+    const quint64 requestId = nextOperationId();
+    m_directoryCountRequests.insert(requestId, {paneId, location, generation, name, path});
+    if (location.source == rfm::core::FileSource::Local) {
+        emit localDirectoryCountRequested(requestId, path);
+    } else {
+        emit remoteDirectoryCountRequested(requestId, path);
+    }
+}
+
+void MainWindow::handleDirectoryCounted(quint64 requestId, const QString& path, quint64 count)
+{
+    const auto iterator = m_directoryCountRequests.find(requestId);
+    if (iterator == m_directoryCountRequests.end()) {
+        return;
+    }
+    const DirectoryCountRequest request = iterator.value();
+    m_directoryCountRequests.erase(iterator);
+    if (FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId); pane != nullptr) {
+        pane->setDirectoryItemCount(request.location, request.generation, request.name,
+                                    path == request.path ? std::optional<quint64>{count}
+                                                         : std::nullopt);
+    }
+}
+
+void MainWindow::handleDirectoryCountFailed(quint64 requestId, const QString& path)
+{
+    Q_UNUSED(path)
+    const auto iterator = m_directoryCountRequests.find(requestId);
+    if (iterator == m_directoryCountRequests.end()) {
+        return;
+    }
+    const DirectoryCountRequest request = iterator.value();
+    m_directoryCountRequests.erase(iterator);
+    if (FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId); pane != nullptr) {
+        pane->setDirectoryItemCount(request.location, request.generation, request.name,
+                                    std::nullopt);
+    }
 }
 
 void MainWindow::createNavigationBar()
@@ -749,36 +871,10 @@ void MainWindow::createPlacesDock()
     m_navigationTree = new NavigationTree(container);
     layout->addWidget(m_navigationTree);
 
-    auto* const buttonLayout = new QHBoxLayout;
-    m_connectServerProfileButton = new QPushButton(tr("Connect"), container);
-    m_connectServerProfileButton->setObjectName(QStringLiteral("connectServerProfileButton"));
-    auto* const addButton = new QPushButton(tr("Add…"), container);
-    addButton->setObjectName(QStringLiteral("addServerProfileButton"));
-    auto* const editButton = new QPushButton(tr("Edit…"), container);
-    editButton->setObjectName(QStringLiteral("editServerProfileButton"));
-    auto* const removeButton = new QPushButton(tr("Remove"), container);
-    removeButton->setObjectName(QStringLiteral("removeServerProfileButton"));
-    m_connectServerProfileButton->setEnabled(false);
-    editButton->setEnabled(false);
-    removeButton->setEnabled(false);
-    buttonLayout->addWidget(m_connectServerProfileButton);
-    buttonLayout->addWidget(addButton);
-    buttonLayout->addWidget(editButton);
-    buttonLayout->addWidget(removeButton);
-    layout->addLayout(buttonLayout);
-
-    connect(m_connectServerProfileButton, &QPushButton::clicked, this,
-            &MainWindow::connectToSelectedServerProfile);
-    connect(addButton, &QPushButton::clicked, this, &MainWindow::addServerProfile);
-    connect(editButton, &QPushButton::clicked, this, &MainWindow::editSelectedServerProfile);
-    connect(removeButton, &QPushButton::clicked, this, &MainWindow::removeSelectedServerProfile);
-    connect(m_navigationTree, &NavigationTree::selectedProfileChanged, this,
-            [this, editButton, removeButton] {
-                const bool selected = selectedServerProfile().isValidSavedProfile();
-                editButton->setEnabled(selected);
-                removeButton->setEnabled(selected);
-                updateSelectedServerAction();
-            });
+    connect(m_navigationTree, &NavigationTree::newConnectionRequested, m_newConnectionAction,
+            &QAction::trigger);
+    connect(m_navigationTree, &NavigationTree::editProfileRequested, this,
+            &MainWindow::editServerProfile);
     connect(m_navigationTree->tree(), &QTreeWidget::itemDoubleClicked, this,
             [this](QTreeWidgetItem* item, int) {
                 if (item != nullptr &&
@@ -821,6 +917,10 @@ void MainWindow::createPlacesDock()
     addDockWidget(Qt::LeftDockWidgetArea, placesDock);
     m_placesDockAction = placesDock->toggleViewAction();
     m_placesDockAction->setObjectName(QStringLiteral("placesDockAction"));
+    m_navigationTree->setShowHiddenFiles(m_showHiddenFilesAction->isChecked());
+    for (const quint64 paneId : m_paneWorkspace->paneIds()) {
+        m_paneWorkspace->pane(paneId)->setShowHiddenFiles(m_showHiddenFilesAction->isChecked());
+    }
     loadServerProfiles();
 }
 
@@ -1031,33 +1131,6 @@ void MainWindow::refreshServerProfileViews()
             ++iterator;
         }
     }
-    updateSelectedServerAction();
-}
-
-void MainWindow::updateSelectedServerAction()
-{
-    if (m_connectServerProfileButton == nullptr) {
-        return;
-    }
-    const rfm::core::ConnectionProfile selected = selectedServerProfile();
-    const bool valid = selected.isValidSavedProfile();
-    const bool active =
-        valid && m_connected && profilesHaveSameConnectionSettings(selected, m_activeProfile);
-    m_connectServerProfileButton->setText(active ? tr("Disconnect") : tr("Connect"));
-    if (!valid) {
-        m_connectServerProfileButton->setEnabled(false);
-        m_connectServerProfileButton->setToolTip({});
-    } else if (active) {
-        m_connectServerProfileButton->setEnabled(m_disconnectAction->isEnabled());
-        m_connectServerProfileButton->setToolTip(tr("Disconnect from this server"));
-    } else if (m_connected) {
-        m_connectServerProfileButton->setEnabled(false);
-        m_connectServerProfileButton->setToolTip(
-            tr("Disconnect the active server before connecting to another one."));
-    } else {
-        m_connectServerProfileButton->setEnabled(m_newConnectionAction->isEnabled());
-        m_connectServerProfileButton->setToolTip(tr("Connect to this server"));
-    }
 }
 
 rfm::core::ConnectionProfile MainWindow::selectedServerProfile() const
@@ -1074,31 +1147,21 @@ rfm::core::ConnectionProfile MainWindow::selectedServerProfile() const
     return {};
 }
 
-void MainWindow::addServerProfile()
-{
-    rfm::core::ConnectionProfile initial;
-    initial.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    ServerProfileDialog dialog(this);
-    dialog.setProfile(initial);
-    if (dialog.exec() != QDialog::Accepted) {
-        return;
-    }
-    QString error;
-    if (!m_serverProfileStore->upsert(dialog.profile(), &error)) {
-        QMessageBox::warning(this, tr("Unable to save server"), error);
-        return;
-    }
-    loadServerProfiles();
-}
-
 void MainWindow::editSelectedServerProfile()
 {
     const rfm::core::ConnectionProfile selected = selectedServerProfile();
-    if (!selected.isValidSavedProfile()) {
+    editServerProfile(selected.id);
+}
+
+void MainWindow::editServerProfile(const QString& id)
+{
+    const auto selected = std::ranges::find_if(
+        m_serverProfiles, [&id](const auto& profile) { return profile.id == id; });
+    if (selected == m_serverProfiles.cend() || !selected->isValidSavedProfile()) {
         return;
     }
     ServerProfileDialog dialog(this);
-    dialog.setProfile(selected);
+    dialog.setProfile(*selected);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -1151,8 +1214,8 @@ void MainWindow::connectToServerProfile(const QString& id)
     }
     const auto profile = std::ranges::find_if(
         m_serverProfiles, [&id](const auto& candidate) { return candidate.id == id; });
-    if (profile != m_serverProfiles.cend()) {
-        showConnectionDialogForProfile(*profile);
+    if (profile != m_serverProfiles.cend() && profile->isValidSavedProfile()) {
+        beginConnection(*profile);
     }
 }
 
@@ -1171,10 +1234,17 @@ void MainWindow::showPlacesContextMenu(const QPoint& position)
         switch (action) {
         case NavigationTree::ContextAction::Connect:
             menu.addAction(tr("Connect"), this, &MainWindow::connectToSelectedServerProfile)
-                ->setEnabled(m_connectServerProfileButton->isEnabled());
+                ->setEnabled(!m_connected && m_newConnectionAction->isEnabled());
             break;
         case NavigationTree::ContextAction::Disconnect:
             menu.addAction(m_disconnectAction);
+            break;
+        case NavigationTree::ContextAction::RemoveServer:
+            menu.addAction(QIcon::fromTheme(
+                               QStringLiteral("edit-delete"),
+                               style()->standardIcon(QStyle::SP_TrashIcon)),
+                           tr("Remove server"), this,
+                           &MainWindow::removeSelectedServerProfile);
             break;
         case NavigationTree::ContextAction::Open:
             menu.addAction(tr("Open"), m_navigationTree, &NavigationTree::activateSelectedItem);
@@ -1235,6 +1305,34 @@ void MainWindow::createOperationDock()
     auto* const operationDock = new QDockWidget(tr("Operations"), this);
     operationDock->setObjectName(QStringLiteral("operationDock"));
     operationDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    auto* const titleBar = new QWidget(operationDock);
+    auto* const titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(4, 0, 2, 0);
+    titleLayout->setSpacing(2);
+    auto* const title = new QLabel(operationDock->windowTitle(), titleBar);
+    titleLayout->addWidget(title);
+    titleLayout->addStretch();
+    auto* const clearButton = new QToolButton(titleBar);
+    clearButton->setObjectName(QStringLiteral("clearOperationHistoryButton"));
+    clearButton->setIcon(QIcon::fromTheme(QStringLiteral("edit-clear"),
+                                          style()->standardIcon(QStyle::SP_DialogResetButton)));
+    clearButton->setToolTip(tr("Clear operation history"));
+    clearButton->setAccessibleName(clearButton->toolTip());
+    clearButton->setEnabled(false);
+    titleLayout->addWidget(clearButton);
+    auto* const maximizeButton = new QToolButton(titleBar);
+    maximizeButton->setObjectName(QStringLiteral("operationDockMaximizeButton"));
+    maximizeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarMaxButton));
+    maximizeButton->setToolTip(tr("Maximize"));
+    maximizeButton->setAccessibleName(maximizeButton->toolTip());
+    titleLayout->addWidget(maximizeButton);
+    auto* const closeButton = new QToolButton(titleBar);
+    closeButton->setObjectName(QStringLiteral("operationDockCloseButton"));
+    closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+    closeButton->setToolTip(tr("Close"));
+    closeButton->setAccessibleName(closeButton->toolTip());
+    titleLayout->addWidget(closeButton);
+    operationDock->setTitleBarWidget(titleBar);
     m_operationPanel = new OperationPanel(operationDock);
     operationDock->setWidget(m_operationPanel);
     addDockWidget(Qt::BottomDockWidgetArea, operationDock);
@@ -1261,6 +1359,13 @@ void MainWindow::createOperationDock()
             &MainWindow::removeTerminalOperation);
     connect(m_operationPanel, &OperationPanel::clearTerminalRequested, this,
             &MainWindow::clearTerminalOperations);
+    connect(clearButton, &QToolButton::clicked, m_operationPanel,
+            &OperationPanel::clearTerminalRequested);
+    connect(m_operationPanel, &OperationPanel::terminalOperationsAvailableChanged, clearButton,
+            &QToolButton::setEnabled);
+    connect(maximizeButton, &QToolButton::clicked, operationDock,
+            [operationDock] { operationDock->setFloating(!operationDock->isFloating()); });
+    connect(closeButton, &QToolButton::clicked, operationDock, &QDockWidget::close);
 }
 
 void MainWindow::createCentralPages()
@@ -1275,14 +1380,13 @@ void MainWindow::createCentralPages()
 
     connect(m_homePage, &HomePage::connectProfileRequested, this,
             &MainWindow::connectToServerProfile);
+    connect(m_homePage, &HomePage::editProfileRequested, this, &MainWindow::editServerProfile);
     connect(m_homePage, &HomePage::newConnectionRequested, m_newConnectionAction,
             &QAction::trigger);
     m_homePage->setProfiles(m_serverProfiles);
 }
 
-void MainWindow::showConnectionDialog() { showConnectionDialogForProfile({}); }
-
-void MainWindow::showConnectionDialogForProfile(const rfm::core::ConnectionProfile& profile)
+void MainWindow::showConnectionDialog()
 {
     if (m_connectionDialog != nullptr) {
         m_connectionDialog->raise();
@@ -1292,21 +1396,105 @@ void MainWindow::showConnectionDialogForProfile(const rfm::core::ConnectionProfi
 
     auto* const dialog = new ConnectionDialog(this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setProfile(profile);
+    dialog->setProfile({});
     m_connectionDialog = dialog;
     connect(dialog, &ConnectionDialog::connectionRequested, this, &MainWindow::beginConnection);
     dialog->open();
 }
 
-void MainWindow::beginConnection(const rfm::core::ConnectionProfile& profile,
-                                 const QString& password)
+void MainWindow::beginConnection(const rfm::core::ConnectionProfile& profile)
 {
+    if (m_connected || m_connecting) {
+        return;
+    }
+    if (!profile.isValid()) {
+        showConnectionError(tr("Invalid connection settings."));
+        return;
+    }
     clearInternalClipboard();
     updatePaneTransferContexts();
     stopAutomaticRefresh();
     m_activeProfile = profile;
+    m_connecting = true;
     setBusy(true, tr("Connecting securely to %1…").arg(m_activeProfile.host));
-    emit connectionRequested(m_activeProfile, password);
+    emit connectionRequested(m_activeProfile);
+}
+
+void MainWindow::showPasswordAuthentication()
+{
+    showPasswordAuthenticationForReason(rfm::ssh::SshAuthenticationPolicy::passwordPromptReason(
+        m_activeProfile.authenticationMode, rfm::ssh::AuthenticationResult::Denied,
+        !m_activeProfile.privateKeyPath.trimmed().isEmpty()));
+}
+
+void MainWindow::showPasswordAuthenticationForReason(rfm::ssh::PasswordAuthenticationReason reason)
+{
+    if (!m_connecting || !m_activeProfile.isValid()) {
+        return;
+    }
+    QString message;
+    switch (reason) {
+    case rfm::ssh::PasswordAuthenticationReason::ExplicitKeyFailed:
+        message = tr("SSH key authentication failed. Enter your password to continue.");
+        break;
+    case rfm::ssh::PasswordAuthenticationReason::KeyOrAgentFailed:
+        message = tr("SSH key or agent authentication failed. Enter your password to continue.");
+        break;
+    case rfm::ssh::PasswordAuthenticationReason::AdditionalPasswordRequired:
+        message = tr("Additional password authentication is required.");
+        break;
+    case rfm::ssh::PasswordAuthenticationReason::PasswordOnly:
+        message = tr("Password authentication is required to continue.");
+        break;
+    }
+    setBusy(false);
+    if (m_passwordAuthenticationDialog != nullptr) {
+        m_passwordAuthenticationDialog->setAuthenticationMessage(message);
+        m_passwordAuthenticationDialog->raise();
+        m_passwordAuthenticationDialog->activateWindow();
+        return;
+    }
+
+    auto* const dialog = new PasswordAuthenticationDialog(m_activeProfile, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setAuthenticationMessage(message);
+    m_passwordAuthenticationDialog = dialog;
+    connect(dialog, &PasswordAuthenticationDialog::authenticationRequested, this,
+            &MainWindow::submitPasswordAuthentication);
+    connect(dialog, &QDialog::rejected, this, &MainWindow::cancelPasswordAuthentication);
+    dialog->open();
+}
+
+void MainWindow::showPasswordAuthenticationError(const QString& message)
+{
+    setBusy(false);
+    if (m_passwordAuthenticationDialog != nullptr) {
+        m_passwordAuthenticationDialog->showAuthenticationError(message);
+    }
+}
+
+void MainWindow::submitPasswordAuthentication()
+{
+    if (m_passwordAuthenticationDialog == nullptr) {
+        return;
+    }
+    rfm::core::SecurePassword password = m_passwordAuthenticationDialog->takePassword();
+    if (password.isEmpty()) {
+        m_passwordAuthenticationDialog->showAuthenticationError(tr("Enter a password."));
+        return;
+    }
+    setBusy(true, tr("Authenticating…"));
+    m_sshSession->postPasswordAuthentication(std::move(password));
+}
+
+void MainWindow::cancelPasswordAuthentication()
+{
+    emit passwordAuthenticationCancelled();
+    m_connecting = false;
+    setBusy(false);
+    if (m_connectionDialog != nullptr) {
+        m_connectionDialog->connectionCancelled();
+    }
 }
 
 QString MainWindow::saveConnectedProfileIfRequested()
@@ -1340,6 +1528,10 @@ void MainWindow::handleConnected(const QString& path, const QList<rfm::core::Rem
     if (m_connectionDialog != nullptr) {
         m_connectionDialog->connectionSucceeded();
     }
+    if (m_passwordAuthenticationDialog != nullptr) {
+        m_passwordAuthenticationDialog->authenticationSucceeded();
+    }
+    m_connecting = false;
     m_connected = true;
     m_activeRemoteMachineId = QStringLiteral("ssh:%1@%2:%3")
                                   .arg(m_activeProfile.username, m_activeProfile.host,
@@ -1493,6 +1685,11 @@ void MainWindow::showConnectionError(const QString& message)
     const bool initialConnectionAttempt =
         m_connectionDialog != nullptr &&
         m_connectionDialog->state() == ConnectionDialog::State::Connecting;
+    if (m_passwordAuthenticationDialog != nullptr) {
+        disconnect(m_passwordAuthenticationDialog, &QDialog::rejected, this,
+                   &MainWindow::cancelPasswordAuthentication);
+        m_passwordAuthenticationDialog->connectionFailed();
+    }
     for (auto operation : std::as_const(m_remoteOperations)) {
         operation.state = rfm::core::OperationState::Failed;
         operation.error = message;
@@ -1512,6 +1709,7 @@ void MainWindow::handleDisconnected() { resetDisconnectedUi(); }
 
 void MainWindow::resetDisconnectedUi()
 {
+    m_connecting = false;
     m_connected = false;
     m_transferCoordinator->executorDisconnected();
     m_remoteStorageRefreshPending = false;
@@ -1983,8 +2181,7 @@ void MainWindow::focusActiveLocation()
     }
 }
 
-std::optional<rfm::core::InternalTransferAction>
-MainWindow::chooseCrossFilesystemTransferAction()
+std::optional<rfm::core::InternalTransferAction> MainWindow::chooseCrossFilesystemTransferAction()
 {
     QMessageBox choice(QMessageBox::Question, tr("Cross-filesystem file operation"),
                        tr("The source and destination are on different filesystems. "
@@ -2074,8 +2271,8 @@ void MainWindow::handleInternalDrop(rfm::core::InternalTransferPayload payload,
     startRemoteTransfer(action, payload, destinationPaneId, destinationLocation.path);
 }
 
-void MainWindow::handleRemoteFilesystemRelation(
-    quint64 requestId, rfm::core::RemoteFilesystemRelation relation)
+void MainWindow::handleRemoteFilesystemRelation(quint64 requestId,
+                                                rfm::core::RemoteFilesystemRelation relation)
 {
     const auto pending = m_pendingRemoteFilesystemPreflights.find(requestId);
     if (pending == m_pendingRemoteFilesystemPreflights.end()) {
@@ -2208,9 +2405,9 @@ void MainWindow::queueTransferRequest(const rfm::core::TransferRequest& request,
     TransferRefreshContext refreshContext;
     refreshContext.connection = currentConnectionIdentity();
     if (request.direction == rfm::core::TransferDirection::Upload) {
-        refreshContext.destination = {rfm::core::FileSource::Ssh, activeRemoteMachineId(),
-                                      rfm::core::RemotePath::normalize(
-                                          rfm::core::RemotePath::parent(request.destination))};
+        refreshContext.destination = {
+            rfm::core::FileSource::Ssh, activeRemoteMachineId(),
+            rfm::core::RemotePath::normalize(rfm::core::RemotePath::parent(request.destination))};
     } else {
         refreshContext.destination = {
             rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
@@ -2432,7 +2629,8 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
     const bool trackedCopyMove = m_localOperationRequests.contains(result.id);
     QList<rfm::core::LocalFileOperationItemResult> collisions;
     if (trackedCopyMove) {
-        QList<rfm::core::LocalFileOperationItemResult>& accumulated = m_localOperationItems[result.id];
+        QList<rfm::core::LocalFileOperationItemResult>& accumulated =
+            m_localOperationItems[result.id];
         for (const auto& item : result.items) {
             for (auto iterator = accumulated.begin(); iterator != accumulated.end(); ++iterator) {
                 if (iterator->source == item.source &&
@@ -2530,18 +2728,20 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
         operation.cancellationSupported = false;
         updateTrackedOperation(operation);
         const auto clipboardMove = m_localClipboardMoveOperations.find(result.id);
-        const bool consumedClipboard = clipboardMove != m_localClipboardMoveOperations.end() &&
-                                       operation.state == rfm::core::OperationState::Completed &&
-                                       m_internalClipboard.matchesCutGeneration(clipboardMove.value());
+        const bool consumedClipboard =
+            clipboardMove != m_localClipboardMoveOperations.end() &&
+            operation.state == rfm::core::OperationState::Completed &&
+            m_internalClipboard.matchesCutGeneration(clipboardMove.value());
         m_localClipboardMoveOperations.remove(result.id);
         if (consumedClipboard) {
             clearInternalClipboard();
         }
     }
-    statusBar()->showMessage(!failures.isEmpty() ? tr("Local operation completed with errors")
+    statusBar()->showMessage(
+        !failures.isEmpty() ? tr("Local operation completed with errors")
                             : (!warnings.isEmpty() ? tr("Local operation completed with warnings")
                                                    : tr("Local operation completed")),
-                             5000);
+        5000);
     if (!anySuccess || context.sourceDirectory.isEmpty()) {
         return;
     }
@@ -2632,11 +2832,10 @@ void MainWindow::scheduleTransferDestinationRefresh(quint64 transferId)
 
 void MainWindow::updateConnectionAction()
 {
-    const bool enabled = !m_busy && m_busyPanes.isEmpty() && m_nonTerminalTransfers.isEmpty() &&
-                         m_remoteOperations.isEmpty();
+    const bool enabled = !m_busy && !m_connecting && m_busyPanes.isEmpty() &&
+                         m_nonTerminalTransfers.isEmpty() && m_remoteOperations.isEmpty();
     m_newConnectionAction->setEnabled(enabled && !m_connected);
     m_disconnectAction->setEnabled(enabled && m_connected);
-    updateSelectedServerAction();
 }
 
 rfm::core::RemoteConnectionIdentity MainWindow::currentConnectionIdentity() const
@@ -2696,10 +2895,11 @@ void MainWindow::startRemoteFilesystemPreflight(rfm::core::InternalTransferPaylo
     }
     const quint64 requestId = nextOperationId();
     m_pendingRemoteFilesystemPreflights.insert(
-        requestId, {std::move(payload), destinationPaneId, std::move(destinationDirectory), connection});
+        requestId,
+        {std::move(payload), destinationPaneId, std::move(destinationDirectory), connection});
     const auto request = m_pendingRemoteFilesystemPreflights.constFind(requestId);
     emit remoteFilesystemRelationRequested(requestId, sourceDirectory,
-                                            request->destinationDirectory);
+                                           request->destinationDirectory);
 }
 
 bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
@@ -3446,8 +3646,7 @@ QString MainWindow::listingStatusMessage(const QString& path, PaneNavigation nav
     return tr("Opening folder %1…").arg(path);
 }
 
-void MainWindow::setPaneBusy(quint64 paneId, bool busy, const QString& message,
-                             int messageTimeout)
+void MainWindow::setPaneBusy(quint64 paneId, bool busy, const QString& message, int messageTimeout)
 {
     FileBrowserPane* const pane = m_paneWorkspace->pane(paneId);
     if (pane == nullptr) {
@@ -3513,6 +3712,13 @@ void MainWindow::stopAutomaticRefresh()
     m_directoryRequests.clear();
     m_directoryQueue.clear();
     m_expectedDirectoryRequests.clear();
+    for (const DirectoryCountRequest& request : std::as_const(m_directoryCountRequests)) {
+        if (FileBrowserPane* const pane = m_paneWorkspace->pane(request.paneId); pane != nullptr) {
+            pane->setDirectoryItemCount(request.location, request.generation, request.name,
+                                        std::nullopt);
+        }
+    }
+    m_directoryCountRequests.clear();
     m_expectedLocalDirectoryRequests.clear();
     m_paneNavigationGenerations.clear();
     m_expectedPaneSources.clear();
@@ -3552,15 +3758,15 @@ void MainWindow::updateOperationActions()
         otherPane != nullptr && pathsUseSameConvention(m_paneWorkspace->activePane()->currentPath(),
                                                        otherPane->currentPath());
     const bool otherPaneAvailable =
-        (remoteOperationAvailable || localSourceAvailable) && count > 0 &&
-        otherPane != nullptr && !otherPane->currentPath().isEmpty() &&
+        (remoteOperationAvailable || localSourceAvailable) && count > 0 && otherPane != nullptr &&
+        !otherPane->currentPath().isEmpty() &&
         ((remoteOperationAvailable &&
           otherPane->currentLocation().machineId == activeRemoteMachineId()) ||
          (localSourceAvailable && otherPane->source() == rfm::core::FileSource::Local &&
           QFileInfo(otherPane->currentPath()).isWritable())) &&
         !m_busyPanes.contains(otherPaneId) && distinctDirectories && compatiblePathConventions;
-    m_moveToOtherPaneAction->setEnabled(
-        otherPaneAvailable && (remoteOperationAvailable || localMutationAvailable));
+    m_moveToOtherPaneAction->setEnabled(otherPaneAvailable &&
+                                        (remoteOperationAvailable || localMutationAvailable));
     m_copyToOtherPaneAction->setEnabled(otherPaneAvailable);
     m_removeAction->setEnabled(mutationAvailable && count > 0);
     m_uploadAction->setEnabled(remoteOperationAvailable);

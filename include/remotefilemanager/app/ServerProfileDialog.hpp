@@ -4,13 +4,12 @@
 
 #include <QDialog>
 
-class QCheckBox;
 class QDialogButtonBox;
-class QLineEdit;
-class QSpinBox;
 
 namespace rfm::app
 {
+
+class ServerProfileForm;
 
 class ServerProfileDialog final : public QDialog
 {
@@ -26,11 +25,7 @@ class ServerProfileDialog final : public QDialog
     void updateState();
 
   private:
-    QLineEdit* m_nameEdit{nullptr};
-    QLineEdit* m_hostEdit{nullptr};
-    QLineEdit* m_userEdit{nullptr};
-    QSpinBox* m_portSpin{nullptr};
-    QCheckBox* m_passwordCheck{nullptr};
+    ServerProfileForm* m_profileForm{nullptr};
     QDialogButtonBox* m_buttons{nullptr};
     QString m_profileId;
 };
