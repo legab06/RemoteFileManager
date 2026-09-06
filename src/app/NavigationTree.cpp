@@ -20,6 +20,7 @@
 #include <QStandardPaths>
 #include <QStringList>
 #include <QStyle>
+#include <QStyledItemDelegate>
 #include <QTextDocument>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -110,6 +111,20 @@ class PlacesTreeWidget final : public QTreeWidget
             return;
         }
         QTreeWidget::keyPressEvent(event);
+    }
+};
+
+class PlacesItemDelegate final : public QStyledItemDelegate
+{
+  public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    [[nodiscard]] QSize sizeHint(const QStyleOptionViewItem& option,
+                                 const QModelIndex& index) const override
+    {
+        QSize hint = QStyledItemDelegate::sizeHint(option, index);
+        hint.setHeight(std::max(hint.height(), 30));
+        return hint;
     }
 };
 
@@ -353,6 +368,8 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->setAnimated(true);
     m_tree->setUniformRowHeights(true);
+    m_tree->setIconSize(QSize(20, 20));
+    m_tree->setItemDelegate(new PlacesItemDelegate(m_tree));
     m_tree->header()->setStretchLastSection(false);
     m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     m_tree->header()->setSectionResizeMode(1, QHeaderView::Fixed);
@@ -373,7 +390,7 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     volumeActions->addStretch();
     layout->addLayout(volumeActions);
 
-    auto* const localCategory =
+    m_localCategoryItem =
         createCategory(m_tree->invisibleRootItem(), tr("Local"), NodeKind::LocalCategory);
     m_remoteCategoryItem =
         createCategory(m_tree->invisibleRootItem(), tr("Distant"), NodeKind::RemoteCategory);
@@ -390,10 +407,8 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
 
     connect(addServerButton, &QToolButton::clicked, this, &NavigationTree::newConnectionRequested);
     m_tree->setItemWidget(m_remoteCategoryItem, 1, addServerButton);
-    buildLocalMachine();
-    localCategory->addChild(m_localMachineItem);
-    m_localMachineItem->setExpanded(true);
-    localCategory->setExpanded(true);
+    buildLocalPlaces();
+    m_localCategoryItem->setExpanded(true);
     m_remoteCategoryItem->setExpanded(true);
 
     connect(m_tree, &QTreeWidget::itemActivated, this,
@@ -617,7 +632,7 @@ void NavigationTree::clearActiveServer()
 
 void NavigationTree::setStorageVolumes(const QList<rfm::core::StorageVolume>& volumes)
 {
-    synchronizeStorageBranches(m_localMachineItem, m_volumesItem, m_externalDevicesItem,
+    synchronizeStorageBranches(m_localCategoryItem, m_volumesItem, m_externalDevicesItem,
                                uniqueStorageVolumes(volumes, true), true,
                                QString::fromLatin1(rfm::core::LocalMachineId));
     updateVolumeActions();
@@ -910,7 +925,7 @@ void NavigationTree::setVolumeOperation(const QString& machineId, const QString&
     }
 
     QList<QTreeWidgetItem*> pending;
-    pending.push_back(m_localMachineItem);
+    pending.push_back(m_localCategoryItem);
     pending.push_back(m_remoteCategoryItem);
     while (!pending.isEmpty()) {
         QTreeWidgetItem* const item = pending.takeLast();
@@ -993,11 +1008,8 @@ QString NavigationTree::volumeOperationIdentity(const QString& machineId, const 
     return machineId + QChar{'\n'} + normalizedDevice;
 }
 
-void NavigationTree::buildLocalMachine()
+void NavigationTree::buildLocalPlaces()
 {
-    m_localMachineItem =
-        createItem(nullptr, tr("This Computer"), NodeKind::LocalMachine,
-                   style()->standardIcon(QStyle::SP_ComputerIcon));
     auto addLocation = [this](QTreeWidgetItem* parent, const QString& name, const QString& path,
                               PlaceKind kind) -> QTreeWidgetItem* {
         if (path.isEmpty() || !QFileInfo(path).isDir()) {
@@ -1010,7 +1022,7 @@ void NavigationTree::buildLocalMachine()
         return item;
     };
     QTreeWidgetItem* const home =
-        addLocation(m_localMachineItem, tr("Home"),
+        addLocation(m_localCategoryItem, tr("Home"),
                     QStandardPaths::writableLocation(QStandardPaths::HomeLocation), PlaceKind::Home);
     QSet<QString> paths{comparableLocalPath(
         QStandardPaths::writableLocation(QStandardPaths::HomeLocation))};
@@ -1030,7 +1042,7 @@ void NavigationTree::buildLocalMachine()
             paths.insert(normalized);
         }
     }
-    m_volumesItem = createItem(m_localMachineItem, tr("Volumes"), NodeKind::Volumes,
+    m_volumesItem = createItem(m_localCategoryItem, tr("Volumes"), NodeKind::Volumes,
                                style()->standardIcon(QStyle::SP_DriveHDIcon));
 }
 

@@ -46,7 +46,6 @@ class NavigationTree final : public QWidget
     enum class NodeKind {
         LocalCategory,
         RemoteCategory,
-        LocalMachine,
         LocalLocation,
         LocalVolume,
         LocalDirectory,
@@ -125,7 +124,7 @@ class NavigationTree final : public QWidget
     static constexpr int BaseTextRole = Qt::UserRole + 8;
     static constexpr int HiddenRole = Qt::UserRole + 9;
 
-    void buildLocalMachine();
+    void buildLocalPlaces();
     void rebuildServers();
     void activateItem(QTreeWidgetItem* item);
     void expandItem(QTreeWidgetItem* item);
@@ -155,7 +154,7 @@ class NavigationTree final : public QWidget
     QPushButton* m_mountVolumeButton{nullptr};
     QPushButton* m_openVolumeButton{nullptr};
     QPushButton* m_unmountVolumeButton{nullptr};
-    QTreeWidgetItem* m_localMachineItem{nullptr};
+    QTreeWidgetItem* m_localCategoryItem{nullptr};
     QTreeWidgetItem* m_volumesItem{nullptr};
     QTreeWidgetItem* m_externalDevicesItem{nullptr};
     QTreeWidgetItem* m_remoteCategoryItem{nullptr};

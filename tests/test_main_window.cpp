@@ -309,9 +309,9 @@ QTreeWidgetItem* childNamed(QTreeWidgetItem* parent, const QString& name)
     return nullptr;
 }
 
-QTreeWidgetItem* localMachineItem(QTreeWidget* tree)
+QTreeWidgetItem* localPlacesRoot(QTreeWidget* tree)
 {
-    return childNamed(categoryItem(tree, QStringLiteral("Local")), QStringLiteral("This Computer"));
+    return categoryItem(tree, QStringLiteral("Local"));
 }
 
 QString plainToolTip(const QTreeWidgetItem* item)
@@ -568,7 +568,7 @@ void MainWindowTest::volumeRequestsPreserveDeviceMountPoints()
                                           Q_ARG(QList<rfm::core::StorageVolume>, volumes)));
         auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
         QTreeWidgetItem* const selected =
-            volumeItemByDeviceAndPath(localMachineItem(navigation->tree()), device, first.rootPath);
+            volumeItemByDeviceAndPath(localPlacesRoot(navigation->tree()), device, first.rootPath);
         QVERIFY(selected != nullptr);
         navigation->tree()->setCurrentItem(selected);
         window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"))->click();
@@ -633,7 +633,7 @@ void MainWindowTest::volumeRequestsPreserveInconsistentSiblingEvidence()
     QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalStorageVolumes", Qt::DirectConnection,
                                       Q_ARG(QList<rfm::core::StorageVolume>, volumes)));
     auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-    QTreeWidgetItem* const item = volumeItemByDeviceAndPath(localMachineItem(navigation->tree()),
+    QTreeWidgetItem* const item = volumeItemByDeviceAndPath(localPlacesRoot(navigation->tree()),
                                                             selected.device, selected.rootPath);
     QVERIFY(item != nullptr);
     navigation->tree()->setCurrentItem(item);
@@ -700,7 +700,7 @@ void MainWindowTest::mainRefreshWorksWithoutConnectionAndUpdatesOpenTree()
                                       Q_ARG(QList<rfm::core::StorageVolume>, initial)));
     QVERIFY(action->isEnabled());
 
-    QTreeWidgetItem* const localMachine = localMachineItem(navigation->tree());
+    QTreeWidgetItem* const localMachine = localPlacesRoot(navigation->tree());
     QTreeWidgetItem* volumes = nullptr;
     for (int index = 0; index < localMachine->childCount(); ++index) {
         if (localMachine->child(index)->text(0) == QStringLiteral("Volumes")) {
@@ -1051,7 +1051,7 @@ void MainWindowTest::mutatesLocalEntriesAndRefreshesMatchingPanes()
     fixtureVolume.kind = rfm::core::StorageKind::Internal;
     navigation->setStorageVolumes({fixtureVolume});
     QTreeWidgetItem* const volumes =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("Volumes"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("Volumes"));
     QVERIFY(volumes != nullptr);
     QTreeWidgetItem* const fixture = childNamed(volumes, temporary.path());
     QVERIFY(fixture != nullptr);
@@ -1452,7 +1452,7 @@ void MainWindowTest::persistsShowHiddenFilesPreference()
         navigation->setLocalDirectory(
             QDir::homePath(), {{QStringLiteral(".hidden"), 0, {}, true, false, true}});
         QTreeWidgetItem* const home =
-            childNamed(localMachineItem(navigation->tree()), QStringLiteral("Home"));
+            childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("Home"));
         QTreeWidgetItem* const hiddenPlace = childNamed(home, QStringLiteral(".hidden"));
         QVERIFY(pane->fileTable()->isRowHidden(0));
         QVERIFY(hiddenPlace != nullptr);
@@ -5152,7 +5152,7 @@ void MainWindowTest::volumeOperationSuccessWaitsForSystemRefresh()
     volume.mounted = false;
     navigation->setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("External devices"));
     QVERIFY(external != nullptr);
     navigation->tree()->setCurrentItem(external->child(0));
 
@@ -5217,7 +5217,7 @@ void MainWindowTest::volumeOperationErrorsRestoreUi()
     volume.mounted = false;
     navigation->setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("External devices"));
     QVERIFY(external != nullptr);
     navigation->tree()->setCurrentItem(external->child(0));
     QSignalSpy refreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
@@ -5248,7 +5248,7 @@ void MainWindowTest::closingWindowCancelsBusyLocalVolumeWorker()
     volume.mounted = false;
     navigation->setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("External devices"));
     QVERIFY(external != nullptr);
     navigation->tree()->setCurrentItem(external->child(0));
     mountButton->click();
@@ -5342,7 +5342,7 @@ void MainWindowTest::successfulUnmountEvacuatesOnlyAffectedPanes()
     volume.mounted = true;
     navigation->setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("External devices"));
     QVERIFY(external != nullptr);
     navigation->tree()->setCurrentItem(external->child(0));
 
@@ -5401,7 +5401,7 @@ void MainWindowTest::failedUnmountDoesNotEvacuatePane()
     volume.mounted = true;
     navigation->setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("External devices"));
     navigation->tree()->setCurrentItem(external->child(0));
 
     unmountButton->click();
@@ -5443,7 +5443,7 @@ void MainWindowTest::safetyFallbackPurgesUnmountedPathsFromHistory()
     volume.mounted = true;
     navigation->setStorageVolumes({volume});
     QTreeWidgetItem* const external =
-        childNamed(localMachineItem(navigation->tree()), QStringLiteral("External devices"));
+        childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("External devices"));
     navigation->tree()->setCurrentItem(external->child(0));
 
     unmountButton->click();
