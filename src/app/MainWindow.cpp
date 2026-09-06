@@ -1305,6 +1305,34 @@ void MainWindow::createOperationDock()
     auto* const operationDock = new QDockWidget(tr("Operations"), this);
     operationDock->setObjectName(QStringLiteral("operationDock"));
     operationDock->setAllowedAreas(Qt::BottomDockWidgetArea | Qt::TopDockWidgetArea);
+    auto* const titleBar = new QWidget(operationDock);
+    auto* const titleLayout = new QHBoxLayout(titleBar);
+    titleLayout->setContentsMargins(4, 0, 2, 0);
+    titleLayout->setSpacing(2);
+    auto* const title = new QLabel(operationDock->windowTitle(), titleBar);
+    titleLayout->addWidget(title);
+    titleLayout->addStretch();
+    auto* const clearButton = new QToolButton(titleBar);
+    clearButton->setObjectName(QStringLiteral("clearOperationHistoryButton"));
+    clearButton->setIcon(QIcon::fromTheme(QStringLiteral("edit-clear"),
+                                          style()->standardIcon(QStyle::SP_DialogResetButton)));
+    clearButton->setToolTip(tr("Clear operation history"));
+    clearButton->setAccessibleName(clearButton->toolTip());
+    clearButton->setEnabled(false);
+    titleLayout->addWidget(clearButton);
+    auto* const maximizeButton = new QToolButton(titleBar);
+    maximizeButton->setObjectName(QStringLiteral("operationDockMaximizeButton"));
+    maximizeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarMaxButton));
+    maximizeButton->setToolTip(tr("Maximize"));
+    maximizeButton->setAccessibleName(maximizeButton->toolTip());
+    titleLayout->addWidget(maximizeButton);
+    auto* const closeButton = new QToolButton(titleBar);
+    closeButton->setObjectName(QStringLiteral("operationDockCloseButton"));
+    closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+    closeButton->setToolTip(tr("Close"));
+    closeButton->setAccessibleName(closeButton->toolTip());
+    titleLayout->addWidget(closeButton);
+    operationDock->setTitleBarWidget(titleBar);
     m_operationPanel = new OperationPanel(operationDock);
     operationDock->setWidget(m_operationPanel);
     addDockWidget(Qt::BottomDockWidgetArea, operationDock);
@@ -1331,6 +1359,13 @@ void MainWindow::createOperationDock()
             &MainWindow::removeTerminalOperation);
     connect(m_operationPanel, &OperationPanel::clearTerminalRequested, this,
             &MainWindow::clearTerminalOperations);
+    connect(clearButton, &QToolButton::clicked, m_operationPanel,
+            &OperationPanel::clearTerminalRequested);
+    connect(m_operationPanel, &OperationPanel::terminalOperationsAvailableChanged, clearButton,
+            &QToolButton::setEnabled);
+    connect(maximizeButton, &QToolButton::clicked, operationDock,
+            [operationDock] { operationDock->setFloating(!operationDock->isFloating()); });
+    connect(closeButton, &QToolButton::clicked, operationDock, &QDockWidget::close);
 }
 
 void MainWindow::createCentralPages()

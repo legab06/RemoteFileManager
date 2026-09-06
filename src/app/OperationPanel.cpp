@@ -5,14 +5,15 @@
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QProgressBar>
-#include <QPushButton>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -32,8 +33,8 @@ enum Column {
     StateColumn,
     ProgressColumn,
     SpeedColumn,
-    ActionsColumn,
     ErrorColumn,
+    ActionsColumn,
     ColumnCount,
 };
 
@@ -121,24 +122,12 @@ OperationPanel::OperationPanel(QWidget* parent) : QWidget(parent)
     auto* const layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
-    auto* const historyActions = new QHBoxLayout;
-    historyActions->addStretch();
-    m_removeButton = new QPushButton(tr("Remove selected"), this);
-    m_removeButton->setObjectName(QStringLiteral("removeOperationButton"));
-    m_removeButton->setEnabled(false);
-    m_clearButton = new QPushButton(tr("Clear history"), this);
-    m_clearButton->setObjectName(QStringLiteral("clearOperationHistoryButton"));
-    m_clearButton->setEnabled(false);
-    historyActions->addWidget(m_removeButton);
-    historyActions->addWidget(m_clearButton);
-    layout->addLayout(historyActions);
-
     m_table = new QTableWidget(this);
     m_table->setObjectName(QStringLiteral("operationTable"));
     m_table->setColumnCount(ColumnCount);
     m_table->setHorizontalHeaderLabels({tr("Operation"), tr("Source"), tr("Destination"),
-                                        tr("Status"), tr("Progress"), tr("Speed"), tr("Actions"),
-                                        tr("Error")});
+                                        tr("Status"), tr("Progress"), tr("Speed"), tr("Error"),
+                                        tr("Actions")});
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->setAlternatingRowColors(true);
@@ -155,19 +144,10 @@ OperationPanel::OperationPanel(QWidget* parent) : QWidget(parent)
     header->setSectionResizeMode(StateColumn, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(ProgressColumn, QHeaderView::Stretch);
     header->setSectionResizeMode(SpeedColumn, QHeaderView::ResizeToContents);
-    header->setSectionResizeMode(ActionsColumn, QHeaderView::ResizeToContents);
     header->setSectionResizeMode(ErrorColumn, QHeaderView::Stretch);
+    header->setSectionResizeMode(ActionsColumn, QHeaderView::ResizeToContents);
     layout->addWidget(m_table);
 
-    connect(m_table, &QTableWidget::itemSelectionChanged, this,
-            &OperationPanel::updateHistoryActions);
-    connect(m_removeButton, &QPushButton::clicked, this, [this] {
-        const quint64 id = selectedOperationId();
-        if (id != 0) {
-            emit removeTerminalRequested(id);
-        }
-    });
-    connect(m_clearButton, &QPushButton::clicked, this, &OperationPanel::clearTerminalRequested);
 }
 
 QString OperationPanel::formatBytes(quint64 bytes)
@@ -319,17 +299,6 @@ void OperationPanel::rebuildRowMappings()
     }
 }
 
-quint64 OperationPanel::selectedOperationId() const
-{
-    const QList<QTableWidgetItem*> selected = m_table->selectedItems();
-    if (selected.isEmpty()) {
-        return 0;
-    }
-    return m_table->item(selected.constFirst()->row(), KindColumn)
-        ->data(Qt::UserRole)
-        .toULongLong();
-}
-
 void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& progress)
 {
     QTableWidgetItem* const kindItem = m_table->item(row, KindColumn);
@@ -415,30 +384,49 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
                 tr("%1 / %2 completed").arg(progress.completedItems).arg(progress.totalItems));
     }
 
-    if (isTransfer(progress.kind) || progress.cancellationSupported) {
+    if (rfm::core::isTerminal(progress.state) || isTransfer(progress.kind) ||
+        progress.cancellationSupported) {
         QWidget* actions = m_table->cellWidget(row, ActionsColumn);
         if (actions == nullptr) {
             actions = new QWidget(m_table);
             auto* const actionsLayout = new QHBoxLayout(actions);
-            actionsLayout->setContentsMargins(2, 0, 2, 0);
+            actionsLayout->setContentsMargins(2, 1, 2, 1);
             actionsLayout->setSpacing(4);
             actionsLayout->setSizeConstraint(QLayout::SetMinimumSize);
             actions->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Preferred);
-            auto* const pauseResume = new QPushButton(actions);
+            auto* const pauseResume = new QToolButton(actions);
             pauseResume->setObjectName(QStringLiteral("pauseResumeButton"));
-            auto* const cancel = new QPushButton(tr("Cancel"), actions);
+            auto* const cancel = new QToolButton(actions);
             cancel->setObjectName(QStringLiteral("cancelTransferButton"));
-            pauseResume->setText(tr("Resume"));
-            pauseResume->setMinimumWidth(pauseResume->sizeHint().width());
-            pauseResume->setText(tr("Pause"));
-            cancel->setMinimumWidth(cancel->sizeHint().width());
+            auto* const remove = new QToolButton(actions);
+            remove->setObjectName(QStringLiteral("removeOperationButton"));
+            const auto configureButton = [](QToolButton* button) {
+                button->setAutoRaise(true);
+                button->setIconSize(QSize(16, 16));
+                button->setFixedSize(QSize(28, 28));
+            };
+            configureButton(pauseResume);
+            configureButton(cancel);
+            configureButton(remove);
+            cancel->setIcon(QIcon::fromTheme(QStringLiteral("dialog-close"),
+                                              style()->standardIcon(QStyle::SP_DialogCloseButton)));
+            cancel->setToolTip(tr("Cancel operation"));
+            cancel->setAccessibleName(cancel->toolTip());
+            remove->setIcon(QIcon::fromTheme(QStringLiteral("user-trash"),
+                                              QIcon::fromTheme(
+                                                  QStringLiteral("edit-delete"),
+                                                  style()->standardIcon(QStyle::SP_TrashIcon))));
+            remove->setToolTip(tr("Remove from history"));
+            remove->setAccessibleName(remove->toolTip());
+            actionsLayout->addStretch();
             actionsLayout->addWidget(pauseResume);
             actionsLayout->addWidget(cancel);
-            actions->setMinimumWidth(actionsLayout->sizeHint().width());
+            actionsLayout->addWidget(remove);
+            actionsLayout->addStretch();
             m_table->verticalHeader()->setMinimumSectionSize(
-                std::max(pauseResume->sizeHint().height(), cancel->sizeHint().height()) +
+                std::max({pauseResume->height(), cancel->height(), remove->height()}) +
                 actionsLayout->contentsMargins().top() + actionsLayout->contentsMargins().bottom());
-            connect(pauseResume, &QPushButton::clicked, this, [this, id = progress.id] {
+            connect(pauseResume, &QToolButton::clicked, this, [this, id = progress.id] {
                 const auto current = m_progress.constFind(id);
                 if (current == m_progress.cend()) {
                     return;
@@ -449,24 +437,35 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
                     emit pauseRequested(id);
                 }
             });
-            connect(cancel, &QPushButton::clicked, this,
+            connect(cancel, &QToolButton::clicked, this,
                     [this, id = progress.id] { emit cancelRequested(id); });
+            connect(remove, &QToolButton::clicked, this,
+                    [this, id = progress.id] { emit removeTerminalRequested(id); });
             m_table->setCellWidget(row, ActionsColumn, actions);
         }
         auto* const pauseResume =
-            actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
+            actions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"));
         auto* const cancel =
-            actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+            actions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
+        auto* const remove =
+            actions->findChild<QToolButton*>(QStringLiteral("removeOperationButton"));
         const bool canPause = isTransfer(progress.kind) && progress.pauseResumeSupported &&
                               progress.state == rfm::core::OperationState::Running;
         const bool canResume = isTransfer(progress.kind) && progress.pauseResumeSupported &&
                                progress.state == rfm::core::OperationState::Paused;
         pauseResume->setVisible(canPause || canResume);
         pauseResume->setEnabled(canPause || canResume);
-        pauseResume->setText(canResume ? tr("Resume") : tr("Pause"));
+        pauseResume->setIcon(QIcon::fromTheme(
+            canResume ? QStringLiteral("media-playback-start")
+                      : QStringLiteral("media-playback-pause"),
+            style()->standardIcon(canResume ? QStyle::SP_MediaPlay : QStyle::SP_MediaPause)));
+        pauseResume->setToolTip(canResume ? tr("Resume operation") : tr("Pause operation"));
+        pauseResume->setAccessibleName(pauseResume->toolTip());
         cancel->setVisible(progress.cancellationSupported &&
                            !rfm::core::isTerminal(progress.state));
         cancel->setEnabled(progress.state != rfm::core::OperationState::Cancelling);
+        remove->setVisible(rfm::core::isTerminal(progress.state));
+        remove->setEnabled(rfm::core::isTerminal(progress.state));
     } else {
         m_table->removeCellWidget(row, ActionsColumn);
         m_table->item(row, ActionsColumn)->setText(QStringLiteral("—"));
@@ -557,10 +556,7 @@ void OperationPanel::clearTerminalOperations()
 
 void OperationPanel::updateHistoryActions()
 {
-    const quint64 selectedId = selectedOperationId();
-    m_removeButton->setEnabled(selectedId != 0 && m_progress.contains(selectedId) &&
-                               rfm::core::isTerminal(m_progress.value(selectedId).state));
-    m_clearButton->setEnabled(std::ranges::any_of(
+    emit terminalOperationsAvailableChanged(std::ranges::any_of(
         m_progress, [](const auto& operation) { return rfm::core::isTerminal(operation.state); }));
 }
 

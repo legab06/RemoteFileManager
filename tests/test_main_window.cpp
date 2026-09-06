@@ -2348,7 +2348,8 @@ void MainWindowTest::displaysTransferProgressAndMultipleEntries()
     QCOMPARE(table->horizontalHeaderItem(3)->text(), QStringLiteral("Status"));
     QCOMPARE(table->horizontalHeaderItem(4)->text(), QStringLiteral("Progress"));
     QCOMPARE(table->horizontalHeaderItem(5)->text(), QStringLiteral("Speed"));
-    QCOMPARE(table->horizontalHeaderItem(7)->text(), QStringLiteral("Error"));
+    QCOMPARE(table->horizontalHeaderItem(6)->text(), QStringLiteral("Error"));
+    QCOMPARE(table->horizontalHeaderItem(7)->text(), QStringLiteral("Actions"));
     QCOMPARE(table->item(firstRow, 0)->text(), QStringLiteral("↑ Upload"));
     QCOMPARE(table->item(firstRow, 3)->text(), QStringLiteral("Queued"));
     QCOMPARE(table->item(rowForId(table, 202), 0)->text(), QStringLiteral("↓ Download"));
@@ -2469,7 +2470,7 @@ void MainWindowTest::keepsOperationRowsSingleLineAndRetainsExplicitCurrentItem()
     QVERIFY(
         table->item(currentRow, 1)->text().contains(QStringLiteral("\nCurrent: current-item.mkv")));
     QVERIFY(table->rowHeight(currentRow) > table->rowHeight(shortRow));
-    QVERIFY(table->cellWidget(longRow, 6) != nullptr);
+    QVERIFY(table->cellWidget(longRow, 7) != nullptr);
 }
 
 void MainWindowTest::preservesOperationPanelContextAcrossReordering()
@@ -2478,9 +2479,7 @@ void MainWindowTest::preservesOperationPanelContextAcrossReordering()
     panel.resize(900, 220);
     panel.show();
     auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
-    auto* const remove = panel.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
     QVERIFY(table != nullptr);
-    QVERIFY(remove != nullptr);
 
     for (quint64 id = 2000; id < 2030; ++id) {
         auto terminal =
@@ -2512,10 +2511,10 @@ void MainWindowTest::preservesOperationPanelContextAcrossReordering()
     QSignalSpy pauses(&panel, &rfm::app::OperationPanel::pauseRequested);
     QSignalSpy resumes(&panel, &rfm::app::OperationPanel::resumeRequested);
     QSignalSpy cancellations(&panel, &rfm::app::OperationPanel::cancelRequested);
-    QWidget* actions = table->cellWidget(rowForId(table, 3001), 6);
+    QWidget* actions = table->cellWidget(rowForId(table, 3001), 7);
     QVERIFY(actions != nullptr);
-    auto* pauseResume = actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
-    auto* cancel = actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    auto* pauseResume = actions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"));
+    auto* cancel = actions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
     QVERIFY(pauseResume != nullptr);
     QVERIFY(cancel != nullptr);
     QTest::mouseClick(pauseResume, Qt::LeftButton);
@@ -2524,9 +2523,9 @@ void MainWindowTest::preservesOperationPanelContextAcrossReordering()
 
     panel.updateOperation(
         rfm::core::operationProgress(progress(3001, rfm::core::TransferState::Paused, 1, 10)));
-    actions = table->cellWidget(rowForId(table, 3001), 6);
-    pauseResume = actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
-    cancel = actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    actions = table->cellWidget(rowForId(table, 3001), 7);
+    pauseResume = actions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"));
+    cancel = actions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
     QTest::mouseClick(pauseResume, Qt::LeftButton);
     QTest::mouseClick(cancel, Qt::LeftButton);
     QCOMPARE(resumes.size(), 1);
@@ -2535,8 +2534,9 @@ void MainWindowTest::preservesOperationPanelContextAcrossReordering()
     QCOMPARE(cancellations.constFirst().constFirst().toULongLong(), quint64{3001});
 
     QSignalSpy removals(&panel, &rfm::app::OperationPanel::removeTerminalRequested);
-    table->selectRow(rowForId(table, 2010));
-    QVERIFY(remove->isEnabled());
+    auto* const remove = table->cellWidget(rowForId(table, 2010), 7)
+                             ->findChild<QToolButton*>(QStringLiteral("removeOperationButton"));
+    QVERIFY(remove != nullptr);
     QTest::mouseClick(remove, Qt::LeftButton);
     QCOMPARE(removals.size(), 1);
     QCOMPARE(removals.constFirst().constFirst().toULongLong(), quint64{2010});
@@ -2616,10 +2616,10 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     QVERIFY(indeterminate != nullptr);
     QCOMPARE(indeterminate->minimum(), 0);
     QCOMPARE(indeterminate->maximum(), 0);
-    auto* const copyActions = table->cellWidget(copyRow, 6);
+    auto* const copyActions = table->cellWidget(copyRow, 7);
     QVERIFY(copyActions != nullptr);
     auto* const cancelCopy =
-        copyActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+        copyActions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
     QVERIFY(cancelCopy != nullptr);
     QVERIFY(cancelCopy->isVisible());
 
@@ -2652,9 +2652,11 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     QCOMPARE(table->item(moveRow, 0)->text(), QStringLiteral("Remote Move"));
     QCOMPARE(table->item(moveRow, 3)->text(), QStringLiteral("Failed"));
     QCOMPARE(table->item(moveRow, 4)->text(), QStringLiteral("1 / 2 completed"));
-    QVERIFY(table->item(moveRow, 7)->text().contains(QStringLiteral("permission denied")));
+    QVERIFY(table->item(moveRow, 6)->text().contains(QStringLiteral("permission denied")));
     QVERIFY(table->cellWidget(moveRow, 4) == nullptr);
-    QVERIFY(table->cellWidget(moveRow, 6) == nullptr);
+    auto* const removeMove = table->cellWidget(moveRow, 7);
+    QVERIFY(removeMove != nullptr);
+    QVERIFY(removeMove->findChild<QToolButton*>(QStringLiteral("removeOperationButton")) != nullptr);
 }
 
 void MainWindowTest::acceptsRemoteMoveProgressFromWorker()
@@ -2680,14 +2682,8 @@ void MainWindowTest::removesOnlyTerminalOperationsFromPanel()
     rfm::app::OperationPanel panel;
     panel.show();
     auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
-    auto* const remove = panel.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
-    auto* const clear =
-        panel.findChild<QPushButton*>(QStringLiteral("clearOperationHistoryButton"));
     QVERIFY(table != nullptr);
-    QVERIFY(remove != nullptr);
-    QVERIFY(clear != nullptr);
     QSignalSpy removals(&panel, &rfm::app::OperationPanel::removeTerminalRequested);
-    QSignalSpy clears(&panel, &rfm::app::OperationPanel::clearTerminalRequested);
 
     panel.updateOperation(rfm::core::beginRemoteOperation(
         801, rfm::core::OperationKind::RemoteCopy, {{QStringLiteral("/source/active"), false}},
@@ -2699,26 +2695,22 @@ void MainWindowTest::removesOnlyTerminalOperationsFromPanel()
     panel.updateOperation(rfm::core::operationProgress(failed));
     QCOMPARE(table->rowCount(), 3);
 
-    table->selectRow(rowForId(table, 801));
-    QVERIFY(!remove->isEnabled());
-    QVERIFY(clear->isEnabled());
     QVERIFY(!panel.removeTerminalOperation(801));
     QCOMPARE(table->rowCount(), 3);
 
-    table->selectRow(rowForId(table, 802));
-    QVERIFY(remove->isEnabled());
+    QVERIFY(table->cellWidget(rowForId(table, 801), 7) != nullptr);
+    auto* const remove = table->cellWidget(rowForId(table, 802), 7)
+                             ->findChild<QToolButton*>(QStringLiteral("removeOperationButton"));
+    QVERIFY(remove != nullptr);
     QTest::mouseClick(remove, Qt::LeftButton);
     QCOMPARE(removals.size(), 1);
     QCOMPARE(removals.constFirst().constFirst().toULongLong(), quint64{802});
     QVERIFY(panel.removeTerminalOperation(802));
     QCOMPARE(table->rowCount(), 2);
 
-    QTest::mouseClick(clear, Qt::LeftButton);
-    QCOMPARE(clears.size(), 1);
     panel.clearTerminalOperations();
     QCOMPARE(table->rowCount(), 1);
     QCOMPARE(rowForId(table, 801), 0);
-    QVERIFY(!clear->isEnabled());
 }
 
 void MainWindowTest::exposesPauseResumeAndCancelIntentions()
@@ -2733,40 +2725,51 @@ void MainWindowTest::exposesPauseResumeAndCancelIntentions()
     auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const int row = rowForId(table, 301);
-    QWidget* const actions = table->cellWidget(row, 6);
-    auto* const pauseResume = actions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"));
-    auto* const cancel = actions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+    QWidget* const actions = table->cellWidget(row, 7);
+    auto* const pauseResume = actions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"));
+    auto* const cancel = actions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
     QVERIFY(pauseResume != nullptr);
     QVERIFY(cancel != nullptr);
     QCOMPARE(table->horizontalHeader()->sectionResizeMode(1), QHeaderView::Stretch);
     QCOMPARE(table->horizontalHeader()->sectionResizeMode(2), QHeaderView::Stretch);
-    QCOMPARE(table->horizontalHeader()->sectionResizeMode(6), QHeaderView::ResizeToContents);
-    QVERIFY(pauseResume->minimumWidth() >= pauseResume->sizeHint().width());
-    QVERIFY(cancel->minimumWidth() >= cancel->sizeHint().width());
-    QVERIFY(actions->minimumWidth() >= pauseResume->minimumWidth() + cancel->minimumWidth());
+    QCOMPARE(table->horizontalHeader()->sectionResizeMode(7), QHeaderView::ResizeToContents);
+    QCOMPARE(table->horizontalHeaderItem(6)->text(), QStringLiteral("Error"));
+    QCOMPARE(table->horizontalHeaderItem(7)->text(), QStringLiteral("Actions"));
+    QCOMPARE(pauseResume->text(), QString{});
+    QCOMPARE(cancel->text(), QString{});
+    QVERIFY(!pauseResume->icon().isNull());
+    QVERIFY(!cancel->icon().isNull());
+    QCOMPARE(pauseResume->toolTip(), QStringLiteral("Pause operation"));
+    QCOMPARE(cancel->toolTip(), QStringLiteral("Cancel operation"));
+    QCOMPARE(pauseResume->accessibleName(), pauseResume->toolTip());
+    QCOMPARE(cancel->accessibleName(), cancel->toolTip());
+    QCOMPARE(pauseResume->size(), QSize(28, 28));
+    QCOMPARE(cancel->size(), QSize(28, 28));
     for (const int width : {1000, 760, 520}) {
         panel.resize(width, 240);
         QCoreApplication::processEvents();
-        QVERIFY(table->columnWidth(6) >= actions->minimumWidth());
-        QVERIFY(pauseResume->width() >= pauseResume->minimumWidth());
-        QVERIFY(cancel->width() >= cancel->minimumWidth());
+        QVERIFY(table->columnWidth(7) >= actions->minimumWidth());
+        QCOMPARE(pauseResume->size(), QSize(28, 28));
+        QCOMPARE(cancel->size(), QSize(28, 28));
     }
-    QCOMPARE(pauseResume->text(), QStringLiteral("Pause"));
     QTest::mouseClick(pauseResume, Qt::LeftButton);
     QCOMPARE(pauses.size(), 1);
 
     panel.updateOperation(
         rfm::core::operationProgress(progress(301, rfm::core::TransferState::Paused, 1, 10)));
-    QCOMPARE(pauseResume->text(), QStringLiteral("Resume"));
+    QCOMPARE(pauseResume->text(), QString{});
+    QVERIFY(!pauseResume->icon().isNull());
+    QCOMPARE(pauseResume->toolTip(), QStringLiteral("Resume operation"));
+    QCOMPARE(pauseResume->accessibleName(), pauseResume->toolTip());
     QTest::mouseClick(pauseResume, Qt::LeftButton);
     QCOMPARE(resumes.size(), 1);
     panel.updateOperation(
         rfm::core::operationProgress(progress(301, rfm::core::TransferState::Transferring, 2, 10)));
-    QCOMPARE(pauseResume->text(), QStringLiteral("Pause"));
+    QCOMPARE(pauseResume->toolTip(), QStringLiteral("Pause operation"));
     QTest::mouseClick(cancel, Qt::LeftButton);
     QCOMPARE(cancellations.size(), 1);
     QCOMPARE(cancellations.constFirst().constFirst().toULongLong(), quint64{301});
-    QCOMPARE(cancel->text(), QStringLiteral("Cancel"));
+    QCOMPARE(cancel->text(), QString{});
 }
 
 void MainWindowTest::displaysTerminalTransferStatesAndErrors()
@@ -2778,18 +2781,33 @@ void MainWindowTest::displaysTerminalTransferStatesAndErrors()
     auto failure = progress(402, rfm::core::TransferState::Failed, 4, 10);
     failure.error = QStringLiteral("/srv/archive: permission denied");
     panel.updateOperation(rfm::core::operationProgress(failure));
+    panel.updateOperation(
+        rfm::core::operationProgress(progress(403, rfm::core::TransferState::Cancelled, 4, 10)));
     auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
     QVERIFY(table != nullptr);
     const int completedRow = rowForId(table, 401);
     const int failedRow = rowForId(table, 402);
+    const int cancelledRow = rowForId(table, 403);
     QCOMPARE(table->item(completedRow, 3)->text(), QStringLiteral("Completed"));
     QCOMPARE(table->item(failedRow, 3)->text(), QStringLiteral("Failed"));
-    QCOMPARE(table->item(failedRow, 7)->text(), failure.error);
-    QWidget* const completedActions = table->cellWidget(completedRow, 6);
-    QVERIFY(
-        completedActions->findChild<QPushButton*>(QStringLiteral("pauseResumeButton"))->isHidden());
-    QVERIFY(completedActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"))
+    QCOMPARE(table->item(failedRow, 6)->text(), failure.error);
+    auto* const completedActions = table->cellWidget(completedRow, 7);
+    QVERIFY(completedActions != nullptr);
+    auto* const remove =
+        completedActions->findChild<QToolButton*>(QStringLiteral("removeOperationButton"));
+    QVERIFY(remove != nullptr);
+    QCOMPARE(remove->text(), QString{});
+    QVERIFY(!remove->icon().isNull());
+    QCOMPARE(remove->toolTip(), QStringLiteral("Remove from history"));
+    QCOMPARE(remove->accessibleName(), remove->toolTip());
+    QCOMPARE(remove->size(), QSize(28, 28));
+    QVERIFY(remove->isVisible());
+    QVERIFY(completedActions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"))
                 ->isHidden());
+    QVERIFY(completedActions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"))
+                ->isHidden());
+    QVERIFY(table->cellWidget(failedRow, 7) != nullptr);
+    QVERIFY(table->cellWidget(cancelledRow, 7) != nullptr);
 }
 
 void MainWindowTest::formatsTransferSizesAndSpeeds()
@@ -2858,7 +2876,7 @@ void MainWindowTest::displaysLocalSuccessWarning()
     panel.updateOperation(operation);
     const int row = rowForId(table, operation.id);
     QCOMPARE(table->item(row, 3)->text(), QStringLiteral("Completed"));
-    QCOMPARE(table->item(row, 7)->text(), operation.error);
+    QCOMPARE(table->item(row, 6)->text(), operation.error);
 }
 
 void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
@@ -3526,10 +3544,10 @@ void MainWindowTest::copiesAndMovesSelectionToOtherPane()
     QCOMPARE(operationTable->item(copyRow, 0)->text(), QStringLiteral("Remote Copy"));
     QCOMPARE(operationTable->item(copyRow, 3)->text(), QStringLiteral("Queued"));
     QVERIFY(operationTable->cellWidget(copyRow, 4) != nullptr);
-    auto* const copyActions = operationTable->cellWidget(copyRow, 6);
+    auto* const copyActions = operationTable->cellWidget(copyRow, 7);
     QVERIFY(copyActions != nullptr);
     auto* const cancelCopy =
-        copyActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+        copyActions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
     QVERIFY(cancelCopy != nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::cancelRemoteOperationRequested, nullptr,
                         nullptr);
@@ -3633,10 +3651,10 @@ void MainWindowTest::queuesRemoteCopiesWithoutBlockingTheWindow()
     QCOMPARE(table->item(rowForId(table, secondId), 3)->text(), QStringLiteral("Queued"));
     QVERIFY(rowForId(table, firstId) < rowForId(table, secondId));
 
-    QWidget* const queuedActions = table->cellWidget(rowForId(table, secondId), 6);
+    QWidget* const queuedActions = table->cellWidget(rowForId(table, secondId), 7);
     QVERIFY(queuedActions != nullptr);
     auto* const cancelQueued =
-        queuedActions->findChild<QPushButton*>(QStringLiteral("cancelTransferButton"));
+        queuedActions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"));
     QVERIFY(cancelQueued != nullptr);
     dismissNextMessageBox();
     cancelQueued->click();
@@ -4258,15 +4276,14 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
     {
         rfm::app::MainWindow window(nullptr, directory.path());
         auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
-        auto* const remove =
-            window.findChild<QPushButton*>(QStringLiteral("removeOperationButton"));
         auto* const clear =
-            window.findChild<QPushButton*>(QStringLiteral("clearOperationHistoryButton"));
+            window.findChild<QToolButton*>(QStringLiteral("clearOperationHistoryButton"));
         auto* const saveTimer =
             window.findChild<QTimer*>(QStringLiteral("operationHistorySaveTimer"));
         QVERIFY(table != nullptr);
-        QVERIFY(remove != nullptr);
         QVERIFY(clear != nullptr);
+        QCOMPARE(clear->text(), QString{});
+        QCOMPARE(clear->toolTip(), QStringLiteral("Clear operation history"));
         QCOMPARE(table->rowCount(), 2);
         QCOMPARE(operationIds(table), (QList<quint64>{902, 901}));
         QCOMPARE(table->item(rowForId(table, 901), 3)->text(), QStringLiteral("Completed"));
@@ -4274,8 +4291,9 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         QCOMPARE(table->item(rowForId(table, 901), 0)->toolTip(),
                  QStringLiteral("Server: history.example.test:2222"));
 
-        table->selectRow(rowForId(table, 901));
-        QVERIFY(remove->isEnabled());
+        auto* const remove = table->cellWidget(rowForId(table, 901), 7)
+                                 ->findChild<QToolButton*>(QStringLiteral("removeOperationButton"));
+        QVERIFY(remove != nullptr);
         QTest::mouseClick(remove, Qt::LeftButton);
         QCOMPARE(table->rowCount(), 1);
         QCOMPARE(rowForId(table, 901), -1);
@@ -4284,8 +4302,6 @@ void MainWindowTest::persistsRemovesAndClearsTerminalOperationHistory()
         QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                           Q_ARG(rfm::core::TransferProgress, active)));
         QCOMPARE(table->rowCount(), 2);
-        table->selectRow(rowForId(table, 903));
-        QVERIFY(!remove->isEnabled());
         QVERIFY(clear->isEnabled());
         QTest::mouseClick(clear, Qt::LeftButton);
         QCOMPARE(table->rowCount(), 1);
