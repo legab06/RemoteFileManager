@@ -24,6 +24,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QUrl>
 
 #include <algorithm>
 
@@ -46,6 +47,7 @@ class FileBrowserPaneTest final : public QObject
     void dragWithActionModifierPreservesMultipleSelection_data();
     void dragWithActionModifierPreservesMultipleSelection();
     void emitsNavigationIntentions();
+    void requestsOpeningLocalFilesWithoutChangingDirectoryOrSshBehavior();
     void preparesContextSelectionBeforeEmittingIntent();
     void buildsPropertiesForTheEntryUnderTheContextClick();
     void restoresSelectionAndScrollOnRefresh();
@@ -1114,6 +1116,52 @@ void FileBrowserPaneTest::emitsNavigationIntentions()
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
                                       Q_ARG(int, 1), Q_ARG(int, 0)));
     QCOMPARE(navigation.size(), 0);
+}
+
+void FileBrowserPaneTest::requestsOpeningLocalFilesWithoutChangingDirectoryOrSshBehavior()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    QDir directory(temporary.path());
+    QVERIFY(directory.mkdir(QStringLiteral("folder")));
+    const QString filePath = directory.filePath(QStringLiteral("document.txt"));
+    QFile file(filePath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+
+    rfm::app::FileBrowserPane pane;
+    const rfm::core::BrowserLocation localLocation{rfm::core::FileSource::Local,
+                                                   QString::fromLatin1(rfm::core::LocalMachineId),
+                                                   temporary.path()};
+    pane.showDirectory(localLocation, QUrl::fromLocalFile(temporary.path()).toDisplayString(),
+                       {{QStringLiteral("folder"), 0, {}, true, false},
+                        {QStringLiteral("document.txt"), 0, {}, false, false}});
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+    QSignalSpy opens(&pane, &rfm::app::FileBrowserPane::fileOpenRequested);
+
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(opens.size(), 0);
+    QCOMPARE(qvariant_cast<rfm::core::BrowserLocation>(navigation.constFirst().constFirst()).path,
+             directory.filePath(QStringLiteral("folder")));
+
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 1), Q_ARG(int, 0)));
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(opens.size(), 1);
+    const auto opened = qvariant_cast<rfm::core::BrowserLocation>(opens.constFirst().constFirst());
+    QCOMPARE(opened.source, rfm::core::FileSource::Local);
+    QCOMPARE(opened.machineId, QString::fromLatin1(rfm::core::LocalMachineId));
+    QCOMPARE(opened.path, filePath);
+
+    pane.showDirectory(
+        {rfm::core::FileSource::Ssh, QStringLiteral("ssh:fixture"), QStringLiteral("/remote")},
+        QStringLiteral("sftp://fixture/remote"),
+        {{QStringLiteral("remote.txt"), 0, {}, false, false}});
+    QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+    QCOMPARE(opens.size(), 1);
 }
 
 void FileBrowserPaneTest::navigatesFromCanonicalLoginDirectoryToRemoteRoot()

@@ -108,6 +108,7 @@ class MainWindow final : public QMainWindow
     void createMenus();
     void createPaneWorkspace();
     void connectBrowserPane(quint64 paneId);
+    void openLocalFile(const rfm::core::BrowserLocation& location);
     void createNavigationBar();
     void createPlacesDock();
     void createOperationDock();

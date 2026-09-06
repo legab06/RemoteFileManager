@@ -1659,13 +1659,26 @@ void FileBrowserPane::requestRefresh()
 void FileBrowserPane::openEntry(int row)
 {
     const QTableWidgetItem* const item = m_fileTable->item(row, 0);
-    if (item == nullptr ||
-        (!item->data(Qt::UserRole).toBool() && !item->data(Qt::UserRole + 1).toBool())) {
+    if (item == nullptr) {
         return;
     }
-    navigateTo(m_currentLocation.source == rfm::core::FileSource::Local
-                   ? QDir(m_currentLocation.path).filePath(item->text())
-                   : rfm::core::RemotePath::join(m_currentLocation.path, item->text()));
+    const bool directory = item->data(Qt::UserRole).toBool();
+    const bool symbolicLink = item->data(Qt::UserRole + 1).toBool();
+    if (directory || symbolicLink) {
+        navigateTo(m_currentLocation.source == rfm::core::FileSource::Local
+                       ? QDir(m_currentLocation.path).filePath(item->text())
+                       : rfm::core::RemotePath::join(m_currentLocation.path, item->text()));
+        return;
+    }
+    if (m_currentLocation.source != rfm::core::FileSource::Local ||
+        m_currentLocation.machineId != QString::fromLatin1(rfm::core::LocalMachineId)) {
+        return;
+    }
+    const QString path = QDir(m_currentLocation.path).filePath(item->text());
+    if (QFileInfo(path).isFile()) {
+        emit fileOpenRequested(
+            {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId), path});
+    }
 }
 
 void FileBrowserPane::prepareContextMenu(const QPoint& position)

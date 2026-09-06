@@ -22,6 +22,7 @@
 #include <QApplication>
 #include <QCursor>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QDockWidget>
@@ -645,6 +646,7 @@ void MainWindow::connectBrowserPane(quint64 paneId)
             [this, paneId](const rfm::core::BrowserLocation& location, PaneNavigation navigation) {
                 requestLocationListing(paneId, location, true, navigation);
             });
+    connect(pane, &FileBrowserPane::fileOpenRequested, this, &MainWindow::openLocalFile);
     connect(pane, &FileBrowserPane::historyChanged, this, [this, paneId, pane] {
         updatePaneTransferContexts();
         if (pane == m_paneWorkspace->activePane()) {
@@ -673,6 +675,18 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         statusBar()->showMessage(tr("Moving between local and SSH locations is not supported yet."),
                                  8000);
     });
+}
+
+void MainWindow::openLocalFile(const rfm::core::BrowserLocation& location)
+{
+    if (location.source != rfm::core::FileSource::Local ||
+        location.machineId != QString::fromLatin1(rfm::core::LocalMachineId) ||
+        !QFileInfo(location.path).isFile()) {
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(location.path))) {
+        statusBar()->showMessage(tr("Could not open the file with the default application."), 8000);
+    }
 }
 
 void MainWindow::requestDirectoryItemCount(quint64 paneId,

@@ -20,6 +20,7 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QDesktopServices>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>
@@ -54,6 +55,7 @@
 #include <QToolBar>
 #include <QToolButton>
 #include <QTreeWidget>
+#include <QUrl>
 
 #include <chrono>
 #include <condition_variable>
@@ -91,6 +93,23 @@ class RecordingRemoteBackend final : public rfm::core::RemoteFileBackend
 
     QString lastSource;
     QString lastDestination;
+};
+
+class UrlHandler final : public QObject
+{
+    Q_OBJECT
+
+  public slots:
+    void handleUrl(const QUrl& url) { urls.push_back(url); }
+
+  public:
+    QList<QUrl> urls;
+};
+
+class ScopedUrlHandler final
+{
+  public:
+    ~ScopedUrlHandler() { QDesktopServices::unsetUrlHandler(QStringLiteral("file")); }
 };
 
 class FixedVolumeService final : public rfm::core::VolumeService
@@ -507,6 +526,7 @@ class MainWindowTest final : public QObject
     void copyToOtherPaneQueuesCrossSourceTransfers();
     void keyboardActionsExposeShortcutsAndTargetTheActivePane();
     void opensLocalDirectoryWithoutSshAndNavigatesAsynchronously();
+    void opensLocalFilesWithTheSystemUrlHandler();
     void mutatesLocalEntriesAndRefreshesMatchingPanes();
     void preservesCutAfterIndependentLocalMove();
     void consumesCutAfterSuccessfulLocalPaste();
@@ -1029,6 +1049,34 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QVERIFY(window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
     QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCopyAction"))->isEnabled());
     QVERIFY(window.findChild<QAction*>(QStringLiteral("clipboardCutAction"))->isEnabled());
+}
+
+void MainWindowTest::opensLocalFilesWithTheSystemUrlHandler()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString filePath = QDir(temporary.path()).filePath(QStringLiteral("document.txt"));
+    QFile file(filePath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+
+    rfm::app::MainWindow window;
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const pane = workspace->activePane();
+    pane->showDirectory({rfm::core::FileSource::Local,
+                         QString::fromLatin1(rfm::core::LocalMachineId), temporary.path()},
+                        QUrl::fromLocalFile(temporary.path()).toDisplayString(),
+                        {{QStringLiteral("document.txt"), 0, {}, false, false}});
+
+    UrlHandler handler;
+    QDesktopServices::setUrlHandler(QStringLiteral("file"), &handler, "handleUrl");
+    ScopedUrlHandler resetHandler;
+    QVERIFY(QMetaObject::invokeMethod(pane->fileTable(), "cellDoubleClicked", Qt::DirectConnection,
+                                      Q_ARG(int, 0), Q_ARG(int, 0)));
+
+    QCOMPARE(handler.urls.size(), 1);
+    QCOMPARE(handler.urls.constFirst(), QUrl::fromLocalFile(filePath));
 }
 
 void MainWindowTest::mutatesLocalEntriesAndRefreshesMatchingPanes()

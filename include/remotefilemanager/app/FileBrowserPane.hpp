@@ -82,6 +82,7 @@ class FileBrowserPane final : public QWidget
     void navigationRequested(QString path, rfm::app::PaneNavigation navigation);
     void locationNavigationRequested(rfm::core::BrowserLocation location,
                                      rfm::app::PaneNavigation navigation);
+    void fileOpenRequested(rfm::core::BrowserLocation location);
     void historyChanged();
     void selectionChanged();
     void contextMenuRequested(QPoint globalPosition);
