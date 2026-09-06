@@ -453,8 +453,6 @@ class MainWindowTest final : public QObject
     void terminalTransferReleasesDisconnectProtection();
     void enablesMultipleRemoteSelection();
     void buildsPortableTransferRequests();
-    void queuesFilesAndFoldersAsSeparateUploads();
-    void queuesDownloadsFromRemoteSelection();
     void displaysTransferProgressAndMultipleEntries();
     void ordersOperationRowsWithoutDuplicates();
     void restoresOperationHistoryInSingleRebuild();
@@ -506,6 +504,7 @@ class MainWindowTest final : public QObject
     void promptsForConfirmedCrossVolumeLocalDragDrop();
     void localToSshDragDropQueuesExistingUploadsAndRejectsMove();
     void sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSessions();
+    void copyToOtherPaneQueuesCrossSourceTransfers();
     void keyboardActionsExposeShortcutsAndTargetTheActivePane();
     void opensLocalDirectoryWithoutSshAndNavigatesAsynchronously();
     void mutatesLocalEntriesAndRefreshesMatchingPanes();
@@ -594,9 +593,8 @@ void MainWindowTest::volumeRequestsPreserveDeviceMountPoints()
                                           Qt::DirectConnection, Q_ARG(quint64, refreshId),
                                           Q_ARG(QList<rfm::core::StorageVolume>, volumes)));
         auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
-        QTreeWidgetItem* const selected =
-            volumeItemByDeviceAndPath(remoteCategoryItem(navigation->tree()), device,
-                                      first.rootPath);
+        QTreeWidgetItem* const selected = volumeItemByDeviceAndPath(
+            remoteCategoryItem(navigation->tree()), device, first.rootPath);
         QVERIFY(selected != nullptr);
         navigation->tree()->setCurrentItem(selected);
         window.findChild<QPushButton*>(QStringLiteral("unmountVolumeButton"))->click();
@@ -1016,8 +1014,8 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QVERIFY(createAction->isEnabled());
     QVERIFY(!renameAction->isEnabled());
     QVERIFY(!removeAction->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("uploadAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("downloadAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("uploadAction")) == nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("downloadAction")) == nullptr);
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->isEnabled());
@@ -1341,7 +1339,7 @@ void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect(
 
     QVERIFY(QMetaObject::invokeMethod(remotePane, "activated", Qt::DirectConnection));
     remotePane->fileTable()->selectRow(0);
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->isEnabled());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"))->isEnabled());
 
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
@@ -1409,15 +1407,10 @@ void MainWindowTest::exposesInitialDisconnectedShell()
     QVERIFY(operationPanel != nullptr);
     QVERIFY(operationTable != nullptr);
     QCOMPARE(operationTable->rowCount(), 0);
-    const auto* const uploadAction = window.findChild<QAction*>(QStringLiteral("uploadAction"));
-    const auto* const downloadAction = window.findChild<QAction*>(QStringLiteral("downloadAction"));
-    QVERIFY(uploadAction != nullptr);
-    QVERIFY(downloadAction != nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("uploadAction")) == nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("downloadAction")) == nullptr);
     QVERIFY(window.findChild<QAction*>(QStringLiteral("uploadFilesAction")) == nullptr);
     QVERIFY(window.findChild<QAction*>(QStringLiteral("uploadFolderAction")) == nullptr);
-    QVERIFY(uploadAction->menu() == nullptr);
-    QVERIFY(!uploadAction->isEnabled());
-    QVERIFY(!downloadAction->isEnabled());
     const auto* const refreshTimer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
     QVERIFY(refreshTimer != nullptr);
     QCOMPARE(refreshTimer->interval(), 3000);
@@ -1435,8 +1428,7 @@ void MainWindowTest::persistsShowHiddenFilesPreference()
 
     {
         rfm::app::MainWindow window;
-        auto* const action =
-            window.findChild<QAction*>(QStringLiteral("showHiddenFilesAction"));
+        auto* const action = window.findChild<QAction*>(QStringLiteral("showHiddenFilesAction"));
         QVERIFY(action != nullptr);
         QVERIFY(action->isCheckable());
         QVERIFY(!action->isChecked());
@@ -1445,12 +1437,12 @@ void MainWindowTest::persistsShowHiddenFilesPreference()
         QVERIFY(workspace != nullptr);
         QVERIFY(navigation != nullptr);
         rfm::app::FileBrowserPane* const pane = workspace->primaryPane();
-        pane->showDirectory(
-            {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
-             QDir::homePath()},
-            QDir::homePath(), {{QStringLiteral(".hidden"), 0, {}, true, false, true}});
-        navigation->setLocalDirectory(
-            QDir::homePath(), {{QStringLiteral(".hidden"), 0, {}, true, false, true}});
+        pane->showDirectory({rfm::core::FileSource::Local,
+                             QString::fromLatin1(rfm::core::LocalMachineId), QDir::homePath()},
+                            QDir::homePath(),
+                            {{QStringLiteral(".hidden"), 0, {}, true, false, true}});
+        navigation->setLocalDirectory(QDir::homePath(),
+                                      {{QStringLiteral(".hidden"), 0, {}, true, false, true}});
         QTreeWidgetItem* const home =
             childNamed(localPlacesRoot(navigation->tree()), QStringLiteral("Home"));
         QTreeWidgetItem* const hiddenPlace = childNamed(home, QStringLiteral(".hidden"));
@@ -1488,8 +1480,7 @@ void MainWindowTest::dockVisibilityActionsTrackPanels()
     auto* const operationDock = window.findChild<QDockWidget*>(QStringLiteral("operationDock"));
     auto* const placesAction = window.findChild<QAction*>(QStringLiteral("placesDockAction"));
     auto* const operationAction = window.findChild<QAction*>(QStringLiteral("operationDockAction"));
-    auto* const hiddenAction =
-        window.findChild<QAction*>(QStringLiteral("showHiddenFilesAction"));
+    auto* const hiddenAction = window.findChild<QAction*>(QStringLiteral("showHiddenFilesAction"));
     QVERIFY(placesDock != nullptr);
     QVERIFY(operationDock != nullptr);
     QVERIFY(placesAction != nullptr);
@@ -1575,29 +1566,18 @@ void MainWindowTest::enablesMultipleRemoteSelection()
     auto* const moveAction = window.findChild<QAction*>(QStringLiteral("moveAction"));
     auto* const copyAction = window.findChild<QAction*>(QStringLiteral("copyAction"));
     auto* const removeAction = window.findChild<QAction*>(QStringLiteral("removeAction"));
-    auto* const uploadAction = window.findChild<QAction*>(QStringLiteral("uploadAction"));
-    auto* const downloadAction = window.findChild<QAction*>(QStringLiteral("downloadAction"));
     QVERIFY(createAction != nullptr);
     QVERIFY(renameAction != nullptr);
     QVERIFY(moveAction != nullptr);
     QVERIFY(copyAction != nullptr);
     QVERIFY(removeAction != nullptr);
-    QVERIFY(uploadAction != nullptr);
-    QVERIFY(downloadAction != nullptr);
     QVERIFY(createAction->isEnabled());
     QVERIFY(!renameAction->isEnabled());
     QVERIFY(moveAction->isEnabled());
     QVERIFY(copyAction->isEnabled());
     QVERIFY(removeAction->isEnabled());
-    QVERIFY(uploadAction->isEnabled());
-    QVERIFY(downloadAction->isEnabled());
-    QCOMPARE(uploadAction->text(), QStringLiteral("Upload"));
-    QCOMPARE(downloadAction->text(), QStringLiteral("Download"));
-    QCOMPARE(uploadAction->toolTip(), QStringLiteral("Upload files or folders to the server"));
-    QCOMPARE(downloadAction->toolTip(), QStringLiteral("Download the selection to this computer"));
-    QVERIFY(!uploadAction->icon().isNull());
-    QVERIFY(!downloadAction->icon().isNull());
-    QVERIFY(uploadAction->icon().cacheKey() != downloadAction->icon().cacheKey());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("uploadAction")) == nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("downloadAction")) == nullptr);
     const auto* const refreshTimer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
     QVERIFY(refreshTimer != nullptr);
     QVERIFY(refreshTimer->isActive());
@@ -1813,7 +1793,8 @@ void MainWindowTest::placesButtonTracksActiveAndSelectedProfiles()
     auto* const disconnect = window.findChild<QAction*>(QStringLiteral("disconnectAction"));
     QVERIFY(list != nullptr);
     QVERIFY(disconnect != nullptr);
-    QVERIFY(window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton")) == nullptr);
+    QVERIFY(window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton")) ==
+            nullptr);
     selectServerProfile(list, 0);
     QVERIFY(QMetaObject::invokeMethod(list, "itemDoubleClicked", Qt::DirectConnection,
                                       Q_ARG(QTreeWidgetItem*, serverProfileItem(list, 0)),
@@ -1860,13 +1841,13 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     auto* const homeList = window.findChild<QListWidget*>(QStringLiteral("homeServerList"));
     QVERIFY(list != nullptr);
     QVERIFY(homeList != nullptr);
-    QVERIFY(window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton")) == nullptr);
+    QVERIFY(window.findChild<QPushButton*>(QStringLiteral("connectServerProfileButton")) ==
+            nullptr);
     QVERIFY(window.findChild<QPushButton*>(QStringLiteral("addServerProfileButton")) == nullptr);
     QVERIFY(window.findChild<QPushButton*>(QStringLiteral("editServerProfileButton")) == nullptr);
     QVERIFY(window.findChild<QPushButton*>(QStringLiteral("removeServerProfileButton")) == nullptr);
 
-    auto* const homeAdd =
-        window.findChild<QPushButton*>(QStringLiteral("homeNewConnectionButton"));
+    auto* const homeAdd = window.findChild<QPushButton*>(QStringLiteral("homeNewConnectionButton"));
     auto* const placesAdd =
         qobject_cast<QToolButton*>(list->itemWidget(remoteCategoryItem(list), 1));
     QVERIFY(homeAdd != nullptr);
@@ -1887,8 +1868,7 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     dialog = window.findChild<rfm::app::ConnectionDialog*>();
     QVERIFY(dialog != nullptr);
     QCOMPARE(dialog->windowTitle(), QStringLiteral("New SSH connection"));
-    auto* const saveServer =
-        dialog->findChild<QCheckBox*>(QStringLiteral("saveServerCheck"));
+    auto* const saveServer = dialog->findChild<QCheckBox*>(QStringLiteral("saveServerCheck"));
     QVERIFY(saveServer != nullptr);
     QVERIFY(!saveServer->isHidden());
     dialog->findChild<QLineEdit*>(QStringLiteral("serverNameEdit"))
@@ -1921,8 +1901,7 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
              rfm::core::AuthenticationMode::PasswordOnly);
     QVERIFY(passwordOnlySaved.constFirst().privateKeyPath.isEmpty());
 
-    auto* const edit =
-        qobject_cast<QToolButton*>(list->itemWidget(serverProfileItem(list, 0), 1));
+    auto* const edit = qobject_cast<QToolButton*>(list->itemWidget(serverProfileItem(list, 0), 1));
     QVERIFY(edit != nullptr);
     QCOMPARE(edit->toolTip(), QStringLiteral("Edit server"));
     QCOMPARE(edit->accessibleName(), QStringLiteral("Edit server"));
@@ -2130,7 +2109,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
     QVERIFY(!disconnect->isEnabled());
     QVERIFY(refreshTimer->isActive());
     QVERIFY(window.findChild<QAction*>(QStringLiteral("newConnectionAction"))->isEnabled());
-    QVERIFY(!window.findChild<QAction*>(QStringLiteral("uploadAction"))->isEnabled());
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("uploadAction")) == nullptr);
     QVERIFY(!window.findChild<QTableWidget*>(QStringLiteral("remoteFileTable"))->isEnabled());
     QCOMPARE(window.findChild<QTableWidget*>(QStringLiteral("remoteFileTable"))->rowCount(), 0);
     QCOMPARE(stack->currentWidget(), home);
@@ -2254,76 +2233,6 @@ void MainWindowTest::buildsPortableTransferRequests()
     QCOMPARE(spacedDownload->source, QStringLiteral("/srv/remote-name "));
     QCOMPARE(spacedDownload->destination,
              QDir(temporary.path()).filePath(QStringLiteral("remote-name ")));
-}
-
-void MainWindowTest::queuesFilesAndFoldersAsSeparateUploads()
-{
-    QTemporaryDir temporary;
-    QVERIFY(temporary.isValid());
-    const QString filePath = temporary.filePath(QStringLiteral("archive.bin"));
-    QFile file(filePath);
-    QVERIFY(file.open(QIODevice::WriteOnly));
-    QCOMPARE(file.write("data"), qint64{4});
-    file.close();
-    const QString folderPath = temporary.filePath(QStringLiteral("photos"));
-    QVERIFY(QDir().mkdir(folderPath));
-
-    rfm::app::MainWindow window;
-    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
-                                      Q_ARG(QString, QStringLiteral("/srv/uploads")),
-                                      Q_ARG(QList<rfm::core::RemoteEntry>, {})));
-    QSignalSpy requested(&window, &rfm::app::MainWindow::transferRequested);
-    const QStringList localPaths{filePath, folderPath};
-    QVERIFY(QMetaObject::invokeMethod(&window, "queueUploads", Qt::DirectConnection,
-                                      Q_ARG(QStringList, localPaths)));
-    QCOMPARE(requested.size(), 2);
-
-    const auto fileRequest = requested.at(0).constFirst().value<rfm::core::TransferRequest>();
-    const auto folderRequest = requested.at(1).constFirst().value<rfm::core::TransferRequest>();
-    QCOMPARE(fileRequest.destination, QStringLiteral("/srv/uploads/archive.bin"));
-    QVERIFY(!fileRequest.directory);
-    QCOMPARE(folderRequest.destination, QStringLiteral("/srv/uploads/photos"));
-    QVERIFY(folderRequest.directory);
-}
-
-void MainWindowTest::queuesDownloadsFromRemoteSelection()
-{
-    rfm::app::MainWindow window;
-    const QList<rfm::core::RemoteEntry> entries{
-        {QStringLiteral("archive.tar"), 10, {}, false, false},
-        {QStringLiteral("photos"), 0, {}, true, false},
-    };
-    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
-                                      Q_ARG(QString, QStringLiteral("/srv")),
-                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
-    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("remoteFileTable"));
-    QVERIFY(table != nullptr);
-    table->selectionModel()->select(table->model()->index(0, 0),
-                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
-    table->selectionModel()->select(table->model()->index(1, 0),
-                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
-    QSignalSpy requested(&window, &rfm::app::MainWindow::transferRequested);
-    QTemporaryDir destination;
-    QVERIFY(destination.isValid());
-
-    QVERIFY(QMetaObject::invokeMethod(&window, "queueDownloads", Qt::DirectConnection,
-                                      Q_ARG(QString, destination.path())));
-    QCOMPARE(requested.size(), 2);
-    auto* const newConnectionAction =
-        window.findChild<QAction*>(QStringLiteral("newConnectionAction"));
-    QVERIFY(newConnectionAction != nullptr);
-    QVERIFY(!newConnectionAction->isEnabled());
-    QHash<QString, rfm::core::TransferRequest> bySource;
-    for (const QList<QVariant>& arguments : requested) {
-        const auto request = arguments.constFirst().value<rfm::core::TransferRequest>();
-        bySource.insert(request.source, request);
-    }
-    QCOMPARE(bySource.value(QStringLiteral("/srv/archive.tar")).destination,
-             QDir(destination.path()).filePath(QStringLiteral("archive.tar")));
-    QVERIFY(!bySource.value(QStringLiteral("/srv/archive.tar")).directory);
-    QCOMPARE(bySource.value(QStringLiteral("/srv/photos")).destination,
-             QDir(destination.path()).filePath(QStringLiteral("photos")));
-    QVERIFY(bySource.value(QStringLiteral("/srv/photos")).directory);
 }
 
 void MainWindowTest::displaysTransferProgressAndMultipleEntries()
@@ -2656,7 +2565,8 @@ void MainWindowTest::displaysRemoteCopyAndMoveOperations()
     QVERIFY(table->cellWidget(moveRow, 4) == nullptr);
     auto* const removeMove = table->cellWidget(moveRow, 7);
     QVERIFY(removeMove != nullptr);
-    QVERIFY(removeMove->findChild<QToolButton*>(QStringLiteral("removeOperationButton")) != nullptr);
+    QVERIFY(removeMove->findChild<QToolButton*>(QStringLiteral("removeOperationButton")) !=
+            nullptr);
 }
 
 void MainWindowTest::acceptsRemoteMoveProgressFromWorker()
@@ -2802,8 +2712,8 @@ void MainWindowTest::displaysTerminalTransferStatesAndErrors()
     QCOMPARE(remove->accessibleName(), remove->toolTip());
     QCOMPARE(remove->size(), QSize(28, 28));
     QVERIFY(remove->isVisible());
-    QVERIFY(completedActions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"))
-                ->isHidden());
+    QVERIFY(
+        completedActions->findChild<QToolButton*>(QStringLiteral("pauseResumeButton"))->isHidden());
     QVERIFY(completedActions->findChild<QToolButton*>(QStringLiteral("cancelTransferButton"))
                 ->isHidden());
     QVERIFY(table->cellWidget(failedRow, 7) != nullptr);
@@ -3297,27 +3207,6 @@ void MainWindowTest::activePaneOwnsNavigationRefreshAndUploadTargets()
                                       Q_ARG(quint64, parentId),
                                       Q_ARG(QString, QStringLiteral("/two")),
                                       Q_ARG(QList<rfm::core::RemoteEntry>, refreshedEntries)));
-
-    QTemporaryDir temporary;
-    QVERIFY(temporary.isValid());
-    const QString uploadPath = temporary.filePath(QStringLiteral("upload.txt"));
-    QFile upload(uploadPath);
-    QVERIFY(upload.open(QIODevice::WriteOnly));
-    upload.write("data");
-    upload.close();
-    QSignalSpy transfers(&window, &rfm::app::MainWindow::transferRequested);
-    QVERIFY(QMetaObject::invokeMethod(&window, "queueUploads", Qt::DirectConnection,
-                                      Q_ARG(QStringList, QStringList{uploadPath})));
-    QCOMPARE(transfers.size(), 1);
-    const auto transfer = transfers.constFirst().constFirst().value<rfm::core::TransferRequest>();
-    QCOMPARE(transfer.destination, QStringLiteral("/two/upload.txt"));
-
-    secondary->fileTable()->selectRow(0);
-    QVERIFY(QMetaObject::invokeMethod(&window, "queueDownloads", Qt::DirectConnection,
-                                      Q_ARG(QString, temporary.path())));
-    QCOMPARE(transfers.size(), 2);
-    const auto download = transfers.at(1).constFirst().value<rfm::core::TransferRequest>();
-    QCOMPARE(download.source, QStringLiteral("/two/selected.txt"));
 }
 
 void MainWindowTest::navigationKeepsInitiatingPaneActive_data()
@@ -3842,7 +3731,7 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
         QVERIFY(menu != nullptr);
         const QList<QAction*> actions = menu->actions();
-        QCOMPARE(actions.size(), 12);
+        QCOMPARE(actions.size(), 11);
         QCOMPARE(actions.at(0), window.findChild<QAction*>(QStringLiteral("clipboardCopyAction")));
         QCOMPARE(actions.at(1), window.findChild<QAction*>(QStringLiteral("clipboardCutAction")));
         QCOMPARE(actions.at(2), window.findChild<QAction*>(QStringLiteral("clipboardPasteAction")));
@@ -3852,10 +3741,9 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         QCOMPARE(actions.at(5), window.findChild<QAction*>(QStringLiteral("moveAction")));
         QVERIFY(actions.at(6)->isSeparator());
         QCOMPARE(actions.at(7), window.findChild<QAction*>(QStringLiteral("renameAction")));
-        QCOMPARE(actions.at(8), window.findChild<QAction*>(QStringLiteral("downloadAction")));
-        QCOMPARE(actions.at(9), window.findChild<QAction*>(QStringLiteral("removeAction")));
-        QVERIFY(actions.at(10)->isSeparator());
-        QCOMPARE(actions.at(11),
+        QCOMPARE(actions.at(8), window.findChild<QAction*>(QStringLiteral("removeAction")));
+        QVERIFY(actions.at(9)->isSeparator());
+        QCOMPARE(actions.at(10),
                  window.findChild<QAction*>(QStringLiteral("createDirectoryAction")));
         QVERIFY(
             !actions.contains(window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))));
@@ -3880,7 +3768,7 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
         QVERIFY(menu != nullptr);
         const QList<QAction*> actions = menu->actions();
-        QCOMPARE(actions.size(), 14);
+        QCOMPARE(actions.size(), 13);
         QCOMPARE(actions.at(0), window.findChild<QAction*>(QStringLiteral("clipboardCopyAction")));
         QCOMPARE(actions.at(1), window.findChild<QAction*>(QStringLiteral("clipboardCutAction")));
         QCOMPARE(actions.at(2), window.findChild<QAction*>(QStringLiteral("clipboardPasteAction")));
@@ -3893,10 +3781,9 @@ void MainWindowTest::contextMenuUsesSharedInterPaneActions()
         QCOMPARE(actions.at(7), window.findChild<QAction*>(QStringLiteral("moveAction")));
         QVERIFY(actions.at(8)->isSeparator());
         QCOMPARE(actions.at(9), window.findChild<QAction*>(QStringLiteral("renameAction")));
-        QCOMPARE(actions.at(10), window.findChild<QAction*>(QStringLiteral("downloadAction")));
-        QCOMPARE(actions.at(11), window.findChild<QAction*>(QStringLiteral("removeAction")));
-        QVERIFY(actions.at(12)->isSeparator());
-        QCOMPARE(actions.at(13),
+        QCOMPARE(actions.at(10), window.findChild<QAction*>(QStringLiteral("removeAction")));
+        QVERIFY(actions.at(11)->isSeparator());
+        QCOMPARE(actions.at(12),
                  window.findChild<QAction*>(QStringLiteral("createDirectoryAction")));
         menu->close();
     });
@@ -5030,6 +4917,77 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
         Q_ARG(bool, true)));
     QCOMPARE(transfers.size(), 2);
     QCOMPARE(removes.size(), 0);
+}
+
+void MainWindowTest::copyToOtherPaneQueuesCrossSourceTransfers()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString localDirectory = QDir(temporary.path()).filePath(QStringLiteral("local"));
+    QVERIFY(QDir().mkpath(localDirectory));
+    const QString localFilePath = QDir(localDirectory).filePath(QStringLiteral("local.txt"));
+    QFile localFile(localFilePath);
+    QVERIFY(localFile.open(QIODevice::WriteOnly));
+    localFile.close();
+    const QList<rfm::core::RemoteEntry> remoteEntries{
+        {QStringLiteral("remote.txt"), 1, {}, false, false}};
+
+    rfm::app::MainWindow window;
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, remoteEntries)));
+    auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
+    QVERIFY(workspace != nullptr);
+    auto* const sourcePane = workspace->primaryPane();
+    const rfm::core::BrowserLocation remoteLocation = sourcePane->currentLocation();
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy listings(&window, &rfm::app::MainWindow::directoryRequested);
+    workspace->setSplit(true);
+    auto* const destinationPane = workspace->otherVisiblePane();
+    QVERIFY(destinationPane != nullptr);
+    QVERIFY(!listings.isEmpty());
+    const quint64 initialListingId = listings.constLast().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, initialListingId),
+                                      Q_ARG(QString, QStringLiteral("/source")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, remoteEntries)));
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, localDirectory}, localDirectory,
+        {});
+    QVERIFY(QMetaObject::invokeMethod(sourcePane, "activated", Qt::DirectConnection));
+    sourcePane->fileTable()->selectRow(0);
+    QCOMPARE(workspace->activePane(), sourcePane);
+    QCOMPARE(sourcePane->selectedEntries().size(), 1);
+    auto* const copyAction = window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"));
+    auto* const moveAction = window.findChild<QAction*>(QStringLiteral("moveToOtherPaneAction"));
+    QVERIFY(copyAction != nullptr);
+    QVERIFY(moveAction != nullptr);
+    QVERIFY(copyAction->isEnabled());
+    QVERIFY(!moveAction->isEnabled());
+    QSignalSpy transfers(&window, &rfm::app::MainWindow::transferRequested);
+    copyAction->trigger();
+    QCOMPARE(transfers.size(), 1);
+    const auto download = transfers.constFirst().constFirst().value<rfm::core::TransferRequest>();
+    QCOMPARE(download.direction, rfm::core::TransferDirection::Download);
+    QCOMPARE(download.source, QStringLiteral("/source/remote.txt"));
+    QCOMPARE(download.destination, QDir(localDirectory).filePath(QStringLiteral("remote.txt")));
+
+    sourcePane->showDirectory(
+        {rfm::core::FileSource::Local, rfm::core::LocalMachineId, localDirectory}, localDirectory,
+        {{QStringLiteral("local.txt"), 1, {}, false, false}});
+    destinationPane->showDirectory(
+        {rfm::core::FileSource::Ssh, remoteLocation.machineId, QStringLiteral("/uploads")},
+        QStringLiteral("/uploads"), {});
+    QVERIFY(QMetaObject::invokeMethod(sourcePane, "activated", Qt::DirectConnection));
+    sourcePane->fileTable()->selectRow(0);
+    QVERIFY(copyAction->isEnabled());
+    QVERIFY(!moveAction->isEnabled());
+    copyAction->trigger();
+    QCOMPARE(transfers.size(), 2);
+    const auto upload = transfers.at(1).constFirst().value<rfm::core::TransferRequest>();
+    QCOMPARE(upload.direction, rfm::core::TransferDirection::Upload);
+    QCOMPARE(upload.source, localFilePath);
+    QCOMPARE(upload.destination, QStringLiteral("/uploads/local.txt"));
 }
 
 void MainWindowTest::keyboardActionsExposeShortcutsAndTargetTheActivePane()

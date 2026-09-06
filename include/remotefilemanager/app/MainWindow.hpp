@@ -172,10 +172,6 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleRemoteFilesystemRelation(quint64 requestId,
                                                     rfm::core::RemoteFilesystemRelation relation);
     void removeSelectedEntries();
-    void chooseUploads();
-    void chooseDownloadDirectory();
-    Q_INVOKABLE void queueUploads(QStringList localPaths);
-    Q_INVOKABLE void queueDownloads(QString localDirectory);
     Q_INVOKABLE void handleOperationResult(const rfm::core::RemoteOperationResult& result);
     Q_INVOKABLE void handleRemoteOperationProgress(rfm::core::OperationProgress progress);
     Q_INVOKABLE void handleTransferProgress(const rfm::core::TransferProgress& progress);
@@ -301,8 +297,6 @@ class MainWindow final : public QMainWindow
     QAction* m_copyToOtherPaneAction{nullptr};
     QAction* m_removeAction{nullptr};
     QAction* m_filePropertiesAction{nullptr};
-    QAction* m_uploadAction{nullptr};
-    QAction* m_downloadAction{nullptr};
     QAction* m_splitViewAction{nullptr};
     QAction* m_resetFileViewAction{nullptr};
     QAction* m_showHiddenFilesAction{nullptr};

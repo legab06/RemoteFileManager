@@ -113,41 +113,6 @@ QStringList knownMountPointsForDevice(const QList<rfm::core::StorageVolume>& vol
     return mountPoints;
 }
 
-class UploadSelectionDialog final : public QFileDialog
-{
-  public:
-    explicit UploadSelectionDialog(QWidget* parent)
-        : QFileDialog(parent, tr("Select files or folders to upload"), QDir::homePath())
-    {
-        setOption(QFileDialog::DontUseNativeDialog);
-        setAcceptMode(QFileDialog::AcceptOpen);
-        setFileMode(QFileDialog::ExistingFiles);
-        setLabelText(QFileDialog::Accept, tr("Select"));
-    }
-
-    [[nodiscard]] QStringList selectedPaths() const { return m_selectedPaths; }
-
-  protected:
-    void accept() override
-    {
-        QStringList paths;
-        for (const QString& path : selectedFiles()) {
-            const QFileInfo info(path);
-            if ((info.isFile() || info.isDir()) && !paths.contains(info.absoluteFilePath())) {
-                paths.push_back(info.absoluteFilePath());
-            }
-        }
-        if (paths.isEmpty()) {
-            return;
-        }
-        m_selectedPaths = std::move(paths);
-        QDialog::accept();
-    }
-
-  private:
-    QStringList m_selectedPaths;
-};
-
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
@@ -570,20 +535,6 @@ void MainWindow::createActions()
     connect(m_cancelCutAction, &QAction::triggered, this, &MainWindow::cancelPendingCut);
     addAction(m_cancelCutAction);
 
-    const QIcon uploadIcon =
-        QIcon::fromTheme(QStringLiteral("go-up"), style()->standardIcon(QStyle::SP_ArrowUp));
-    m_uploadAction = new QAction(uploadIcon, tr("Upload"), this);
-    m_uploadAction->setObjectName(QStringLiteral("uploadAction"));
-    m_uploadAction->setToolTip(tr("Upload files or folders to the server"));
-    connect(m_uploadAction, &QAction::triggered, this, &MainWindow::chooseUploads);
-
-    const QIcon downloadIcon =
-        QIcon::fromTheme(QStringLiteral("go-down"), style()->standardIcon(QStyle::SP_ArrowDown));
-    m_downloadAction = new QAction(downloadIcon, tr("Download"), this);
-    m_downloadAction->setObjectName(QStringLiteral("downloadAction"));
-    m_downloadAction->setToolTip(tr("Download the selection to this computer"));
-    connect(m_downloadAction, &QAction::triggered, this, &MainWindow::chooseDownloadDirectory);
-
     m_splitViewAction = new QAction(tr("Split view"), this);
     m_splitViewAction->setObjectName(QStringLiteral("splitViewAction"));
     m_splitViewAction->setCheckable(true);
@@ -623,9 +574,6 @@ void MainWindow::createMenus()
     fileMenu->addAction(m_moveToOtherPaneAction);
     fileMenu->addAction(m_copyToOtherPaneAction);
     fileMenu->addAction(m_removeAction);
-    fileMenu->addSeparator();
-    fileMenu->addAction(m_uploadAction);
-    fileMenu->addAction(m_downloadAction);
     fileMenu->addSeparator();
     fileMenu->addAction(m_quitAction);
 
@@ -817,20 +765,6 @@ void MainWindow::createNavigationBar()
         navigationBar->addAction(style()->standardIcon(QStyle::SP_BrowserReload), tr("Refresh"));
     m_refreshAction->setObjectName(QStringLiteral("refreshAction"));
     m_refreshAction->setShortcut(QKeySequence(Qt::Key_F5));
-
-    navigationBar->addSeparator();
-    navigationBar->addAction(m_uploadAction);
-    navigationBar->addAction(m_downloadAction);
-    if (auto* const uploadButton =
-            qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_uploadAction));
-        uploadButton != nullptr) {
-        uploadButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    }
-    if (auto* const downloadButton =
-            qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_downloadAction));
-        downloadButton != nullptr) {
-        downloadButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    }
 
     m_backAction->setEnabled(false);
     m_forwardAction->setEnabled(false);
@@ -1240,11 +1174,9 @@ void MainWindow::showPlacesContextMenu(const QPoint& position)
             menu.addAction(m_disconnectAction);
             break;
         case NavigationTree::ContextAction::RemoveServer:
-            menu.addAction(QIcon::fromTheme(
-                               QStringLiteral("edit-delete"),
-                               style()->standardIcon(QStyle::SP_TrashIcon)),
-                           tr("Remove server"), this,
-                           &MainWindow::removeSelectedServerProfile);
+            menu.addAction(QIcon::fromTheme(QStringLiteral("edit-delete"),
+                                            style()->standardIcon(QStyle::SP_TrashIcon)),
+                           tr("Remove server"), this, &MainWindow::removeSelectedServerProfile);
             break;
         case NavigationTree::ContextAction::Open:
             menu.addAction(tr("Open"), m_navigationTree, &NavigationTree::activateSelectedItem);
@@ -1800,7 +1732,6 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
         menu.addAction(m_moveAction);
         menu.addSeparator();
         menu.addAction(m_renameAction);
-        menu.addAction(m_downloadAction);
         menu.addAction(m_removeAction);
         menu.addSeparator();
     }
@@ -2011,10 +1942,13 @@ void MainWindow::copySelectedToOtherPane()
         destinationPane->isHidden() || destination.isEmpty()) {
         return;
     }
+    const rfm::core::InternalTransferPayload payload = transferPayload(sourcePaneId, selection);
+    if (sourcePane->source() != destinationPane->source()) {
+        startCrossSourceTransfer(rfm::core::InternalTransferAction::Copy, payload,
+                                 destinationPaneId, destination);
+        return;
+    }
     if (sourcePane->source() == rfm::core::FileSource::Local) {
-        if (destinationPane->source() != rfm::core::FileSource::Local) {
-            return;
-        }
         startLocalOperation(rfm::core::LocalFileOperationKind::Copy, sourcePaneId,
                             destinationPaneId, sourceDirectory, destination, selection);
         return;
@@ -2032,8 +1966,8 @@ void MainWindow::copySelectedToOtherPane()
     if (!confirmOtherPaneOperation(tr("Copy"), selection, destination)) {
         return;
     }
-    startRemoteTransfer(rfm::core::InternalTransferAction::Copy,
-                        transferPayload(sourcePaneId, selection), destinationPaneId, destination);
+    startRemoteTransfer(rfm::core::InternalTransferAction::Copy, payload, destinationPaneId,
+                        destination);
 }
 
 void MainWindow::copySelectionToClipboard()
@@ -2343,60 +2277,6 @@ void MainWindow::removeSelectedEntries()
     setBusy(true, tr("Deleting %1 item(s)…").arg(selection.size()));
     m_operationContexts.insert(id, {paneId, 0, pane->currentPath(), {}});
     emit removeRequested(id, selection, recursive);
-}
-
-void MainWindow::chooseUploads()
-{
-    UploadSelectionDialog dialog(this);
-    if (dialog.exec() == QDialog::Accepted) {
-        queueUploads(dialog.selectedPaths());
-    }
-}
-
-void MainWindow::chooseDownloadDirectory()
-{
-    if (selectedEntries().isEmpty()) {
-        return;
-    }
-    const QString destination =
-        QFileDialog::getExistingDirectory(this, tr("Select the download destination folder"),
-                                          QDir::homePath(), QFileDialog::ShowDirsOnly);
-    if (!destination.isEmpty()) {
-        queueDownloads(destination);
-    }
-}
-
-void MainWindow::queueUploads(QStringList localPaths)
-{
-    FileBrowserPane* const pane = m_paneWorkspace->activePane();
-    const quint64 paneId = m_paneWorkspace->paneId(pane);
-    if (!m_connected || pane->currentPath().isEmpty()) {
-        return;
-    }
-    for (const QString& path : std::as_const(localPaths)) {
-        const auto request =
-            TransferRequestFactory::upload(nextOperationId(), path, pane->currentPath());
-        if (request.has_value()) {
-            queueTransferRequest(*request, paneId);
-        }
-    }
-}
-
-void MainWindow::queueDownloads(QString localDirectory)
-{
-    if (!m_connected || localDirectory.isEmpty()) {
-        return;
-    }
-    for (const rfm::core::RemoteSelection& entry : selectedEntries()) {
-        QString error;
-        const auto request =
-            TransferRequestFactory::download(nextOperationId(), entry, localDirectory, &error);
-        if (request.has_value()) {
-            queueTransferRequest(*request, m_paneWorkspace->paneId(m_paneWorkspace->activePane()));
-        } else if (!error.isEmpty()) {
-            statusBar()->showMessage(error, 8000);
-        }
-    }
 }
 
 void MainWindow::queueTransferRequest(const rfm::core::TransferRequest& request, quint64 paneId)
@@ -3767,10 +3647,20 @@ void MainWindow::updateOperationActions()
         !m_busyPanes.contains(otherPaneId) && distinctDirectories && compatiblePathConventions;
     m_moveToOtherPaneAction->setEnabled(otherPaneAvailable &&
                                         (remoteOperationAvailable || localMutationAvailable));
-    m_copyToOtherPaneAction->setEnabled(otherPaneAvailable);
+    const bool destinationIsLocal = otherPane != nullptr &&
+                                    otherPane->source() == rfm::core::FileSource::Local &&
+                                    QFileInfo(otherPane->currentPath()).isDir() &&
+                                    QFileInfo(otherPane->currentPath()).isWritable();
+    const bool destinationIsRemote =
+        otherPane != nullptr && otherPane->source() == rfm::core::FileSource::Ssh && m_connected &&
+        otherPane->currentLocation().machineId == activeRemoteMachineId();
+    const bool crossSourceCopyAvailable = (localSourceAvailable && destinationIsRemote) ||
+                                          (remoteOperationAvailable && destinationIsLocal);
+    m_copyToOtherPaneAction->setEnabled(
+        otherPaneAvailable || (count > 0 && otherPane != nullptr && !otherPane->isHidden() &&
+                               !otherPane->currentPath().isEmpty() &&
+                               !m_busyPanes.contains(otherPaneId) && crossSourceCopyAvailable));
     m_removeAction->setEnabled(mutationAvailable && count > 0);
-    m_uploadAction->setEnabled(remoteOperationAvailable);
-    m_downloadAction->setEnabled(remoteOperationAvailable && count > 0);
     m_clipboardCopyAction->setEnabled((remoteOperationAvailable || localSourceAvailable) &&
                                       count > 0);
     m_clipboardCutAction->setEnabled((remoteOperationAvailable || localMutationAvailable) &&
