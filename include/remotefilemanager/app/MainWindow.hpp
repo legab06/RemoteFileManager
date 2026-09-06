@@ -108,6 +108,7 @@ class MainWindow final : public QMainWindow
     void createMenus();
     void createPaneWorkspace();
     void connectBrowserPane(quint64 paneId);
+    void openLocalFile(const rfm::core::BrowserLocation& location);
     void createNavigationBar();
     void createPlacesDock();
     void createOperationDock();
@@ -153,6 +154,7 @@ class MainWindow final : public QMainWindow
     void resetDisconnectedUi();
     void requestParentDirectory();
     void showFileContextMenu(const QPoint& globalPosition);
+    void openContextEntry();
     void createDirectory();
     void renameSelectedEntry();
     void moveSelectedEntries();
@@ -295,6 +297,7 @@ class MainWindow final : public QMainWindow
     QAction* m_copyAction{nullptr};
     QAction* m_moveToOtherPaneAction{nullptr};
     QAction* m_copyToOtherPaneAction{nullptr};
+    QAction* m_openAction{nullptr};
     QAction* m_removeAction{nullptr};
     QAction* m_filePropertiesAction{nullptr};
     QAction* m_splitViewAction{nullptr};

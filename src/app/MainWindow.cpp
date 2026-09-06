@@ -22,6 +22,7 @@
 #include <QApplication>
 #include <QCursor>
 #include <QDateTime>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QDockWidget>
@@ -494,6 +495,9 @@ void MainWindow::createActions()
     m_copyToOtherPaneAction->setObjectName(QStringLiteral("copyToOtherPaneAction"));
     connect(m_copyToOtherPaneAction, &QAction::triggered, this,
             &MainWindow::copySelectedToOtherPane);
+    m_openAction = new QAction(tr("Open"), this);
+    m_openAction->setObjectName(QStringLiteral("openAction"));
+    connect(m_openAction, &QAction::triggered, this, &MainWindow::openContextEntry);
     m_removeAction = new QAction(tr("Delete…"), this);
     m_removeAction->setObjectName(QStringLiteral("removeAction"));
     m_removeAction->setShortcut(QKeySequence::Delete);
@@ -645,6 +649,7 @@ void MainWindow::connectBrowserPane(quint64 paneId)
             [this, paneId](const rfm::core::BrowserLocation& location, PaneNavigation navigation) {
                 requestLocationListing(paneId, location, true, navigation);
             });
+    connect(pane, &FileBrowserPane::fileOpenRequested, this, &MainWindow::openLocalFile);
     connect(pane, &FileBrowserPane::historyChanged, this, [this, paneId, pane] {
         updatePaneTransferContexts();
         if (pane == m_paneWorkspace->activePane()) {
@@ -673,6 +678,18 @@ void MainWindow::connectBrowserPane(quint64 paneId)
         statusBar()->showMessage(tr("Moving between local and SSH locations is not supported yet."),
                                  8000);
     });
+}
+
+void MainWindow::openLocalFile(const rfm::core::BrowserLocation& location)
+{
+    if (location.source != rfm::core::FileSource::Local ||
+        location.machineId != QString::fromLatin1(rfm::core::LocalMachineId) ||
+        !QFileInfo(location.path).isFile()) {
+        return;
+    }
+    if (!QDesktopServices::openUrl(QUrl::fromLocalFile(location.path))) {
+        statusBar()->showMessage(tr("Could not open the file with the default application."), 8000);
+    }
 }
 
 void MainWindow::requestDirectoryItemCount(quint64 paneId,
@@ -1717,6 +1734,10 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
     updateOperationActions();
     QMenu menu(this);
     const bool hasSelection = !selectedEntries().isEmpty();
+    if (m_openAction->isEnabled()) {
+        menu.addAction(m_openAction);
+        menu.addSeparator();
+    }
     if (hasSelection) {
         menu.addAction(m_clipboardCopyAction);
         menu.addAction(m_clipboardCutAction);
@@ -1741,6 +1762,14 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
         menu.addAction(m_filePropertiesAction);
     }
     menu.exec(globalPosition);
+}
+
+void MainWindow::openContextEntry()
+{
+    FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    if (pane != nullptr && selectedEntries().size() == 1) {
+        pane->requestOpenContextEntry();
+    }
 }
 
 void MainWindow::createDirectory()
@@ -3661,6 +3690,8 @@ void MainWindow::updateOperationActions()
                                !otherPane->currentPath().isEmpty() &&
                                !m_busyPanes.contains(otherPaneId) && crossSourceCopyAvailable));
     m_removeAction->setEnabled(mutationAvailable && count > 0);
+    m_openAction->setEnabled(locationAvailable && count == 1 &&
+                             activePane->contextLocalFile().has_value());
     m_clipboardCopyAction->setEnabled((remoteOperationAvailable || localSourceAvailable) &&
                                       count > 0);
     m_clipboardCutAction->setEnabled((remoteOperationAvailable || localMutationAvailable) &&
