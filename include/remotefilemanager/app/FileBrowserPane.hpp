@@ -47,6 +47,7 @@ class FileBrowserPane final : public QWidget
     [[nodiscard]] bool canGoForward() const;
     [[nodiscard]] QByteArray createInternalDragData() const;
     [[nodiscard]] std::optional<FileEntryProperties> contextEntryProperties() const;
+    [[nodiscard]] std::optional<rfm::core::BrowserLocation> contextLocalFile() const;
 
     void showDirectory(const QString& path, const QString& displayPath,
                        const QList<rfm::core::RemoteEntry>& entries,
@@ -74,6 +75,7 @@ class FileBrowserPane final : public QWidget
     void requestBack();
     void requestForward();
     void requestRefresh();
+    void requestOpenContextEntry();
     void resetFileView();
     void setShowHiddenFiles(bool show);
 
@@ -98,6 +100,7 @@ class FileBrowserPane final : public QWidget
     bool eventFilter(QObject* watched, QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void openEntry(int row);
+    [[nodiscard]] std::optional<rfm::core::BrowserLocation> localFileLocationForRow(int row) const;
     void prepareContextMenu(const QPoint& position);
     void startInternalDrag(Qt::DropActions supportedActions);
     [[nodiscard]] QString dropDestinationAt(const QPoint& position, int* folderRow = nullptr) const;

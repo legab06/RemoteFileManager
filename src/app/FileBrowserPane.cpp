@@ -1069,6 +1069,11 @@ std::optional<FileEntryProperties> FileBrowserPane::contextEntryProperties() con
     return FileEntryProperties{safePropertyValue(entry.name), lines.join(QChar{'\n'})};
 }
 
+std::optional<rfm::core::BrowserLocation> FileBrowserPane::contextLocalFile() const
+{
+    return localFileLocationForRow(m_contextMenuRow);
+}
+
 bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
 {
     QHeaderView* const header = m_fileTable->horizontalHeader();
@@ -1656,6 +1661,13 @@ void FileBrowserPane::requestRefresh()
     }
 }
 
+void FileBrowserPane::requestOpenContextEntry()
+{
+    if (const auto location = contextLocalFile(); location.has_value()) {
+        emit fileOpenRequested(*location);
+    }
+}
+
 void FileBrowserPane::openEntry(int row)
 {
     const QTableWidgetItem* const item = m_fileTable->item(row, 0);
@@ -1670,15 +1682,28 @@ void FileBrowserPane::openEntry(int row)
                        : rfm::core::RemotePath::join(m_currentLocation.path, item->text()));
         return;
     }
-    if (m_currentLocation.source != rfm::core::FileSource::Local ||
+    if (const auto location = localFileLocationForRow(row); location.has_value()) {
+        emit fileOpenRequested(*location);
+    }
+}
+
+std::optional<rfm::core::BrowserLocation> FileBrowserPane::localFileLocationForRow(int row) const
+{
+    if (row < 0 || row >= m_fileTable->rowCount() ||
+        m_currentLocation.source != rfm::core::FileSource::Local ||
         m_currentLocation.machineId != QString::fromLatin1(rfm::core::LocalMachineId)) {
-        return;
+        return std::nullopt;
+    }
+    const QTableWidgetItem* const item = m_fileTable->item(row, 0);
+    if (item == nullptr || item->data(Qt::UserRole).toBool() ||
+        item->data(Qt::UserRole + 1).toBool()) {
+        return std::nullopt;
     }
     const QString path = QDir(m_currentLocation.path).filePath(item->text());
-    if (QFileInfo(path).isFile()) {
-        emit fileOpenRequested(
-            {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId), path});
+    if (!QFileInfo(path).isFile()) {
+        return std::nullopt;
     }
+    return {{rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId), path}};
 }
 
 void FileBrowserPane::prepareContextMenu(const QPoint& position)

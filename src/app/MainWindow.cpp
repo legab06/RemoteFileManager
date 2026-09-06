@@ -495,6 +495,9 @@ void MainWindow::createActions()
     m_copyToOtherPaneAction->setObjectName(QStringLiteral("copyToOtherPaneAction"));
     connect(m_copyToOtherPaneAction, &QAction::triggered, this,
             &MainWindow::copySelectedToOtherPane);
+    m_openAction = new QAction(tr("Open"), this);
+    m_openAction->setObjectName(QStringLiteral("openAction"));
+    connect(m_openAction, &QAction::triggered, this, &MainWindow::openContextEntry);
     m_removeAction = new QAction(tr("Delete…"), this);
     m_removeAction->setObjectName(QStringLiteral("removeAction"));
     m_removeAction->setShortcut(QKeySequence::Delete);
@@ -1731,6 +1734,10 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
     updateOperationActions();
     QMenu menu(this);
     const bool hasSelection = !selectedEntries().isEmpty();
+    if (m_openAction->isEnabled()) {
+        menu.addAction(m_openAction);
+        menu.addSeparator();
+    }
     if (hasSelection) {
         menu.addAction(m_clipboardCopyAction);
         menu.addAction(m_clipboardCutAction);
@@ -1755,6 +1762,14 @@ void MainWindow::showFileContextMenu(const QPoint& globalPosition)
         menu.addAction(m_filePropertiesAction);
     }
     menu.exec(globalPosition);
+}
+
+void MainWindow::openContextEntry()
+{
+    FileBrowserPane* const pane = m_paneWorkspace->activePane();
+    if (pane != nullptr && selectedEntries().size() == 1) {
+        pane->requestOpenContextEntry();
+    }
 }
 
 void MainWindow::createDirectory()
@@ -3675,6 +3690,8 @@ void MainWindow::updateOperationActions()
                                !otherPane->currentPath().isEmpty() &&
                                !m_busyPanes.contains(otherPaneId) && crossSourceCopyAvailable));
     m_removeAction->setEnabled(mutationAvailable && count > 0);
+    m_openAction->setEnabled(locationAvailable && count == 1 &&
+                             activePane->contextLocalFile().has_value());
     m_clipboardCopyAction->setEnabled((remoteOperationAvailable || localSourceAvailable) &&
                                       count > 0);
     m_clipboardCutAction->setEnabled((remoteOperationAvailable || localMutationAvailable) &&
