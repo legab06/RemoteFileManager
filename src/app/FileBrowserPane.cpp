@@ -192,17 +192,30 @@ FilePresentation presentationForEntry(const rfm::core::RemoteEntry& entry)
         return {QObject::tr("Symbolic link"), std::move(icon)};
     }
     if (entry.directory) {
-        return {QObject::tr("Folder"), fallbackIcons.icon(QFileIconProvider::Folder)};
+        const QMimeType mimeType = QMimeDatabase{}.mimeTypeForName(QStringLiteral("inode/directory"));
+        QString description = mimeType.comment().trimmed();
+        if (description.isEmpty()) {
+            description = mimeType.name();
+        }
+        return {std::move(description), fallbackIcons.icon(QFileIconProvider::Folder)};
     }
 
     const std::optional<QMimeType> mimeType = mimeTypeForFileName(entry.name);
     if (!mimeType.has_value()) {
-        return {QObject::tr("File"), fallbackIcons.icon(QFileIconProvider::File)};
+        // Pour les fichiers sans type MIME spécifique, utiliser le type par défaut
+        const QMimeType defaultMimeType = QMimeDatabase{}.mimeTypeForName(QStringLiteral("application/octet-stream"));
+        QString description = defaultMimeType.comment().trimmed();
+        if (description.isEmpty() || description == defaultMimeType.name()) {
+            // Si aucune description n'est disponible, on utilise le nom technique
+            description = defaultMimeType.name();
+        }
+        return {std::move(description), fallbackIcons.icon(QFileIconProvider::File)};
     }
 
     QString description = mimeType->comment().trimmed();
     if (description.isEmpty() || description == mimeType->name()) {
-        description = QObject::tr("File");
+        // Si aucune description locale n'est disponible, utiliser le nom technique
+        description = mimeType->name();
     }
     QIcon icon = QIcon::fromTheme(mimeType->iconName());
     if (icon.isNull()) {

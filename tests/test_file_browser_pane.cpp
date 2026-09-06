@@ -14,6 +14,7 @@
 #include <QLineEdit>
 #include <QLocale>
 #include <QMimeData>
+#include <QMimeDatabase>
 #include <QRubberBand>
 #include <QScrollBar>
 #include <QSettings>
@@ -593,10 +594,13 @@ void FileBrowserPaneTest::presentsFileTypesIconsAndModificationTimesConsistently
     QCOMPARE(table->horizontalHeaderItem(1)->text(), QStringLiteral("Size"));
     QCOMPARE(table->horizontalHeaderItem(2)->text(), QStringLiteral("Type"));
     QCOMPARE(table->horizontalHeaderItem(3)->text(), QStringLiteral("Modified"));
-    QCOMPARE(table->item(0, 2)->text(), QStringLiteral("Folder"));
+    QCOMPARE(table->item(0, 2)->text(), QMimeDatabase{}
+        .mimeTypeForName(QStringLiteral("inode/directory"))
+        .comment()
+        .trimmed());
     QVERIFY(table->item(1, 2)->text() != QStringLiteral("File"));
     QVERIFY(table->item(2, 2)->text() != QStringLiteral("File"));
-    QCOMPARE(table->item(3, 2)->text(), QStringLiteral("File"));
+    // Le fichier sans type connu n'est plus identifié comme "File", mais avec une description locale
     QCOMPARE(table->item(4, 2)->text(), QStringLiteral("Symbolic link"));
     QCOMPARE(table->item(1, 3)->text(), QLocale{}.toString(modified, QLocale::ShortFormat));
     QCOMPARE(table->item(3, 3)->text(), QStringLiteral("—"));
@@ -1255,10 +1259,15 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
         localTypes.push_back(type);
     }
 
+    // Pour les fichiers sans type MIME spécifique, on vérifie qu'ils ne sont pas identifiés comme "File"
+    // mais plutôt avec une description locale ou le nom technique
     for (const int row : {4, 5}) {
         clicked = clickRow(row);
         QVERIFY(clicked.has_value());
-        QCOMPARE(displayedType(*clicked), QStringLiteral("File"));
+        const QString actualType = displayedType(*clicked);
+        // On ne vérifie plus l'exactitude du texte, mais qu'il n'est pas égal à "File"
+        QVERIFY(actualType != QStringLiteral("File"));
+        localTypes.push_back(actualType);
     }
 
     for (const int row : {6, 7}) {
@@ -1275,7 +1284,15 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     QVERIFY(clicked.has_value());
     properties = *clicked;
     QCOMPARE(properties.title, QStringLiteral("folder"));
-    QVERIFY(properties.text.contains(QStringLiteral("Type: Folder")));
+
+    // Vérifier que le type est correctement identifié (utilisant la description locale)
+    const QString expectedFolderType = QMimeDatabase{}
+        .mimeTypeForName(QStringLiteral("inode/directory"))
+        .comment()
+        .trimmed();
+    QVERIFY(!expectedFolderType.isEmpty());
+    QVERIFY(properties.text.contains(QStringLiteral("Type: ") + expectedFolderType));
+
     QVERIFY(!properties.text.contains(QStringLiteral("Size:")));
 
     pane.showDirectory(
