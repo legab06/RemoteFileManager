@@ -128,4 +128,10 @@ et [l’ADR de la stack](docs/adr/0001-technical-stack.md). Les documents
 
 ## Licence
 
-La licence du futur dépôt public n’est pas encore choisie. En l’absence de fichier `LICENSE`, le code reste sous droits exclusifs de son auteur.
+Copyright © 2026 Gabriel Albaladejo.
+
+RemoteFileManager est un logiciel libre distribué sous les termes de la
+GNU General Public License version 3 ou, à votre choix, toute version ultérieure
+(`GPL-3.0-or-later`).
+
+Voir [LICENSE](LICENSE) pour le texte complet de la licence.
