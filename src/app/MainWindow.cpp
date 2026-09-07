@@ -3821,7 +3821,11 @@ void MainWindow::showAboutDialog()
 {
     QMessageBox::about(
         this, tr("About RemoteFileManager"),
-        tr("RemoteFileManager %1\n\nA native file manager for browsing, managing and transferring files locally and on remote SSH/SFTP servers.")
+        tr("RemoteFileManager %1\n\n"
+           "A native file manager for browsing, managing and transferring files "
+           "locally and on remote SSH/SFTP servers.\n\n"
+           "Copyright © 2026 Gabriel Albaladejo\n"
+           "Licensed under GNU GPL v3.0 or later.")
             .arg(QApplication::applicationVersion()));
 }
 
