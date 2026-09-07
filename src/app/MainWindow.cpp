@@ -3821,8 +3821,7 @@ void MainWindow::showAboutDialog()
 {
     QMessageBox::about(
         this, tr("About RemoteFileManager"),
-        tr("RemoteFileManager %1\n\nA native file manager for standard SSH/SFTP servers.\n"
-           "Sprint 8: local and remote volume management.")
+        tr("RemoteFileManager %1\n\nA native file manager for browsing, managing and transferring files locally and on remote SSH/SFTP servers.")
             .arg(QApplication::applicationVersion()));
 }
 

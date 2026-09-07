@@ -11,7 +11,7 @@ int main(int argc, char* argv[])
     application.setWindowIcon(QIcon(QStringLiteral(":/icons/logo-256.png")));
     QCoreApplication::setOrganizationName(QStringLiteral("RemoteFileManager"));
     QCoreApplication::setApplicationName(QStringLiteral("RemoteFileManager"));
-    QCoreApplication::setApplicationVersion(QStringLiteral("0.8.1"));
+    // Note: Application version is automatically set from CMake PROJECT_VERSION via qt_standard_project_setup()
 
     rfm::app::MainWindow window;
     window.show();
