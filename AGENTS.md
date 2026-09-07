@@ -4,7 +4,7 @@
 
 RemoteFileManager est un gestionnaire graphique natif de fichiers distants, inspiré de Dolphin. Il fonctionne avec un serveur SSH/SFTP standard, sans démon, agent propriétaire ni autre composant à installer côté serveur.
 
-Le produit doit permettre la navigation et, progressivement, la copie, le déplacement, le renommage, la suppression et le transfert de fichiers, avec une progression visible et des erreurs compréhensibles et récupérables. Exécuter côté serveur les opérations entre deux emplacements distants chaque fois que cela est possible, afin d’éviter un transit inutile par le client. L’interface doit à terme prendre en charge les onglets et l’affichage scindé.
+Le produit doit permettre la navigation, la copie, le déplacement, le renommage, la suppression et le transfert de fichiers, avec une progression visible et des erreurs compréhensibles et récupérables. Exécuter côté serveur les opérations entre deux emplacements distants chaque fois que cela est possible, afin d’éviter un transit inutile par le client. Préserver l’affichage scindé existant ; l’interface doit à terme prendre en charge les onglets.
 
 Chaque évolution doit préserver un logiciel clair, sécurisé, réactif, léger, fiable et documenté. Linux est la plateforme prioritaire, mais le code et la construction doivent rester portables vers Windows et macOS.
 
