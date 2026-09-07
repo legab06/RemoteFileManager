@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RemoteFileManager
+Comment=Manage local and remote files over SSH/SFTP
+Exec=remote-file-manager
+Icon=io.github.legab06.RemoteFileManager
+Terminal=false
+Categories=Utility;FileManager;Network;
+Keywords=SSH;SFTP;File;Remote;Server;
+StartupNotify=true

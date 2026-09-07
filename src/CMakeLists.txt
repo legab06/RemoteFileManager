@@ -112,7 +112,7 @@ set_target_properties(
         WIN32_EXECUTABLE TRUE
         MACOSX_BUNDLE TRUE
         MACOSX_BUNDLE_BUNDLE_NAME "RemoteFileManager"
-        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.remotefilemanager"
+        MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.legab06.RemoteFileManager"
 )
 
 install(

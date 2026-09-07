@@ -27,6 +27,31 @@ include(GNUInstallDirs)
 
 add_subdirectory(src)
 
+if(UNIX AND NOT APPLE)
+    install(
+        FILES
+            "${PROJECT_SOURCE_DIR}/data/io.github.legab06.RemoteFileManager.desktop"
+        DESTINATION
+            "${CMAKE_INSTALL_DATADIR}/applications"
+    )
+
+    install(
+        FILES
+            "${PROJECT_SOURCE_DIR}/data/io.github.legab06.RemoteFileManager.metainfo.xml"
+        DESTINATION
+            "${CMAKE_INSTALL_DATADIR}/metainfo"
+    )
+
+    install(
+        FILES
+            "${PROJECT_SOURCE_DIR}/assets/branding/png/logo-256.png"
+        DESTINATION
+            "${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps"
+        RENAME
+            "io.github.legab06.RemoteFileManager.png"
+    )
+endif()
+
 include(CTest)
 if(BUILD_TESTING AND RFM_BUILD_TESTS)
     find_package(Qt6 6.4 REQUIRED COMPONENTS Test)
