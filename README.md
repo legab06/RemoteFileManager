@@ -6,7 +6,7 @@
 
 # RemoteFileManager
 
-RemoteFileManager est un gestionnaire de fichiers graphique natif pour administrer les fichiers d’un serveur distant via SSH/SFTP. L’objectif est de retrouver une ergonomie proche d'un gestionnaire de fichiers classique, sans monter le serveur avec SSHFS et sans installer de logiciel supplémentaire côté serveur.
+RemoteFileManager (RFM) est un gestionnaire de fichiers graphique natif pour parcourir et modifier les fichiers locaux et ceux d’un serveur distant via SSH/SFTP. Son interface Qt Widgets s’inspire de Dolphin, sans montage SSHFS ni agent propriétaire à installer côté serveur.
 
 Ce logiciel a été entièrement vibe-codé pour répondre à un besoin que j'avais. Je ne suis pas un développeur ou un codeur, juste un amateur avec un besoin précis. 
 
@@ -16,8 +16,8 @@ Ce logiciel a été entièrement vibe-codé pour répondre à un besoin que j'av
 - client C++20 léger avec interface Qt Widgets ;
 - prototype Linux en premier, architecture compatible, à terme, Windows et macOS ;
 - serveur SSH/SFTP standard, sans agent propriétaire ;
-- opérations distantes directement exécutées côté serveur ;
-- sécurité explicite : vérification de la clé d’hôte et aucun mot de passe en clair ;
+- copies entre chemins du même serveur exécutées côté serveur ;
+- sécurité explicite : vérification de la clé d’hôte et aucun mot de passe persistant ;
 - interface inspirée d’un navigateur de fichiers natif ;
 - navigation locale multiplateforme fondée sur Qt, sans commande système ni SSHFS ;
 - panneaux à source explicite, permettant notamment un affichage scindé local/SSH, local/local ou ssh/ssh.
@@ -29,11 +29,22 @@ Ce logiciel a été entièrement vibe-codé pour répondre à un besoin que j'av
   session SSH active ;
 - arbre Places regroupant emplacements locaux, profils serveur enregistrés, connexion
   active, volumes et périphériques amovibles ;
-- enregistrement de profils de connexion sans mot de passe persistant ;
-- création de dossiers, renommage, déplacement, copie et suppression sur le serveur,
-  avec copies entre chemins distants exécutées côté serveur ;
-- envoi et téléchargement de fichiers ou dossiers entre le client et le serveur, avec
-  progression, pause, reprise et annulation ;
+- profils serveur enregistrés, modifiables et supprimables, accessibles depuis l’accueil
+  et Places ; connexion directe à un profil ou nouvelle connexion avec sauvegarde optionnelle ;
+- authentification par clé/agent SSH (chemin de clé privée optionnel, repli par mot de
+  passe optionnel) ou par mot de passe seul, sans sauvegarde du mot de passe ;
+- sélection multiple, glisser-déposer interne, Copy / Move / Rename / Delete / New folder
+  en local et sur SSH ;
+- « Copy to other pane » entre panneaux Local → Local, SSH → SSH sur la session active,
+  Local → SSH et SSH → Local ; copie Local ↔ SSH également par glisser-déposer ;
+- transferts de fichiers réguliers et dossiers par SFTP avec progression, pause, reprise
+  et annulation ; les boutons Upload/Download ont été retirés du navigateur principal,
+  mais ces termes restent utilisés par les moteurs et le panneau Operations ;
+- propriétés des fichiers à partir des métadonnées du listing ; colonnes Name / Size /
+  Type / Modified, types et icônes fondés sur les extensions via la base MIME Qt ;
+- colonnes triables, déplaçables et redimensionnables, état de vue et d’en-tête conservé
+  entre lancements, réinitialisable par View → Reset file view ;
+- ouverture des fichiers locaux avec l’application par défaut du système ;
 - sous Linux, détection et actualisation explicite des volumes locaux et des volumes du
   serveur connecté, y compris les périphériques non montés lorsque `lsblk` est
   disponible ;
@@ -44,10 +55,19 @@ Ce logiciel a été entièrement vibe-codé pour répondre à un besoin que j'av
   `sudo`, `su` ou `pkexec` intégré ; le mot de passe d’autorisation distante est
   transféré sans copie partagée, effacé après usage et n’est jamais enregistré.
 
-Une seule session SSH peut être active à la fois. Les mutations de fichiers locales,
-les copies directes entre panneaux local/SSH, les sessions SSH simultanées et les
-serveurs distants non Linux pour la gestion des volumes ne sont pas encore pris en
-charge.
+## Limites actuelles
+
+- une seule session SSH active : deux panneaux SSH partagent le même serveur ;
+- pas de déplacement Local ↔ SSH ; le copier/coller interne reste limité à Local → Local
+  ou SSH → SSH, contrairement à « Copy to other pane » et au glisser-déposer ;
+- les transferts Local ↔ SSH ne prennent pas en charge les liens symboliques ni les
+  nœuds spéciaux ;
+- suppression définitive après confirmation, sans corbeille ni restauration intégrée ;
+- gestion des volumes distants réservée à Linux ; les opérations serveur utilisant
+  `cp`, la suppression récursive protégée et le déplacement entre filesystems ont des
+  dépendances système supplémentaires détaillées dans l’architecture ;
+- les clés privées protégées par une phrase secrète doivent être chargées dans un agent
+  SSH, en laissant vide le champ Private key ; RFM ne demande ni ne stocke cette phrase.
 
 ## Dépendances
 
@@ -102,11 +122,9 @@ cmake/                       modules de construction
 docs/                        architecture, sécurité et sprints
 ```
 
-Les choix structurants sont détaillés dans
-[l’ADR de la stack](docs/adr/0001-technical-stack.md), et les opérations sur les
-volumes livrées au Sprint 8 dans [docs/sprint-8.md](docs/sprint-8.md). La navigation
-locale introduite au Sprint 7 reste décrite dans [docs/sprint-7.md](docs/sprint-7.md),
-et les profils serveur dans [docs/sprint-6.md](docs/sprint-6.md).
+Voir [l’architecture](docs/architecture.md), le [modèle de sécurité](docs/security-model.md)
+et [l’ADR de la stack](docs/adr/0001-technical-stack.md). Les documents
+`docs/sprint-*.md` conservent l’historique des livraisons.
 
 ## Licence
 

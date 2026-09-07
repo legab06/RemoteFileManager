@@ -16,13 +16,32 @@ La règle principale est que l’interface ne doit jamais manipuler directement 
 ```mermaid
 flowchart TD
     UI["Qt Widgets"] --> UC["Cas d’utilisation"]
+    UC --> LOCALFS["LocalFileSystem / LocalFileOperationWorker : navigation et mutations locales"]
     UC --> FS["Système de fichiers distant"]
+    UC --> TRANSFER["TransferRequestFactory / TransferCoordinator : copie Local ↔ SSH"]
+    TRANSFER --> SFTP
     FS --> SFTP["SFTP : liste et transferts"]
     FS --> EXEC["SSH exec : opérations côté serveur"]
     UI --> STORAGE["StorageVolume et classification commune"]
     LOCAL["Collecteur local Qt/sysfs"] --> STORAGE
     REMOTE["Collecteur Linux distant /proc + sysfs via SFTP"] --> STORAGE
 ```
+
+`PaneWorkspace` gère un ou deux panneaux, chacun portant un `BrowserLocation` Local
+ou SSH. `MainWindow` possède une seule `SshSession` dans son worker : deux panneaux
+SSH partagent cette session et une nouvelle connexion est refusée tant qu’une
+connexion est active ou en cours.
+
+Les profils sont gérés par `ServerProfileStore` dans `server-profiles.json` sous
+`QStandardPaths::AppDataLocation`, avec écriture atomique par `QSaveFile`. Ils contiennent
+l’identité du serveur, le port, l’utilisateur, le mode d’authentification, l’autorisation
+du repli par mot de passe et éventuellement un chemin de clé privée, jamais le mot de
+passe ni le contenu de la clé. `ServerProfileForm` est partagé par les dialogues de
+connexion et d’édition. Un profil enregistré déclenche directement la connexion ;
+une nouvelle connexion peut être enregistrée après succès. Le dialogue reste ouvert
+pendant la connexion et présente les erreurs pour permettre une nouvelle tentative.
+L’authentification propose clé/agent avec repli optionnel par mot de passe, ou mot de
+passe seul ; la vérification de la clé d’hôte précède ces méthodes.
 
 ## Asynchronisme
 
@@ -79,8 +98,9 @@ dialogue de profil.
 Le navigateur principal conserve aussi le `RemoteEntry` déjà reçu sur chaque ligne :
 son action `Properties` présente cet instantané sans nouveau parcours local récursif
 ni requête SFTP. Le type utilisateur d'un fichier est déduit uniquement de son nom
-avec la base MIME Qt en mode extension ; un type absent ou technique retombe sur
-`File`. Cette même présentation alimente la colonne `Type` et l'icône dans les vues
+avec la base MIME Qt en mode extension ; sans type spécifique, il utilise la description
+de `application/octet-stream`. Une description absente retombe sur le nom MIME technique.
+Cette même présentation alimente la colonne `Type` et l'icône dans les vues
 Local et SSH. Les dossiers et liens symboliques restent traités explicitement avant
 la détection MIME, sans lecture de contenu ni résolution implicite d'une cible
 distante. La colonne `Modified` formate le `QDateTime` fourni par le backend et affiche
@@ -139,16 +159,38 @@ reconnus.
 
 `FileBrowserPane` fige la sélection multiple au démarrage du drag, résout la cible
 avec `QDir` pour un emplacement local et `RemotePath` pour SSH, puis émet uniquement
-une intention Copy/Move. La validation refuse les transferts Local ↔ SSH. Pour les
-drops Local → Local et SSH → SSH, un drag sans modificateur ou avec Shift demande un
-Move ; Ctrl demande un Copy et reste prioritaire si plusieurs modificateurs sont
-présents. L'action de drop annoncée à Qt est la même que l'intention transmise.
+une intention Copy/Move. Les drops autorisent la copie Local ↔ SSH mais refusent le
+déplacement entre ces sources. Sans modificateur, le drag demande Copy ; Shift demande
+Move et Ctrl demande Copy, avec priorité sur Shift. Pour un drop sans modificateur
+Local → Local ou SSH → SSH, `MainWindow` propose Copy / Move / Cancel si la vérification
+des filesystems indique une différence ; le contrôle SSH est asynchrone.
+L’action annoncée à Qt correspond à l’intention initiale du panneau.
 
-`MainWindow` route cette intention exclusivement vers les pipelines Copy/Move
-existants : `LocalFileOperationWorker` pour Local et `TransferCoordinator` pour SSH.
+`MainWindow` route les intentions vers les pipelines existants :
+
+| Source → destination | Routage |
+| --- | --- |
+| Local → Local | `LocalFileOperationWorker`, puis `LocalFileSystem` / `LocalCopyMove` |
+| SSH → SSH (session active) | Voie Remote Copy/Move du `TransferCoordinator`, exécutée par `SshSession` |
+| Local → SSH | `TransferRequestFactory::upload`, puis voie SFTP du `TransferCoordinator` |
+| SSH → Local | `TransferRequestFactory::download`, puis voie SFTP du `TransferCoordinator` |
+
+« Copy to other pane » utilise ces quatre routes. Pour Local ↔ SSH, chaque élément
+sélectionné produit une `TransferRequest` ; `SshSession` exécute un `TransferFileJob`
+ou un `TransferDirectoryJob`. Upload/Download désignent toujours les directions
+internes et les opérations affichées dans Operations, mais ne sont plus des boutons
+du navigateur principal. Le copier/coller interne conserve la validation de source
+identique et ne permet donc pas Local ↔ SSH.
+
 Collisions, progression, annulation et erreurs rejoignent donc les mêmes entrées
 Operations que les actions et raccourcis existants. Les moteurs restent l'autorité
 finale pour les alias, liens, mountpoints, récursions et validations distantes.
+
+Les créations de dossiers, renommages et suppressions locales passent également par
+`LocalFileOperationWorker`, dans un thread distinct du thread graphique. La suppression
+locale ou distante exige une confirmation de suppression définitive. L’ouverture d’un
+fichier local passe par `QDesktopServices::openUrl` avec une URL `file:` et présente une
+erreur si le système ne peut pas l’ouvrir.
 
 ## Opérations distantes
 
