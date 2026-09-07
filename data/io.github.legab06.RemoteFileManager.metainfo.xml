@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.legab06.RemoteFileManager</id>
+
+  <name>RemoteFileManager</name>
+  <summary>Manage local and remote files over SSH/SFTP</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      RemoteFileManager is a native file manager for browsing, managing
+      and transferring files locally and on remote SSH/SFTP servers.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">
+    io.github.legab06.RemoteFileManager.desktop
+  </launchable>
+
+  <url type="homepage">https://github.com/legab06/RemoteFileManager</url>
+  <url type="bugtracker">https://github.com/legab06/RemoteFileManager/issues</url>
+
+  <provides>
+    <binary>remote-file-manager</binary>
+  </provides>
+</component>
