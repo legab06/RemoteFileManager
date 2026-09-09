@@ -49,7 +49,6 @@ class PaneWorkspace final : public QWidget
     FileBrowserPane* m_secondaryPane{nullptr};
     FileBrowserPane* m_activePane{nullptr};
     QHash<PaneId, FileBrowserPane*> m_panes;
-    PaneId m_nextPaneId{1};
     bool m_split{false};
 };
 

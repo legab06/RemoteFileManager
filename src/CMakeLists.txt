@@ -61,6 +61,7 @@ add_library(
     app/FileBrowserPane.cpp
     app/HomePage.cpp
     app/PaneWorkspace.cpp
+    app/WorkspaceTabs.cpp
     app/PasswordAuthenticationDialog.cpp
     app/ServerProfileForm.cpp
     app/ServerProfileDialog.cpp
@@ -73,6 +74,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/FileBrowserPane.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/HomePage.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PaneWorkspace.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/WorkspaceTabs.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PasswordAuthenticationDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileForm.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileDialog.hpp

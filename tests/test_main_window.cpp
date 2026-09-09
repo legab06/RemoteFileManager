@@ -9,6 +9,7 @@
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
+#include "remotefilemanager/app/WorkspaceTabs.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
@@ -48,6 +49,7 @@
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTableWidget>
+#include <QTabWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
@@ -282,7 +284,7 @@ void showLocalSplit(rfm::app::MainWindow& window, const QString& source, const Q
     secondary->setInteractionEnabled(true);
     auto* const stack = window.findChild<QStackedWidget*>(QStringLiteral("centralStack"));
     QVERIFY(stack != nullptr);
-    stack->setCurrentWidget(workspace);
+    stack->setCurrentWidget(window.findChild<rfm::app::WorkspaceTabs*>());
     QVERIFY(QMetaObject::invokeMethod(primary, "activated", Qt::DirectConnection));
     window.show();
     QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
@@ -456,6 +458,7 @@ class MainWindowTest final : public QObject
 
   private slots:
     void exposesInitialDisconnectedShell();
+    void workspaceActionsResolveCurrentTab();
     void persistsShowHiddenFilesPreference();
     void resetFileViewActionResetsAllPanes();
     void dockVisibilityActionsTrackPanels();
@@ -1027,7 +1030,7 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QCOMPARE(workspace->activePane()->currentPath(), QDir(temporary.path()).absolutePath());
     QCOMPARE(workspace->activePane()->fileTable()->rowCount(), 1);
     QCOMPARE(workspace->activePane()->fileTable()->item(0, 0)->text(), QStringLiteral("local.txt"));
-    QCOMPARE(stack->currentWidget(), workspace);
+    QCOMPARE(stack->currentWidget(), window.findChild<rfm::app::WorkspaceTabs*>());
     QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
     auto* const createAction = window.findChild<QAction*>(QStringLiteral("createDirectoryAction"));
     auto* const renameAction = window.findChild<QAction*>(QStringLiteral("renameAction"));
@@ -1394,7 +1397,47 @@ void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect(
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
     QVERIFY(!remotePane->hasLocation());
     QCOMPARE(localPane->source(), rfm::core::FileSource::Local);
-    QCOMPARE(stack->currentWidget(), workspace);
+    QCOMPARE(stack->currentWidget(), window.findChild<rfm::app::WorkspaceTabs*>());
+}
+
+void MainWindowTest::workspaceActionsResolveCurrentTab()
+{
+    rfm::app::MainWindow window;
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    QVERIFY(tabs != nullptr);
+    auto* const first = tabs->activeWorkspace();
+    auto* const widget = tabs->findChild<QTabWidget*>();
+    QVERIFY(widget != nullptr);
+    // Test fixture only: the application exposes no action for adding tabs yet.
+    auto* const second = new rfm::app::PaneWorkspace(widget);
+    second->setSplit(true);
+    widget->addTab(second, QStringLiteral("Fixture"));
+    widget->setCurrentWidget(second);
+    QCOMPARE(tabs->activeWorkspace(), second);
+    QCOMPARE(tabs->pane(tabs->paneId(first->primaryPane())), first->primaryPane());
+    QCOMPARE(tabs->paneIds().size(), 3);
+    QCOMPARE(tabs->visiblePaneIds().size(), 2);
+    auto* const split = window.findChild<QAction*>(QStringLiteral("splitViewAction"));
+    QVERIFY(split != nullptr);
+    QVERIFY(split->isChecked());
+    split->trigger();
+    QVERIFY(!second->isSplit());
+    split->trigger();
+    QVERIFY(second->isSplit());
+    QVERIFY(!first->isSplit());
+    auto* const secondary = second->otherVisiblePane();
+    window.findChild<QAction*>(QStringLiteral("switchPaneAction"))->trigger();
+    QCOMPARE(tabs->activePane(), secondary);
+    QCOMPARE(first->activePane(), first->primaryPane());
+    first->primaryPane()->fileTable()->horizontalHeader()->moveSection(0, 1);
+    second->primaryPane()->fileTable()->horizontalHeader()->moveSection(0, 1);
+    window.findChild<QAction*>(QStringLiteral("resetFileViewAction"))->trigger();
+    QCOMPARE(second->primaryPane()->fileTable()->horizontalHeader()->visualIndex(0), 0);
+    // FileBrowserPane deliberately shares reset preferences across all panes.
+    QCOMPARE(first->primaryPane()->fileTable()->horizontalHeader()->visualIndex(0), 0);
+    widget->setCurrentWidget(first);
+    QVERIFY(!split->isChecked());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("switchPaneAction"))->isEnabled());
 }
 
 void MainWindowTest::resetFileViewActionResetsAllPanes()
@@ -2146,7 +2189,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QVERIFY(disconnect->isEnabled());
     QVERIFY(refreshTimer->isActive());
-    QCOMPARE(stack->currentWidget(), workspace);
+    QCOMPARE(stack->currentWidget(), window.findChild<rfm::app::WorkspaceTabs*>());
 
     QObject::disconnect(&window, &rfm::app::MainWindow::disconnectionRequested, nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::disconnectionRequested);

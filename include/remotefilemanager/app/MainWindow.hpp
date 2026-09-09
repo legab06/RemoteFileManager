@@ -50,7 +50,7 @@ class TransferCoordinator;
 namespace rfm::app
 {
 
-class PaneWorkspace;
+class WorkspaceTabs;
 class OperationPanel;
 class ConnectionDialog;
 class PasswordAuthenticationDialog;
@@ -106,7 +106,7 @@ class MainWindow final : public QMainWindow
   private:
     void createActions();
     void createMenus();
-    void createPaneWorkspace();
+    void createWorkspaceTabs();
     void connectBrowserPane(quint64 paneId);
     void openLocalFile(const rfm::core::BrowserLocation& location);
     void createNavigationBar();
@@ -312,7 +312,7 @@ class MainWindow final : public QMainWindow
     QAction* m_focusLocationAction{nullptr};
     QAction* m_switchPaneAction{nullptr};
     QAction* m_cancelCutAction{nullptr};
-    PaneWorkspace* m_paneWorkspace{nullptr};
+    WorkspaceTabs* m_workspaceTabs{nullptr};
     HomePage* m_homePage{nullptr};
     QStackedWidget* m_centralStack{nullptr};
     OperationPanel* m_operationPanel{nullptr};
