@@ -1,16 +1,76 @@
 #include "remotefilemanager/app/FileBrowserPane.hpp"
 #include "remotefilemanager/app/WorkspaceTabs.hpp"
 
+#include <QPointer>
 #include <QSet>
 #include <QSignalSpy>
 #include <QTabWidget>
 #include <QTest>
+#include <QToolButton>
 
 class WorkspaceTabsTest final : public QObject
 {
     Q_OBJECT
 
   private slots:
+    void createsSwitchesAndClosesWorkspaces()
+    {
+        rfm::app::WorkspaceTabs tabs;
+        auto* const widget = tabs.findChild<QTabWidget*>();
+        auto* const first = tabs.activeWorkspace();
+        first->setSplit(true);
+        first->activateOtherPane();
+        auto* const firstActive = first->activePane();
+        QSignalSpy added(&tabs, &rfm::app::WorkspaceTabs::paneAdded);
+        QSignalSpy removed(&tabs, &rfm::app::WorkspaceTabs::paneRemoved);
+        QSignalSpy changed(&tabs, &rfm::app::WorkspaceTabs::activeWorkspaceChanged);
+        tabs.findChild<QToolButton*>(QStringLiteral("addWorkspaceButton"))->click();
+        auto* const second = tabs.activeWorkspace();
+        QVERIFY(second != first);
+        QCOMPARE(widget->count(), 2);
+        QVERIFY(widget->tabsClosable());
+        QCOMPARE(added.size(), 1);
+        QCOMPARE(changed.size(), 1);
+        QVERIFY(!second->isSplit());
+        QVERIFY(!second->activePane()->hasLocation());
+        QVERIFY(!second->activePane()->canGoBack());
+        QVERIFY(!second->activePane()->canGoForward());
+        const auto secondId = tabs.paneId(second->activePane());
+        QVERIFY(!first->paneIds().contains(secondId));
+        QCOMPARE(tabs.openPaneIds().size(), 3);
+        QCOMPARE(tabs.visiblePaneIds().size(), 1);
+        tabs.setActiveWorkspace(first);
+        QCOMPARE(tabs.activePane(), firstActive);
+        QVERIFY(first->isSplit());
+        QVERIFY(!second->isSplit());
+        tabs.setActiveWorkspace(second);
+        second->setSplit(true);
+        QCOMPARE(added.size(), 2);
+        second->setSplit(false);
+        second->setSplit(true);
+        QCOMPARE(added.size(), 2);
+        const auto retiredIds = second->paneIds();
+        QPointer<rfm::app::PaneWorkspace> retired = second;
+        QPointer<rfm::app::FileBrowserPane> retiredPane = second->activePane();
+        QVERIFY(QMetaObject::invokeMethod(widget, "tabCloseRequested", Q_ARG(int, 1)));
+        QVERIFY(retired.isNull());
+        QVERIFY(retiredPane.isNull());
+        QCOMPARE(removed.size(), 2);
+        QCOMPARE(tabs.activeWorkspace(), first);
+        QVERIFY(!widget->tabsClosable());
+        for (const auto id : retiredIds) {
+            QCOMPARE(tabs.pane(id), nullptr);
+        }
+        tabs.closeWorkspace(first);
+        QCOMPARE(widget->count(), 1);
+        auto* const third = tabs.createWorkspace();
+        QVERIFY(!retiredIds.contains(tabs.paneId(third->activePane())));
+        QCOMPARE(widget->tabText(1), QStringLiteral("Tab 3"));
+        // Closing an inactive workspace does not change the current one.
+        tabs.closeWorkspace(first);
+        QCOMPARE(tabs.activeWorkspace(), third);
+    }
+
     void startsWithOneWorkspace()
     {
         rfm::app::WorkspaceTabs tabs;

@@ -153,7 +153,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     m_autoRefreshTimer->setInterval(3000);
     connect(m_autoRefreshTimer, &QTimer::timeout, this, [this] {
         probeStorage();
-        for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+        for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
             FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
             if (pane->source() == rfm::core::FileSource::Ssh &&
                 m_expectedPaneSources.value(paneId, pane->source()) == rfm::core::FileSource::Ssh) {
@@ -608,6 +608,8 @@ void MainWindow::createMenus()
 void MainWindow::createWorkspaceTabs()
 {
     m_workspaceTabs = new WorkspaceTabs(this);
+    connect(m_workspaceTabs, &WorkspaceTabs::paneAdded, this, &MainWindow::connectBrowserPane);
+    connect(m_workspaceTabs, &WorkspaceTabs::paneRemoved, this, &MainWindow::removePaneContexts);
     connectBrowserPane(m_workspaceTabs->paneId(m_workspaceTabs->activeWorkspace()->primaryPane()));
     connect(m_workspaceTabs, &WorkspaceTabs::activePaneChanged, this, [this](quint64) {
         const QSignalBlocker blocker(m_splitViewAction);
@@ -617,6 +619,8 @@ void MainWindow::createWorkspaceTabs()
     });
     connect(m_workspaceTabs, &WorkspaceTabs::paneVisibilityChanged, this,
             [this](quint64 paneId, bool visible) {
+                const QSignalBlocker blocker(m_splitViewAction);
+                m_splitViewAction->setChecked(m_workspaceTabs->activeWorkspace()->isSplit());
                 if (!visible) {
                     cancelDirectoryRequests(paneId);
                     updateOperationActions();
@@ -630,7 +634,8 @@ void MainWindow::createWorkspaceTabs()
                     pane->setTransferContext(m_applicationInstanceId, currentConnectionIdentity(),
                                              paneId);
                 }
-                const FileBrowserPane* const activePane = m_workspaceTabs->activePane();
+                const FileBrowserPane* const activePane =
+                    m_workspaceTabs->workspaceForPane(paneId)->activePane();
                 if (!pane->hasLocation() && activePane->hasLocation()) {
                     requestLocationListing(paneId, activePane->currentLocation(), true,
                                            PaneNavigation::Initial);
@@ -1570,8 +1575,12 @@ void MainWindow::showRemoteDirectory(const QString& path,
 void MainWindow::handleDirectoryListed(quint64 requestId, const QString& path,
                                        const QList<rfm::core::RemoteEntry>& entries)
 {
-    if (requestId == 0 || requestId != m_activeDirectoryRequestId ||
-        !m_directoryRequests.contains(requestId)) {
+    if (requestId == 0 || requestId != m_activeDirectoryRequestId) {
+        return;
+    }
+    if (!m_directoryRequests.contains(requestId)) {
+        m_activeDirectoryRequestId = 0;
+        startNextDirectoryListing();
         return;
     }
 
@@ -1603,8 +1612,12 @@ void MainWindow::handleDirectoryListed(quint64 requestId, const QString& path,
 void MainWindow::handleDirectoryListingError(quint64 requestId, const QString& path,
                                              const QString& error)
 {
-    if (requestId == 0 || requestId != m_activeDirectoryRequestId ||
-        !m_directoryRequests.contains(requestId)) {
+    if (requestId == 0 || requestId != m_activeDirectoryRequestId) {
+        return;
+    }
+    if (!m_directoryRequests.contains(requestId)) {
+        m_activeDirectoryRequestId = 0;
+        startNextDirectoryListing();
         return;
     }
 
@@ -2511,7 +2524,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
                 }
             }
         }
-        for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+        for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
             FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
             const QString normalizedPath = rfm::core::RemotePath::normalize(pane->currentPath());
             if (selectionsByPath.contains(normalizedPath)) {
@@ -2535,7 +2548,7 @@ void MainWindow::handleLocalFileOperationStarted(quint64 id)
 void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperationResult& result)
 {
     const OperationContext context = m_localOperationContexts.value(result.id);
-    if (context.sourcePaneId == 0) {
+    if (!m_localOperationContexts.contains(result.id)) {
         return;
     }
 
@@ -2664,7 +2677,7 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
         requestLocalTreeDirectoryRefresh(context.destinationDirectory);
     }
     QSet<QString> directories{context.sourceDirectory, context.destinationDirectory};
-    for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+    for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
         FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
         bool affected = false;
         for (const QString& directory : directories) {
@@ -2725,7 +2738,7 @@ void MainWindow::scheduleTransferDestinationRefresh(quint64 transferId)
     if (context->connection != currentConnectionIdentity()) {
         return;
     }
-    for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+    for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
         FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
         if (pane == nullptr || pane->source() != context->destination.source) {
             continue;
@@ -3409,7 +3422,7 @@ void MainWindow::evacuateLocalPanesFromMountPoint(const QString& mountPoint)
     if (rfm::core::localPathIsAtOrBelow(fallbackPath, mountPoint)) {
         fallbackPath = QDir::rootPath();
     }
-    for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+    for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
         FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
         if (pane == nullptr) {
             continue;
@@ -3437,7 +3450,7 @@ void MainWindow::evacuateRemotePanesFromMountPoint(const QString& machineId,
         rfm::core::RemotePath::isAtOrBelow(fallbackPath, mountPoint)) {
         fallbackPath = QStringLiteral("/");
     }
-    for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+    for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
         FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
         if (pane == nullptr) {
             continue;
@@ -3531,6 +3544,46 @@ bool MainWindow::isExpectedPaneNavigation(quint64 paneId, quint64 navigationGene
             (m_connected && connectionGeneration == m_connectionGeneration));
 }
 
+void MainWindow::removePaneContexts(quint64 paneId)
+{
+    cancelDirectoryRequests(paneId);
+    // Retain the active request ID until its reply releases the serialized SSH queue.
+    m_directoryRequests.removeIf(
+        [paneId](const auto& entry) { return entry.value().paneId == paneId; });
+    m_localDirectoryRequests.removeIf(
+        [paneId](const auto& entry) { return entry.value().paneId == paneId; });
+    m_directoryCountRequests.removeIf(
+        [paneId](const auto& entry) { return entry.value().paneId == paneId; });
+    m_expectedLocalDirectoryRequests.remove(paneId);
+    m_paneNavigationGenerations.remove(paneId);
+    m_expectedPaneSources.remove(paneId);
+    m_scheduledPaneRefreshes.remove(paneId);
+    m_scheduledTransferRefreshLocations.remove(paneId);
+    m_busyPanes.remove(paneId);
+    m_transferPanes.removeIf([paneId](const auto& entry) { return entry.value() == paneId; });
+    m_pendingRemoteFilesystemPreflights.removeIf([paneId](const auto& entry) {
+        return entry.value().destinationPaneId == paneId ||
+               entry.value().payload.sourcePaneId == paneId;
+    });
+    // Keep operation paths and tracking alive; only detach their UI endpoints.
+    for (auto* const contexts : {&m_operationContexts, &m_localOperationContexts}) {
+        for (auto& context : *contexts) {
+            if (context.sourcePaneId == paneId) {
+                context.sourcePaneId = 0;
+            }
+            if (context.destinationPaneId == paneId) {
+                context.destinationPaneId = 0;
+            }
+        }
+    }
+    if (m_internalClipboard.content().has_value() &&
+        m_internalClipboard.content()->payload.sourcePaneId == paneId) {
+        clearInternalClipboard();
+    }
+    updateNavigationActions();
+    updateOperationActions();
+}
+
 void MainWindow::cancelDirectoryRequests(quint64 paneId)
 {
     m_expectedDirectoryRequests.remove(paneId);
@@ -3592,7 +3645,7 @@ void MainWindow::schedulePaneRefresh(quint64 paneId, bool showBusy)
 
 void MainWindow::scheduleVisiblePanesForPaths(const QSet<QString>& paths, bool showBusy)
 {
-    for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+    for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
         FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
         if (pane->source() == rfm::core::FileSource::Ssh &&
             paths.contains(rfm::core::RemotePath::normalize(pane->currentPath()))) {
@@ -3811,7 +3864,7 @@ void MainWindow::setBusy(bool busy, const QString& message)
     }
     updateConnectionAction();
     updateNavigationActions();
-    for (const quint64 paneId : m_workspaceTabs->visiblePaneIds()) {
+    for (const quint64 paneId : m_workspaceTabs->openPaneIds()) {
         FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
         pane->setInteractionEnabled(pane->hasLocation() && !busy && !m_busyPanes.contains(paneId));
     }

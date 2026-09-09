@@ -36,6 +36,7 @@ class PaneWorkspace final : public QWidget
     void resetFileView();
 
   signals:
+    void paneAdded(quint64 paneId);
     void activePaneChanged(quint64 paneId);
     void paneVisibilityChanged(quint64 paneId, bool visible);
 

@@ -20,6 +20,10 @@ class WorkspaceTabs final : public QWidget
     explicit WorkspaceTabs(QWidget* parent = nullptr);
 
     [[nodiscard]] PaneWorkspace* activeWorkspace() const;
+    [[nodiscard]] PaneWorkspace* workspaceForPane(PaneId id) const;
+    PaneWorkspace* createWorkspace();
+    void closeWorkspace(PaneWorkspace* workspace);
+    void setActiveWorkspace(PaneWorkspace* workspace);
     [[nodiscard]] FileBrowserPane* activePane() const;
     [[nodiscard]] FileBrowserPane* otherVisiblePane() const;
     [[nodiscard]] FileBrowserPane* otherVisiblePane(PaneId sourcePaneId) const;
@@ -28,13 +32,19 @@ class WorkspaceTabs final : public QWidget
     // Visible panes belong to the current tab; paneIds includes all workspaces.
     [[nodiscard]] QList<PaneId> visiblePaneIds() const;
     [[nodiscard]] QList<PaneId> paneIds() const;
+    // Panes exposed by each workspace's split state, including inactive tabs.
+    [[nodiscard]] QList<PaneId> openPaneIds() const;
 
   signals:
+    void activeWorkspaceChanged();
+    void paneAdded(quint64 paneId);
+    void paneRemoved(quint64 paneId);
     void activePaneChanged(quint64 paneId);
     void paneVisibilityChanged(quint64 paneId, bool visible);
 
   private:
     QTabWidget* m_tabs{nullptr};
+    quint64 m_nextTabNumber{1};
 };
 
 } // namespace rfm::app

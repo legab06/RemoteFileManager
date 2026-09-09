@@ -158,6 +158,7 @@ FileBrowserPane* PaneWorkspace::createPane(PaneId id)
     m_splitter->addWidget(pane);
     m_panes.insert(id, pane);
     connect(pane, &FileBrowserPane::activated, this, [this, pane] { setActivePane(pane); });
+    emit paneAdded(id);
     return pane;
 }
 
