@@ -36,6 +36,7 @@ class PaneWorkspace final : public QWidget
     void resetFileView();
 
   signals:
+    void paneAdded(quint64 paneId);
     void activePaneChanged(quint64 paneId);
     void paneVisibilityChanged(quint64 paneId, bool visible);
 
@@ -49,7 +50,6 @@ class PaneWorkspace final : public QWidget
     FileBrowserPane* m_secondaryPane{nullptr};
     FileBrowserPane* m_activePane{nullptr};
     QHash<PaneId, FileBrowserPane*> m_panes;
-    PaneId m_nextPaneId{1};
     bool m_split{false};
 };
 

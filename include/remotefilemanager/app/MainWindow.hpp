@@ -50,7 +50,7 @@ class TransferCoordinator;
 namespace rfm::app
 {
 
-class PaneWorkspace;
+class WorkspaceTabs;
 class OperationPanel;
 class ConnectionDialog;
 class PasswordAuthenticationDialog;
@@ -106,7 +106,7 @@ class MainWindow final : public QMainWindow
   private:
     void createActions();
     void createMenus();
-    void createPaneWorkspace();
+    void createWorkspaceTabs();
     void connectBrowserPane(quint64 paneId);
     void openLocalFile(const rfm::core::BrowserLocation& location);
     void createNavigationBar();
@@ -184,6 +184,7 @@ class MainWindow final : public QMainWindow
     void removeTerminalOperation(quint64 id);
     void clearTerminalOperations();
     void updateOperationActions();
+    void updateViewModeAction();
     void updateConnectionAction();
     void updatePaneTransferContexts();
     void updateCutAppearance();
@@ -270,6 +271,7 @@ class MainWindow final : public QMainWindow
                                                 rfm::core::FileSource source,
                                                 quint64 connectionGeneration = 0) const;
     void cancelDirectoryRequests(quint64 paneId);
+    void removePaneContexts(quint64 paneId);
     void setPaneBusy(quint64 paneId, bool busy, const QString& message = {},
                      int messageTimeout = 0);
     void schedulePaneRefresh(quint64 paneId, bool showBusy);
@@ -301,6 +303,8 @@ class MainWindow final : public QMainWindow
     QAction* m_removeAction{nullptr};
     QAction* m_filePropertiesAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_viewModeAction{nullptr};
+    QAction* m_newTabAction{nullptr};
     QAction* m_resetFileViewAction{nullptr};
     QAction* m_showHiddenFilesAction{nullptr};
     QAction* m_placesDockAction{nullptr};
@@ -312,7 +316,7 @@ class MainWindow final : public QMainWindow
     QAction* m_focusLocationAction{nullptr};
     QAction* m_switchPaneAction{nullptr};
     QAction* m_cancelCutAction{nullptr};
-    PaneWorkspace* m_paneWorkspace{nullptr};
+    WorkspaceTabs* m_workspaceTabs{nullptr};
     HomePage* m_homePage{nullptr};
     QStackedWidget* m_centralStack{nullptr};
     OperationPanel* m_operationPanel{nullptr};

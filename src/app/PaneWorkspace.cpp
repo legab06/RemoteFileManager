@@ -7,8 +7,23 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
+#include <limits>
+
 namespace rfm::app
 {
+namespace
+{
+// Workspaces and their panes are created on the GUI thread. Never recycle IDs,
+// including after destruction: asynchronous results may still refer to them.
+quint64 allocatePaneId()
+{
+    static quint64 nextPaneId{1};
+    if (nextPaneId == std::numeric_limits<quint64>::max()) {
+        qFatal("Pane ID space exhausted");
+    }
+    return nextPaneId++;
+}
+} // namespace
 
 PaneWorkspace::PaneWorkspace(QWidget* parent) : QWidget(parent)
 {
@@ -20,7 +35,7 @@ PaneWorkspace::PaneWorkspace(QWidget* parent) : QWidget(parent)
     m_splitter->setChildrenCollapsible(false);
     layout->addWidget(m_splitter);
 
-    m_primaryPane = createPane(m_nextPaneId++);
+    m_primaryPane = createPane(allocatePaneId());
     m_activePane = m_primaryPane;
     updateActiveAppearance();
 }
@@ -89,7 +104,7 @@ void PaneWorkspace::setSplit(bool enabled)
     }
     if (enabled) {
         if (m_secondaryPane == nullptr) {
-            m_secondaryPane = createPane(m_nextPaneId++);
+            m_secondaryPane = createPane(allocatePaneId());
         }
         FileBrowserPane* const hiddenPane =
             m_activePane == m_primaryPane ? m_secondaryPane : m_primaryPane;
@@ -116,7 +131,7 @@ void PaneWorkspace::activateOtherPane()
         return;
     }
     setActivePane(otherPane);
-    otherPane->fileTable()->setFocus(Qt::ShortcutFocusReason);
+    otherPane->focusFileView();
 }
 
 void PaneWorkspace::resetFileView()
@@ -143,6 +158,7 @@ FileBrowserPane* PaneWorkspace::createPane(PaneId id)
     m_splitter->addWidget(pane);
     m_panes.insert(id, pane);
     connect(pane, &FileBrowserPane::activated, this, [this, pane] { setActivePane(pane); });
+    emit paneAdded(id);
     return pane;
 }
 

@@ -80,6 +80,12 @@ target_link_libraries(rfm_remote_storage_scanner_tests PRIVATE Qt6::Test RemoteF
 rfm_set_project_warnings(rfm_remote_storage_scanner_tests)
 add_test(NAME unit.remote_storage_scanner COMMAND rfm_remote_storage_scanner_tests)
 
+qt_add_executable(rfm_workspace_tabs_tests test_workspace_tabs.cpp)
+target_link_libraries(rfm_workspace_tabs_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
+rfm_set_project_warnings(rfm_workspace_tabs_tests)
+add_test(NAME ui.workspace_tabs COMMAND rfm_workspace_tabs_tests)
+set_tests_properties(ui.workspace_tabs PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(rfm_ui_tests test_main_window.cpp)
 target_link_libraries(rfm_ui_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
 rfm_set_project_warnings(rfm_ui_tests)

@@ -9,6 +9,7 @@
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
+#include "remotefilemanager/app/WorkspaceTabs.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
@@ -37,6 +38,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPointer>
 #include <QProgressBar>
 #include <QPushButton>
 #include <QRadioButton>
@@ -47,6 +49,7 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QTabWidget>
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
@@ -282,7 +285,7 @@ void showLocalSplit(rfm::app::MainWindow& window, const QString& source, const Q
     secondary->setInteractionEnabled(true);
     auto* const stack = window.findChild<QStackedWidget*>(QStringLiteral("centralStack"));
     QVERIFY(stack != nullptr);
-    stack->setCurrentWidget(workspace);
+    stack->setCurrentWidget(window.findChild<rfm::app::WorkspaceTabs*>());
     QVERIFY(QMetaObject::invokeMethod(primary, "activated", Qt::DirectConnection));
     window.show();
     QTest::mouseClick(primary->fileTable()->viewport(), Qt::LeftButton);
@@ -456,6 +459,13 @@ class MainWindowTest final : public QObject
 
   private slots:
     void exposesInitialDisconnectedShell();
+    void workspaceActionsResolveCurrentTab();
+    void viewModeActionFollowsTheActivePane();
+    void newTabToolbarActionCreatesWorkspace();
+    void tabPlacesNavigationAndLateLocalResults();
+    void closingTabKeepsLocalCopyRunning();
+    void closedTabReleasesRemoteListingQueue_data();
+    void closedTabReleasesRemoteListingQueue();
     void persistsShowHiddenFilesPreference();
     void resetFileViewActionResetsAllPanes();
     void dockVisibilityActionsTrackPanels();
@@ -1027,7 +1037,7 @@ void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
     QCOMPARE(workspace->activePane()->currentPath(), QDir(temporary.path()).absolutePath());
     QCOMPARE(workspace->activePane()->fileTable()->rowCount(), 1);
     QCOMPARE(workspace->activePane()->fileTable()->item(0, 0)->text(), QStringLiteral("local.txt"));
-    QCOMPARE(stack->currentWidget(), workspace);
+    QCOMPARE(stack->currentWidget(), window.findChild<rfm::app::WorkspaceTabs*>());
     QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
     auto* const createAction = window.findChild<QAction*>(QStringLiteral("createDirectoryAction"));
     auto* const renameAction = window.findChild<QAction*>(QStringLiteral("renameAction"));
@@ -1394,7 +1404,273 @@ void MainWindowTest::keepsLocalAndRemoteSourcesDistinctAcrossSplitAndDisconnect(
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
     QVERIFY(!remotePane->hasLocation());
     QCOMPARE(localPane->source(), rfm::core::FileSource::Local);
-    QCOMPARE(stack->currentWidget(), workspace);
+    QCOMPARE(stack->currentWidget(), window.findChild<rfm::app::WorkspaceTabs*>());
+}
+
+void MainWindowTest::workspaceActionsResolveCurrentTab()
+{
+    rfm::app::MainWindow window;
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    QVERIFY(tabs != nullptr);
+    auto* const first = tabs->activeWorkspace();
+    auto* const widget = tabs->findChild<QTabWidget*>();
+    QVERIFY(widget != nullptr);
+    auto* const second = tabs->createWorkspace();
+    second->setSplit(true);
+    widget->setCurrentWidget(first);
+    widget->setCurrentWidget(second);
+    QCOMPARE(tabs->activeWorkspace(), second);
+    QCOMPARE(tabs->pane(tabs->paneId(first->primaryPane())), first->primaryPane());
+    QCOMPARE(tabs->paneIds().size(), 3);
+    QCOMPARE(tabs->visiblePaneIds().size(), 2);
+    auto* const split = window.findChild<QAction*>(QStringLiteral("splitViewAction"));
+    QVERIFY(split != nullptr);
+    QVERIFY(split->isChecked());
+    // Verify icon is set (not null)
+    QVERIFY(!split->icon().isNull());
+    // Verify text is still "Split view" for menu
+    QCOMPARE(split->text(), tr("Split view"));
+    // Verify action is still checkable
+    QVERIFY(split->isCheckable());
+    split->trigger();
+    QVERIFY(!second->isSplit());
+    split->trigger();
+    QVERIFY(second->isSplit());
+    QVERIFY(!first->isSplit());
+    auto* const secondary = second->otherVisiblePane();
+    window.findChild<QAction*>(QStringLiteral("switchPaneAction"))->trigger();
+    QCOMPARE(tabs->activePane(), secondary);
+    QCOMPARE(first->activePane(), first->primaryPane());
+    first->primaryPane()->fileTable()->horizontalHeader()->moveSection(0, 1);
+    second->primaryPane()->fileTable()->horizontalHeader()->moveSection(0, 1);
+    window.findChild<QAction*>(QStringLiteral("resetFileViewAction"))->trigger();
+    QCOMPARE(second->primaryPane()->fileTable()->horizontalHeader()->visualIndex(0), 0);
+    // FileBrowserPane deliberately shares reset preferences across all panes.
+    QCOMPARE(first->primaryPane()->fileTable()->horizontalHeader()->visualIndex(0), 0);
+    widget->setCurrentWidget(first);
+    QVERIFY(!split->isChecked());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("switchPaneAction"))->isEnabled());
+}
+
+void MainWindowTest::viewModeActionFollowsTheActivePane()
+{
+    rfm::app::MainWindow window;
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const viewMode = window.findChild<QAction*>(QStringLiteral("viewModeAction"));
+    QVERIFY(tabs != nullptr);
+    QVERIFY(viewMode != nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("mosaicViewAction")) == nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("detailsViewAction")) == nullptr);
+    QVERIFY(viewMode->isEnabled());
+    QVERIFY(!viewMode->icon().isNull());
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+
+    viewMode->trigger();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    QVERIFY(!viewMode->icon().isNull());
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Details view"));
+    const QIcon mosaicIcon = viewMode->icon();
+    viewMode->trigger();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Details);
+    QVERIFY(viewMode->icon().cacheKey() != mosaicIcon.cacheKey());
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+
+    viewMode->trigger();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    tabs->activeWorkspace()->setSplit(true);
+    auto* const secondary = tabs->activeWorkspace()->otherVisiblePane();
+    QVERIFY(secondary != nullptr);
+    secondary->activated();
+    QCOMPARE(tabs->activePane(), secondary);
+    QCOMPARE(secondary->viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+
+    auto* const firstWorkspace = tabs->activeWorkspace();
+    auto* const secondWorkspace = tabs->createWorkspace();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+    tabs->setActiveWorkspace(firstWorkspace);
+    QCOMPARE(tabs->activePane(), secondary);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+    tabs->setActiveWorkspace(secondWorkspace);
+    viewMode->trigger();
+    QCOMPARE(secondWorkspace->activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Details view"));
+    tabs->setActiveWorkspace(firstWorkspace);
+    QCOMPARE(secondary->viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+}
+
+void MainWindowTest::newTabToolbarActionCreatesWorkspace()
+{
+    rfm::app::MainWindow window;
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const action = window.findChild<QAction*>(QStringLiteral("newTabAction"));
+    QVERIFY(tabs != nullptr);
+    QVERIFY(action != nullptr);
+    QCOMPARE(tabs->paneIds().size(), 1);
+    action->trigger();
+    QCOMPARE(tabs->paneIds().size(), 2);
+    QCOMPARE(tabs->findChild<QTabWidget*>()->count(), 2);
+    QCOMPARE(tabs->activeWorkspace(), tabs->findChild<QTabWidget*>()->widget(1));
+    QCOMPARE(action->text(), QStringLiteral("New tab"));
+    QCOMPARE(action->toolTip(), QStringLiteral("Open a new workspace"));
+}
+
+void MainWindowTest::tabPlacesNavigationAndLateLocalResults()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const places = window.findChild<rfm::app::NavigationTree*>();
+    auto* const first = tabs->activeWorkspace();
+    auto* const hidden = window.findChild<QAction*>(QStringLiteral("showHiddenFilesAction"));
+    const bool previousHidden = hidden->isChecked();
+    hidden->setChecked(true);
+    auto* const second = tabs->createWorkspace();
+    QSignalSpy requests(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    auto navigate = [&](const QString& path) {
+        QVERIFY(QMetaObject::invokeMethod(places, "localLocationActivated", Q_ARG(QString, path)));
+    };
+    auto complete = [&](quint64 id, const QString& path) {
+        const QList<rfm::core::RemoteEntry> entries{
+            {QStringLiteral(".hidden"), 1, {}, false, false}};
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListed", Q_ARG(quint64, id),
+                                          Q_ARG(QString, path),
+                                          Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    };
+    navigate(QStringLiteral("/tmp"));
+    const quint64 secondRequest = requests.constLast().at(0).toULongLong();
+    tabs->setActiveWorkspace(first);
+    // A result for an inactive tab must update that tab, without activating it.
+    complete(secondRequest, QStringLiteral("/tmp"));
+    QCOMPARE(tabs->activeWorkspace(), first);
+    QVERIFY(!first->activePane()->hasLocation());
+    QCOMPARE(second->activePane()->currentPath(), QStringLiteral("/tmp"));
+    QCOMPARE(second->activePane()->fileTable()->rowCount(), 1);
+    navigate(QStringLiteral("/home"));
+    complete(requests.constLast().at(0).toULongLong(), QStringLiteral("/home"));
+    navigate(QStringLiteral("/var"));
+    complete(requests.constLast().at(0).toULongLong(), QStringLiteral("/var"));
+    auto* const back = window.findChild<QAction*>(QStringLiteral("backAction"));
+    QVERIFY(back->isEnabled());
+    tabs->setActiveWorkspace(second);
+    QVERIFY(!back->isEnabled());
+    QCOMPARE(second->activePane()->currentPath(), QStringLiteral("/tmp"));
+    tabs->setActiveWorkspace(first);
+    QVERIFY(back->isEnabled());
+    // Even a programmatic split in an inactive workspace uses its own location.
+    second->setSplit(true);
+    QCOMPARE(requests.constLast().at(1).toString(), QStringLiteral("/tmp"));
+    QVERIFY(!first->isSplit());
+    QVERIFY(!window.findChild<QAction*>(QStringLiteral("splitViewAction"))->isChecked());
+    navigate(QStringLiteral("/late"));
+    const quint64 late = requests.constLast().at(0).toULongLong();
+    const quint64 retiredId = tabs->paneId(first->activePane());
+    QPointer<rfm::app::FileBrowserPane> retired = first->activePane();
+    tabs->closeWorkspace(first);
+    QVERIFY(retired.isNull());
+    complete(late, QStringLiteral("/late"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListingError",
+                                      Q_ARG(quint64, late), Q_ARG(QString, QStringLiteral("/late")),
+                                      Q_ARG(QString, QStringLiteral("late failure"))));
+    QCOMPARE(tabs->pane(retiredId), nullptr);
+    QCOMPARE(second->activePane()->currentPath(), QStringLiteral("/tmp"));
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
+    hidden->setChecked(previousHidden);
+}
+
+void MainWindowTest::closingTabKeepsLocalCopyRunning()
+{
+    QTemporaryDir source;
+    QTemporaryDir destination;
+    QVERIFY(source.isValid());
+    QVERIFY(destination.isValid());
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::localFileOperationRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    showLocalSplit(window, source.path(), destination.path(),
+                   {{QStringLiteral("file.txt"), 1, {}, false, false}}, {});
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const first = tabs->activeWorkspace();
+    first->activePane()->fileTable()->selectRow(0);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::localFileOperationRequested);
+    window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"))->trigger();
+    QCOMPARE(operations.size(), 1);
+    const auto request =
+        operations.constFirst().constFirst().value<rfm::core::LocalFileOperationRequest>();
+    auto* const second = tabs->createWorkspace();
+    showPaneLocation(second->activePane(), rfm::core::FileSource::Local, destination.path());
+    auto* const third = tabs->createWorkspace();
+    tabs->closeWorkspace(first);
+    auto* const table = window.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    const int row = rowForId(table, request.id);
+    QVERIFY(row >= 0);
+    QVERIFY(table->item(row, 3)->text() != QStringLiteral("Cancelled"));
+    QSignalSpy listings(&window, &rfm::app::MainWindow::localDirectoryRequested);
+    const rfm::core::LocalFileOperationResult result{
+        request.id,
+        request.kind,
+        {{request.sourcePaths.constFirst(),
+          QDir(destination.path()).filePath(QStringLiteral("file.txt")),
+          true,
+          {},
+          rfm::core::LocalFileOperationOutcome::Succeeded}},
+        false};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
+                                      Q_ARG(rfm::core::LocalFileOperationResult, result)));
+    QCOMPARE(table->item(rowForId(table, request.id), 3)->text(), QStringLiteral("Completed"));
+    QTRY_VERIFY(!listings.isEmpty());
+    QCOMPARE(listings.constLast().at(1).toString(), destination.path());
+    QCOMPARE(tabs->activeWorkspace(), third);
+}
+
+void MainWindowTest::closedTabReleasesRemoteListingQueue_data()
+{
+    QTest::addColumn<bool>("failure");
+    QTest::newRow("success") << false;
+    QTest::newRow("failure") << true;
+}
+
+void MainWindowTest::closedTabReleasesRemoteListingQueue()
+{
+    QFETCH(bool, failure);
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy requests(&window, &rfm::app::MainWindow::directoryRequested);
+    setConnectionIdentity(window);
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const first = tabs->activeWorkspace();
+    const auto location = first->activePane()->currentLocation();
+    first->activePane()->requestRefresh();
+    QCOMPARE(requests.size(), 1);
+    const quint64 late = requests.constFirst().at(0).toULongLong();
+    auto* const second = tabs->createWorkspace();
+    auto* const places = window.findChild<rfm::app::NavigationTree*>();
+    QVERIFY(QMetaObject::invokeMethod(places, "remoteLocationActivated",
+                                      Q_ARG(QString, location.machineId),
+                                      Q_ARG(QString, QStringLiteral("/var/log"))));
+    QCOMPARE(requests.size(), 1);
+    tabs->closeWorkspace(first);
+    QCOMPARE(requests.size(), 1); // The single SSH worker is still finishing its request.
+    if (failure) {
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListingError",
+                                          Q_ARG(quint64, late), Q_ARG(QString, location.path),
+                                          Q_ARG(QString, QStringLiteral("late failure"))));
+    } else {
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "handleDirectoryListed", Q_ARG(quint64, late), Q_ARG(QString, location.path),
+            Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    }
+    QCOMPARE(requests.size(), 2);
+    QCOMPARE(requests.constLast().at(1).toString(), QStringLiteral("/var/log"));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Q_ARG(quint64, requests.constLast().at(0).toULongLong()),
+        Q_ARG(QString, QStringLiteral("/var/log")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    QCOMPARE(second->activePane()->currentPath(), QStringLiteral("/var/log"));
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
 }
 
 void MainWindowTest::resetFileViewActionResetsAllPanes()
@@ -2146,7 +2422,7 @@ void MainWindowTest::disconnectActionFollowsSessionLifecycle()
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QVERIFY(disconnect->isEnabled());
     QVERIFY(refreshTimer->isActive());
-    QCOMPARE(stack->currentWidget(), workspace);
+    QCOMPARE(stack->currentWidget(), window.findChild<rfm::app::WorkspaceTabs*>());
 
     QObject::disconnect(&window, &rfm::app::MainWindow::disconnectionRequested, nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::disconnectionRequested);
