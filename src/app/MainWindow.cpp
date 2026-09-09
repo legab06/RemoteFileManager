@@ -543,6 +543,12 @@ void MainWindow::createActions()
     m_splitViewAction = new QAction(tr("Split view"), this);
     m_splitViewAction->setObjectName(QStringLiteral("splitViewAction"));
     m_splitViewAction->setCheckable(true);
+    // Try to use system theme icon for split view, fallback to text if not available
+    QIcon splitIcon = style()->standardIcon(QStyle::SP_FileDialogNewFolder); // Default fallback
+    if (QIcon::hasThemeIcon(QStringLiteral("view-split-left-right"))) {
+        splitIcon = QIcon::fromTheme(QStringLiteral("view-split-left-right"));
+    }
+    m_splitViewAction->setIcon(splitIcon);
     connect(m_splitViewAction, &QAction::toggled, this,
             [this](bool enabled) { m_workspaceTabs->activeWorkspace()->setSplit(enabled); });
     m_newTabAction = new QAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder),
@@ -814,6 +820,10 @@ void MainWindow::createNavigationBar()
 
     navigationBar->addSeparator();
     navigationBar->addAction(m_splitViewAction);
+    // Ensure the split view button shows only icon (not text) in toolbar
+    if (QToolButton* const splitButton = qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_splitViewAction))) {
+        splitButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    }
     navigationBar->addAction(m_newTabAction);
     navigationBar->addAction(m_newConnectionAction);
     navigationBar->addAction(m_disconnectAction);

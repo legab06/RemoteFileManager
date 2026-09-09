@@ -1425,6 +1425,12 @@ void MainWindowTest::workspaceActionsResolveCurrentTab()
     auto* const split = window.findChild<QAction*>(QStringLiteral("splitViewAction"));
     QVERIFY(split != nullptr);
     QVERIFY(split->isChecked());
+    // Verify icon is set (not null)
+    QVERIFY(!split->icon().isNull());
+    // Verify text is still "Split view" for menu
+    QCOMPARE(split->text(), tr("Split view"));
+    // Verify action is still checkable
+    QVERIFY(split->isCheckable());
     split->trigger();
     QVERIFY(!second->isSplit());
     split->trigger();
