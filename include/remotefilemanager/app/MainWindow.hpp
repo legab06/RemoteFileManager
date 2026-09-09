@@ -184,6 +184,7 @@ class MainWindow final : public QMainWindow
     void removeTerminalOperation(quint64 id);
     void clearTerminalOperations();
     void updateOperationActions();
+    void updateViewModeAction();
     void updateConnectionAction();
     void updatePaneTransferContexts();
     void updateCutAppearance();
@@ -302,6 +303,7 @@ class MainWindow final : public QMainWindow
     QAction* m_removeAction{nullptr};
     QAction* m_filePropertiesAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_viewModeAction{nullptr};
     QAction* m_newTabAction{nullptr};
     QAction* m_resetFileViewAction{nullptr};
     QAction* m_showHiddenFilesAction{nullptr};

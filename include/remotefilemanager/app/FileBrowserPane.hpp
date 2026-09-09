@@ -13,8 +13,12 @@
 
 #include <optional>
 
+class QAbstractItemView;
+class QEvent;
 class QLineEdit;
+class QListView;
 class QResizeEvent;
+class QStackedWidget;
 class QTimer;
 class QTableWidget;
 
@@ -22,6 +26,7 @@ namespace rfm::app
 {
 
 enum class PaneNavigation { Initial, Normal, Back, Forward, Refresh, SafetyFallback };
+enum class ViewMode { Details, Mosaic };
 
 struct FileEntryProperties {
     QString title;
@@ -43,6 +48,9 @@ class FileBrowserPane final : public QWidget
     [[nodiscard]] QList<rfm::core::RemoteSelection> selectedEntries() const;
     [[nodiscard]] QLineEdit* pathEdit() const;
     [[nodiscard]] QTableWidget* fileTable() const;
+    [[nodiscard]] QListView* mosaicView() const;
+    [[nodiscard]] int mosaicIconSize() const;
+    [[nodiscard]] ViewMode viewMode() const;
     [[nodiscard]] bool canGoBack() const;
     [[nodiscard]] bool canGoForward() const;
     [[nodiscard]] QByteArray createInternalDragData() const;
@@ -78,6 +86,9 @@ class FileBrowserPane final : public QWidget
     void requestOpenContextEntry();
     void resetFileView();
     void setShowHiddenFiles(bool show);
+    void setViewMode(ViewMode mode);
+    void focusFileView();
+    void selectAllEntries();
 
   signals:
     void activated();
@@ -95,20 +106,24 @@ class FileBrowserPane final : public QWidget
     void crossSourceMoveUnsupported();
     void directoryItemCountRequested(rfm::core::BrowserLocation location, quint64 generation,
                                      QString name);
+    void viewModeChanged(rfm::app::ViewMode mode);
 
   private:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void openEntry(int row);
     [[nodiscard]] std::optional<rfm::core::BrowserLocation> localFileLocationForRow(int row) const;
-    void prepareContextMenu(const QPoint& position);
+    void prepareContextMenu(QAbstractItemView* view, const QPoint& position);
     void startInternalDrag(Qt::DropActions supportedActions);
-    [[nodiscard]] QString dropDestinationAt(const QPoint& position, int* folderRow = nullptr) const;
+    [[nodiscard]] QString dropDestinationAt(const QAbstractItemView* view, const QPoint& position,
+                                            int* folderRow = nullptr) const;
+    bool handleDropEvent(QAbstractItemView* view, QEvent* event);
     [[nodiscard]] rfm::core::InternalTransferValidation
     validateDrop(const rfm::core::InternalTransferPayload& payload,
                  const QString& destination) const;
-    void updateDropAppearance(bool active, bool valid, int folderRow = -1);
+    void updateDropAppearance(bool active, bool valid, QAbstractItemView* view, int folderRow = -1);
     void updateCutAppearance();
+    void updateHiddenRows();
     void restoreTableHeaderState();
     void applyTableHeaderState(const QByteArray& state, int sortColumn, Qt::SortOrder sortOrder,
                                bool adaptiveLayout);
@@ -127,7 +142,10 @@ class FileBrowserPane final : public QWidget
     void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
     QLineEdit* m_pathEdit{nullptr};
+    QStackedWidget* m_fileViews{nullptr};
     QTableWidget* m_fileTable{nullptr};
+    QListView* m_mosaicView{nullptr};
+    ViewMode m_viewMode{ViewMode::Details};
     rfm::core::BrowserLocation m_currentLocation;
     QStringList m_pendingSelectionNames;
     QStringList m_pendingDirectoryCountNames;
@@ -163,3 +181,4 @@ class FileBrowserPane final : public QWidget
 } // namespace rfm::app
 
 Q_DECLARE_METATYPE(rfm::app::PaneNavigation)
+Q_DECLARE_METATYPE(rfm::app::ViewMode)

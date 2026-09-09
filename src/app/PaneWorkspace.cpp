@@ -131,7 +131,7 @@ void PaneWorkspace::activateOtherPane()
         return;
     }
     setActivePane(otherPane);
-    otherPane->fileTable()->setFocus(Qt::ShortcutFocusReason);
+    otherPane->focusFileView();
 }
 
 void PaneWorkspace::resetFileView()

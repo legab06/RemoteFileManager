@@ -460,6 +460,7 @@ class MainWindowTest final : public QObject
   private slots:
     void exposesInitialDisconnectedShell();
     void workspaceActionsResolveCurrentTab();
+    void viewModeActionFollowsTheActivePane();
     void newTabToolbarActionCreatesWorkspace();
     void tabPlacesNavigationAndLateLocalResults();
     void closingTabKeepsLocalCopyRunning();
@@ -1449,6 +1450,55 @@ void MainWindowTest::workspaceActionsResolveCurrentTab()
     widget->setCurrentWidget(first);
     QVERIFY(!split->isChecked());
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("switchPaneAction"))->isEnabled());
+}
+
+void MainWindowTest::viewModeActionFollowsTheActivePane()
+{
+    rfm::app::MainWindow window;
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const viewMode = window.findChild<QAction*>(QStringLiteral("viewModeAction"));
+    QVERIFY(tabs != nullptr);
+    QVERIFY(viewMode != nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("mosaicViewAction")) == nullptr);
+    QVERIFY(window.findChild<QAction*>(QStringLiteral("detailsViewAction")) == nullptr);
+    QVERIFY(viewMode->isEnabled());
+    QVERIFY(!viewMode->icon().isNull());
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+
+    viewMode->trigger();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    QVERIFY(!viewMode->icon().isNull());
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Details view"));
+    const QIcon mosaicIcon = viewMode->icon();
+    viewMode->trigger();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Details);
+    QVERIFY(viewMode->icon().cacheKey() != mosaicIcon.cacheKey());
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+
+    viewMode->trigger();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    tabs->activeWorkspace()->setSplit(true);
+    auto* const secondary = tabs->activeWorkspace()->otherVisiblePane();
+    QVERIFY(secondary != nullptr);
+    secondary->activated();
+    QCOMPARE(tabs->activePane(), secondary);
+    QCOMPARE(secondary->viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+
+    auto* const firstWorkspace = tabs->activeWorkspace();
+    auto* const secondWorkspace = tabs->createWorkspace();
+    QCOMPARE(tabs->activePane()->viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+    tabs->setActiveWorkspace(firstWorkspace);
+    QCOMPARE(tabs->activePane(), secondary);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
+    tabs->setActiveWorkspace(secondWorkspace);
+    viewMode->trigger();
+    QCOMPARE(secondWorkspace->activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Details view"));
+    tabs->setActiveWorkspace(firstWorkspace);
+    QCOMPARE(secondary->viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(viewMode->toolTip(), QStringLiteral("Switch to Mosaic view"));
 }
 
 void MainWindowTest::newTabToolbarActionCreatesWorkspace()

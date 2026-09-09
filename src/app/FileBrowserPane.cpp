@@ -15,12 +15,14 @@
 #include <QEvent>
 #include <QFileIconProvider>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QFocusEvent>
 #include <QHash>
 #include <QHeaderView>
 #include <QIcon>
 #include <QItemSelectionModel>
 #include <QLineEdit>
+#include <QListView>
 #include <QLocale>
 #include <QMimeData>
 #include <QMimeDatabase>
@@ -28,17 +30,20 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QResizeEvent>
 #include <QRubberBand>
 #include <QScrollBar>
-#include <QResizeEvent>
 #include <QSettings>
 #include <QSizePolicy>
+#include <QStackedWidget>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
+#include <array>
 #include <functional>
 #include <limits>
 #include <numeric>
@@ -64,6 +69,8 @@ constexpr int defaultNameColumnWidth = 280;
 constexpr int defaultSizeColumnWidth = 110;
 constexpr int defaultTypeColumnWidth = 180;
 constexpr int defaultModifiedColumnWidth = 170;
+constexpr int defaultMosaicIconSize = 48;
+constexpr std::array mosaicIconSizes{32, 40, 48, 56, 64, 72, 80, 96, 112, 128};
 
 QSet<FileBrowserPane*>& tableHeaderPanes()
 {
@@ -192,7 +199,8 @@ FilePresentation presentationForEntry(const rfm::core::RemoteEntry& entry)
         return {QObject::tr("Symbolic link"), std::move(icon)};
     }
     if (entry.directory) {
-        const QMimeType mimeType = QMimeDatabase{}.mimeTypeForName(QStringLiteral("inode/directory"));
+        const QMimeType mimeType =
+            QMimeDatabase{}.mimeTypeForName(QStringLiteral("inode/directory"));
         QString description = mimeType.comment().trimmed();
         if (description.isEmpty()) {
             description = mimeType.name();
@@ -203,7 +211,8 @@ FilePresentation presentationForEntry(const rfm::core::RemoteEntry& entry)
     const std::optional<QMimeType> mimeType = mimeTypeForFileName(entry.name);
     if (!mimeType.has_value()) {
         // Pour les fichiers sans type MIME spécifique, utiliser le type par défaut
-        const QMimeType defaultMimeType = QMimeDatabase{}.mimeTypeForName(QStringLiteral("application/octet-stream"));
+        const QMimeType defaultMimeType =
+            QMimeDatabase{}.mimeTypeForName(QStringLiteral("application/octet-stream"));
         QString description = defaultMimeType.comment().trimmed();
         if (description.isEmpty() || description == defaultMimeType.name()) {
             // Si aucune description n'est disponible, on utilise le nom technique
@@ -545,6 +554,66 @@ class InternalDragTable final : public QTableWidget
     bool m_preserveItemSelectionForDrag{false};
 };
 
+class InternalDragList final : public QListView
+{
+  public:
+    explicit InternalDragList(QWidget* parent = nullptr) : QListView(parent)
+    {
+        setIconSize(QSize(defaultMosaicIconSize, defaultMosaicIconSize));
+        updateGridSize();
+    }
+
+    std::function<void(Qt::DropActions)> startDragHandler;
+
+    [[nodiscard]] int logicalIconSize() const { return iconSize().width(); }
+
+  protected:
+    void startDrag(Qt::DropActions supportedActions) override
+    {
+        if (startDragHandler) {
+            startDragHandler(supportedActions);
+        }
+    }
+
+    void wheelEvent(QWheelEvent* event) override
+    {
+        if (!event->modifiers().testFlag(Qt::ControlModifier) || event->angleDelta().y() == 0) {
+            QListView::wheelEvent(event);
+            return;
+        }
+        const int currentSize = logicalIconSize();
+        const auto current =
+            std::find(mosaicIconSizes.cbegin(), mosaicIconSizes.cend(), currentSize);
+        const qsizetype currentIndex = current == mosaicIconSizes.cend()
+                                            ? static_cast<qsizetype>(
+                                                  std::distance(mosaicIconSizes.cbegin(),
+                                                                std::lower_bound(
+                                                                    mosaicIconSizes.cbegin(),
+                                                                    mosaicIconSizes.cend(), currentSize)))
+                                            : std::distance(mosaicIconSizes.cbegin(), current);
+        const qsizetype direction = event->angleDelta().y() > 0 ? 1 : -1;
+        const qsizetype nextIndex = qBound<qsizetype>(
+            0, currentIndex + direction, static_cast<qsizetype>(mosaicIconSizes.size()) - 1);
+        if (nextIndex != currentIndex) {
+            const auto index = static_cast<std::size_t>(nextIndex);
+            setIconSize(QSize(mosaicIconSizes.at(index), mosaicIconSizes.at(index)));
+            updateGridSize();
+        }
+        event->accept();
+    }
+
+  private:
+    void updateGridSize()
+    {
+        const int iconExtent = logicalIconSize();
+        const QFontMetrics metrics(font());
+        const int textWidth = metrics.horizontalAdvance(QStringLiteral("WWWWWWWWWW"));
+        const int cellWidth = qMax(iconExtent + 24, textWidth + 16);
+        const int cellHeight = iconExtent + metrics.height() * 2 + 20;
+        setGridSize(QSize(cellWidth, cellHeight));
+    }
+};
+
 } // namespace
 
 FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
@@ -560,7 +629,10 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     m_pathEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     layout->addWidget(m_pathEdit);
 
-    auto* const dragTable = new InternalDragTable(this);
+    m_fileViews = new QStackedWidget(this);
+    m_fileViews->setObjectName(QStringLiteral("fileViews"));
+
+    auto* const dragTable = new InternalDragTable(m_fileViews);
     m_fileTable = dragTable;
     m_fileTable->setObjectName(QStringLiteral("remoteFileTable"));
     m_fileTable->setColumnCount(4);
@@ -591,25 +663,48 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     m_fileTable->setSortingEnabled(true);
     header->setSortIndicator(-1, Qt::AscendingOrder);
     restoreTableHeaderState();
-    layout->addWidget(m_fileTable);
+    m_fileViews->addWidget(m_fileTable);
+
+    auto* const dragList = new InternalDragList(m_fileViews);
+    m_mosaicView = dragList;
+    m_mosaicView->setObjectName(QStringLiteral("remoteFileMosaic"));
+    m_mosaicView->setModel(m_fileTable->model());
+    m_mosaicView->setSelectionModel(m_fileTable->selectionModel());
+    m_mosaicView->setViewMode(QListView::IconMode);
+    m_mosaicView->setFlow(QListView::LeftToRight);
+    m_mosaicView->setWrapping(true);
+    m_mosaicView->setWordWrap(true);
+    m_mosaicView->setResizeMode(QListView::Adjust);
+    m_mosaicView->setMovement(QListView::Static);
+    m_mosaicView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    m_mosaicView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_mosaicView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_mosaicView->setContextMenuPolicy(Qt::CustomContextMenu);
+    m_mosaicView->setDragEnabled(true);
+    m_mosaicView->setAcceptDrops(true);
+    m_mosaicView->viewport()->setAcceptDrops(true);
+    m_mosaicView->setDragDropMode(QAbstractItemView::DragDrop);
+    m_mosaicView->setDropIndicatorShown(false);
+    const int spacing =
+        style()->pixelMetric(QStyle::PM_LayoutHorizontalSpacing, nullptr, m_mosaicView);
+    m_mosaicView->setSpacing(qMax(0, spacing));
+    m_fileViews->addWidget(m_mosaicView);
+    layout->addWidget(m_fileViews);
 
     m_tableHeaderSaveTimer = new QTimer(this);
     m_tableHeaderSaveTimer->setSingleShot(true);
     m_tableHeaderSaveTimer->setInterval(200);
     connect(m_tableHeaderSaveTimer, &QTimer::timeout, this, &FileBrowserPane::saveTableHeaderState);
-    connect(header, &QHeaderView::sectionResized, this,
-            [this](int, int, int) {
-                if (!m_restoringTableHeaderState && !m_applyingLayoutState &&
-                    !m_applyingAdaptiveLayout) {
-                    markManualLayout();
-                }
-            });
-    connect(header, &QHeaderView::sectionMoved, this,
-            [this](int, int, int) {
-                if (!m_restoringTableHeaderState && !m_applyingLayoutState) {
-                    markManualLayout();
-                }
-            });
+    connect(header, &QHeaderView::sectionResized, this, [this](int, int, int) {
+        if (!m_restoringTableHeaderState && !m_applyingLayoutState && !m_applyingAdaptiveLayout) {
+            markManualLayout();
+        }
+    });
+    connect(header, &QHeaderView::sectionMoved, this, [this](int, int, int) {
+        if (!m_restoringTableHeaderState && !m_applyingLayoutState) {
+            markManualLayout();
+        }
+    });
     connect(header, &QHeaderView::sortIndicatorChanged, this,
             &FileBrowserPane::handleSortIndicatorChanged);
     connect(header, &QHeaderView::sectionPressed, this,
@@ -622,16 +717,25 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     m_pathEdit->installEventFilter(this);
     m_fileTable->installEventFilter(this);
     m_fileTable->viewport()->installEventFilter(this);
+    m_mosaicView->installEventFilter(this);
+    m_mosaicView->viewport()->installEventFilter(this);
     header->installEventFilter(this);
     header->viewport()->installEventFilter(this);
 
     connect(m_fileTable, &QTableWidget::cellDoubleClicked, this,
             [this](int row, int /* column */) { openEntry(row); });
     connect(m_fileTable, &QWidget::customContextMenuRequested, this,
-            &FileBrowserPane::prepareContextMenu);
+            [this](const QPoint& position) { prepareContextMenu(m_fileTable, position); });
+    connect(m_mosaicView, &QListView::doubleClicked, this,
+            [this](const QModelIndex& index) { openEntry(index.row()); });
+    connect(m_mosaicView, &QWidget::customContextMenuRequested, this,
+            [this](const QPoint& position) { prepareContextMenu(m_mosaicView, position); });
     connect(m_fileTable->selectionModel(), &QItemSelectionModel::selectionChanged, this,
             &FileBrowserPane::selectionChanged);
     dragTable->startDragHandler = [this](Qt::DropActions supportedActions) {
+        startInternalDrag(supportedActions);
+    };
+    dragList->startDragHandler = [this](Qt::DropActions supportedActions) {
         startInternalDrag(supportedActions);
     };
     QTimer::singleShot(0, this, &FileBrowserPane::applyAdaptiveLayout);
@@ -765,8 +869,7 @@ void FileBrowserPane::applyAdaptiveLayout()
     // Name follows the remaining viewport continuously.  The only clamp is the
     // absolute minimum/maximum; this keeps scrollbar appearance from feeding a
     // second, discontinuous width decision.
-    const int suggestedNameWidth =
-        qBound(minimumNameWidth, availableNameWidth, maximumNameWidth);
+    const int suggestedNameWidth = qBound(minimumNameWidth, availableNameWidth, maximumNameWidth);
 
     if (availableNameWidth < minimumNameWidth) {
         int remainingReduction = otherColumnsWidth - qMax(0, viewportWidth - minimumNameWidth);
@@ -894,6 +997,7 @@ void FileBrowserPane::applySortState()
     header->setSortIndicator(m_sortColumn, m_sortOrder);
     m_fileTable->sortItems(m_sortColumn, m_sortOrder);
     m_applyingSortState = false;
+    updateHiddenRows();
 }
 
 void FileBrowserPane::restoreNaturalOrder()
@@ -940,6 +1044,7 @@ void FileBrowserPane::restoreNaturalOrder()
         }
     }
     m_fileTable->setSortingEnabled(true);
+    updateHiddenRows();
 }
 
 void FileBrowserPane::scheduleTableHeaderStateSave()
@@ -1017,6 +1122,47 @@ QLineEdit* FileBrowserPane::pathEdit() const { return m_pathEdit; }
 
 QTableWidget* FileBrowserPane::fileTable() const { return m_fileTable; }
 
+QListView* FileBrowserPane::mosaicView() const { return m_mosaicView; }
+
+int FileBrowserPane::mosaicIconSize() const { return m_mosaicView->iconSize().width(); }
+
+ViewMode FileBrowserPane::viewMode() const { return m_viewMode; }
+
+void FileBrowserPane::setViewMode(ViewMode mode)
+{
+    if (m_viewMode == mode) {
+        return;
+    }
+    QWidget* const currentView = m_viewMode == ViewMode::Details
+                                     ? static_cast<QWidget*>(m_fileTable)
+                                     : static_cast<QWidget*>(m_mosaicView);
+    const bool restoreFocus =
+        currentView->hasFocus() || currentView->isAncestorOf(QApplication::focusWidget());
+    m_viewMode = mode;
+    m_fileViews->setCurrentWidget(mode == ViewMode::Details ? static_cast<QWidget*>(m_fileTable)
+                                                            : static_cast<QWidget*>(m_mosaicView));
+    if (restoreFocus) {
+        focusFileView();
+    }
+    emit viewModeChanged(m_viewMode);
+}
+
+void FileBrowserPane::focusFileView()
+{
+    QWidget* const view = m_viewMode == ViewMode::Details ? static_cast<QWidget*>(m_fileTable)
+                                                          : static_cast<QWidget*>(m_mosaicView);
+    view->setFocus(Qt::ShortcutFocusReason);
+}
+
+void FileBrowserPane::selectAllEntries()
+{
+    if (m_viewMode == ViewMode::Details) {
+        m_fileTable->selectAll();
+    } else {
+        m_mosaicView->selectAll();
+    }
+}
+
 bool FileBrowserPane::canGoBack() const { return !m_backHistory.isEmpty(); }
 
 bool FileBrowserPane::canGoForward() const { return !m_forwardHistory.isEmpty(); }
@@ -1079,7 +1225,8 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
     QHeaderView* const header = m_fileTable->horizontalHeader();
     const bool headerEvent = watched == header || watched == header->viewport();
     if (watched == this || watched == m_pathEdit || watched == m_fileTable ||
-        watched == m_fileTable->viewport() || headerEvent) {
+        watched == m_fileTable->viewport() || watched == m_mosaicView ||
+        watched == m_mosaicView->viewport() || headerEvent) {
         bool activatesPane = event->type() == QEvent::MouseButtonPress;
         if (event->type() == QEvent::FocusIn) {
             const Qt::FocusReason reason = static_cast<QFocusEvent*>(event)->reason();
@@ -1110,51 +1257,47 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
                 m_headerDragStartPosition = mouseEvent->position().toPoint();
                 m_headerDragActive = false;
             }
-        } else if (event->type() == QEvent::MouseMove &&
-                   m_headerDragLogicalIndex >= 0) {
+        } else if (event->type() == QEvent::MouseMove && m_headerDragLogicalIndex >= 0) {
             const auto* const mouseEvent = static_cast<QMouseEvent*>(event);
             if (!m_headerDragActive &&
-                (mouseEvent->position().toPoint() - m_headerDragStartPosition)
-                        .manhattanLength() >= QApplication::startDragDistance()) {
+                (mouseEvent->position().toPoint() - m_headerDragStartPosition).manhattanLength() >=
+                    QApplication::startDragDistance()) {
                 m_headerDragActive = true;
             }
             if (m_headerDragActive) {
-                    const int currentVisualIndex =
-                        header->visualIndex(m_headerDragLogicalIndex);
-                    const int mouseX = mouseEvent->position().toPoint().x();
-                    const int currentStart =
-                        header->sectionViewportPosition(m_headerDragLogicalIndex);
-                    const int currentEnd = currentStart +
-                                           header->sectionSize(m_headerDragLogicalIndex);
-                    int targetVisualIndex = currentVisualIndex;
-                    if (mouseX > currentEnd) {
-                        for (int visualIndex = currentVisualIndex + 1;
-                             visualIndex < header->count(); ++visualIndex) {
-                            const int logicalIndex = header->logicalIndex(visualIndex);
-                            const int center = header->sectionViewportPosition(logicalIndex) +
-                                               header->sectionSize(logicalIndex) / 2;
-                            if (mouseX > center) {
-                                targetVisualIndex = visualIndex;
-                            } else {
-                                break;
-                            }
-                        }
-                    } else if (mouseX < currentStart) {
-                        for (int visualIndex = currentVisualIndex - 1; visualIndex >= 0;
-                             --visualIndex) {
-                            const int logicalIndex = header->logicalIndex(visualIndex);
-                            const int center = header->sectionViewportPosition(logicalIndex) +
-                                               header->sectionSize(logicalIndex) / 2;
-                            if (mouseX < center) {
-                                targetVisualIndex = visualIndex;
-                            } else {
-                                break;
-                            }
+                const int currentVisualIndex = header->visualIndex(m_headerDragLogicalIndex);
+                const int mouseX = mouseEvent->position().toPoint().x();
+                const int currentStart = header->sectionViewportPosition(m_headerDragLogicalIndex);
+                const int currentEnd = currentStart + header->sectionSize(m_headerDragLogicalIndex);
+                int targetVisualIndex = currentVisualIndex;
+                if (mouseX > currentEnd) {
+                    for (int visualIndex = currentVisualIndex + 1; visualIndex < header->count();
+                         ++visualIndex) {
+                        const int logicalIndex = header->logicalIndex(visualIndex);
+                        const int center = header->sectionViewportPosition(logicalIndex) +
+                                           header->sectionSize(logicalIndex) / 2;
+                        if (mouseX > center) {
+                            targetVisualIndex = visualIndex;
+                        } else {
+                            break;
                         }
                     }
-                    if (targetVisualIndex != currentVisualIndex) {
-                        header->moveSection(currentVisualIndex, targetVisualIndex);
+                } else if (mouseX < currentStart) {
+                    for (int visualIndex = currentVisualIndex - 1; visualIndex >= 0;
+                         --visualIndex) {
+                        const int logicalIndex = header->logicalIndex(visualIndex);
+                        const int center = header->sectionViewportPosition(logicalIndex) +
+                                           header->sectionSize(logicalIndex) / 2;
+                        if (mouseX < center) {
+                            targetVisualIndex = visualIndex;
+                        } else {
+                            break;
+                        }
                     }
+                }
+                if (targetVisualIndex != currentVisualIndex) {
+                    header->moveSection(currentVisualIndex, targetVisualIndex);
+                }
             }
         } else if (event->type() == QEvent::MouseButtonRelease &&
                    static_cast<QMouseEvent*>(event)->button() == Qt::LeftButton) {
@@ -1166,83 +1309,91 @@ bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
         }
     }
     if (watched == m_fileTable->viewport()) {
-        if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
-            auto* const dragEvent = static_cast<QDropEvent*>(event);
-            const QMimeData* const mimeData = dragEvent->mimeData();
-            const auto payload =
-                mimeData != nullptr && mimeData->hasFormat(rfm::core::InternalTransferMimeType)
-                    ? rfm::core::decodeInternalTransfer(
-                          mimeData->data(rfm::core::InternalTransferMimeType))
-                    : std::nullopt;
-            const QPoint position = dragEvent->position().toPoint();
-            int folderRow = -1;
-            const QString destination = dropDestinationAt(position, &folderRow);
-            const rfm::core::InternalTransferAction action =
-                requestedTransferAction(dragEvent->modifiers());
-            const Qt::DropAction dropAction = qtDropAction(action);
-            const bool unsupportedCrossSourceMove =
-                payload.has_value() && action == rfm::core::InternalTransferAction::Move &&
-                payload->source != m_currentLocation.source;
-            const bool valid =
-                payload.has_value() && dragEvent->possibleActions().testFlag(dropAction) &&
-                !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
-            updateDropAppearance(payload.has_value(), valid, valid ? folderRow : -1);
-            if (valid) {
-                dragEvent->setDropAction(dropAction);
-                dragEvent->accept();
-            } else if (unsupportedCrossSourceMove) {
-                dragEvent->setDropAction(Qt::IgnoreAction);
-                dragEvent->ignore();
-            } else if (payload.has_value()) {
-                dragEvent->setDropAction(Qt::IgnoreAction);
-                dragEvent->accept();
-            } else {
-                dragEvent->ignore();
-            }
-            return true;
-        }
-        if (event->type() == QEvent::DragLeave) {
-            updateDropAppearance(false, false);
-            event->accept();
-            return true;
-        }
-        if (event->type() == QEvent::Drop) {
-            auto* const dropEvent = static_cast<QDropEvent*>(event);
-            const QMimeData* const mimeData = dropEvent->mimeData();
-            const auto payload =
-                mimeData != nullptr && mimeData->hasFormat(rfm::core::InternalTransferMimeType)
-                    ? rfm::core::decodeInternalTransfer(
-                          mimeData->data(rfm::core::InternalTransferMimeType))
-                    : std::nullopt;
-            const QString destination = dropDestinationAt(dropEvent->position().toPoint());
-            const rfm::core::InternalTransferAction action =
-                requestedTransferAction(dropEvent->modifiers());
-            const Qt::DropAction dropAction = qtDropAction(action);
-            const bool unsupportedCrossSourceMove =
-                payload.has_value() && action == rfm::core::InternalTransferAction::Move &&
-                payload->source != m_currentLocation.source;
-            const bool valid =
-                payload.has_value() && dropEvent->possibleActions().testFlag(dropAction) &&
-                !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
-            updateDropAppearance(false, false);
-            if (!valid) {
-                if (unsupportedCrossSourceMove) {
-                    emit crossSourceMoveUnsupported();
-                }
-                dropEvent->setDropAction(Qt::IgnoreAction);
-                dropEvent->ignore();
-                return true;
-            }
-            dropEvent->setDropAction(dropAction);
-            dropEvent->accept();
-            emit activated();
-            emit internalDropRequested(
-                *payload, action, destination,
-                transferActionWasExplicitlyRequested(dropEvent->modifiers()));
-            return true;
-        }
+        return handleDropEvent(m_fileTable, event);
+    }
+    if (watched == m_mosaicView->viewport()) {
+        return handleDropEvent(m_mosaicView, event);
     }
     return QWidget::eventFilter(watched, event);
+}
+
+bool FileBrowserPane::handleDropEvent(QAbstractItemView* view, QEvent* event)
+{
+    if (event->type() == QEvent::DragEnter || event->type() == QEvent::DragMove) {
+        auto* const dragEvent = static_cast<QDropEvent*>(event);
+        const QMimeData* const mimeData = dragEvent->mimeData();
+        const auto payload =
+            mimeData != nullptr && mimeData->hasFormat(rfm::core::InternalTransferMimeType)
+                ? rfm::core::decodeInternalTransfer(
+                      mimeData->data(rfm::core::InternalTransferMimeType))
+                : std::nullopt;
+        int folderRow = -1;
+        const QString destination =
+            dropDestinationAt(view, dragEvent->position().toPoint(), &folderRow);
+        const rfm::core::InternalTransferAction action =
+            requestedTransferAction(dragEvent->modifiers());
+        const Qt::DropAction dropAction = qtDropAction(action);
+        const bool unsupportedCrossSourceMove = payload.has_value() &&
+                                                action == rfm::core::InternalTransferAction::Move &&
+                                                payload->source != m_currentLocation.source;
+        const bool valid =
+            payload.has_value() && dragEvent->possibleActions().testFlag(dropAction) &&
+            !unsupportedCrossSourceMove && validateDrop(*payload, destination).accepted();
+        updateDropAppearance(payload.has_value(), valid, view, valid ? folderRow : -1);
+        if (valid) {
+            dragEvent->setDropAction(dropAction);
+            dragEvent->accept();
+        } else if (unsupportedCrossSourceMove) {
+            dragEvent->setDropAction(Qt::IgnoreAction);
+            dragEvent->ignore();
+        } else if (payload.has_value()) {
+            dragEvent->setDropAction(Qt::IgnoreAction);
+            dragEvent->accept();
+        } else {
+            dragEvent->ignore();
+        }
+        return true;
+    }
+    if (event->type() == QEvent::DragLeave) {
+        updateDropAppearance(false, false, view);
+        event->accept();
+        return true;
+    }
+    if (event->type() != QEvent::Drop) {
+        return false;
+    }
+
+    auto* const dropEvent = static_cast<QDropEvent*>(event);
+    const QMimeData* const mimeData = dropEvent->mimeData();
+    const auto payload =
+        mimeData != nullptr && mimeData->hasFormat(rfm::core::InternalTransferMimeType)
+            ? rfm::core::decodeInternalTransfer(mimeData->data(rfm::core::InternalTransferMimeType))
+            : std::nullopt;
+    const QString destination = dropDestinationAt(view, dropEvent->position().toPoint());
+    const rfm::core::InternalTransferAction action =
+        requestedTransferAction(dropEvent->modifiers());
+    const Qt::DropAction dropAction = qtDropAction(action);
+    const bool unsupportedCrossSourceMove = payload.has_value() &&
+                                            action == rfm::core::InternalTransferAction::Move &&
+                                            payload->source != m_currentLocation.source;
+    const bool valid = payload.has_value() && dropEvent->possibleActions().testFlag(dropAction) &&
+                       !unsupportedCrossSourceMove &&
+                       validateDrop(*payload, destination).accepted();
+    updateDropAppearance(false, false, view);
+    if (!valid) {
+        if (unsupportedCrossSourceMove) {
+            emit crossSourceMoveUnsupported();
+        }
+        dropEvent->setDropAction(Qt::IgnoreAction);
+        dropEvent->ignore();
+        return true;
+    }
+    dropEvent->setDropAction(dropAction);
+    dropEvent->accept();
+    emit activated();
+    emit internalDropRequested(*payload, action, destination,
+                               transferActionWasExplicitlyRequested(dropEvent->modifiers()));
+    return true;
 }
 
 void FileBrowserPane::showDirectory(const QString& path, const QString& displayPath,
@@ -1334,6 +1485,9 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     m_fileTable->setDragEnabled(internalTransferEnabled);
     m_fileTable->setAcceptDrops(internalTransferEnabled);
     m_fileTable->viewport()->setAcceptDrops(internalTransferEnabled);
+    m_mosaicView->setDragEnabled(internalTransferEnabled);
+    m_mosaicView->setAcceptDrops(internalTransferEnabled);
+    m_mosaicView->viewport()->setAcceptDrops(internalTransferEnabled);
     const bool sortingEnabled = m_fileTable->isSortingEnabled();
     m_fileTable->setSortingEnabled(false);
     ++m_directoryCountGeneration;
@@ -1380,6 +1534,9 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         m_fileTable->setRowHidden(static_cast<int>(row),
                                   !m_showHiddenFiles &&
                                       (entry.hidden || entry.name.startsWith(QChar{'.'})));
+        m_mosaicView->setRowHidden(static_cast<int>(row),
+                                   !m_showHiddenFiles &&
+                                       (entry.hidden || entry.name.startsWith(QChar{'.'})));
     }
     m_fileTable->setSortingEnabled(sortingEnabled);
     if (sortingEnabled) {
@@ -1409,14 +1566,21 @@ void FileBrowserPane::setShowHiddenFiles(bool show)
         return;
     }
     m_showHiddenFiles = show;
+    updateHiddenRows();
+}
+
+void FileBrowserPane::updateHiddenRows()
+{
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
         const QTableWidgetItem* const item = m_fileTable->item(row, 0);
         if (item == nullptr) {
             continue;
         }
         const auto entry = item->data(Qt::UserRole + 2).value<rfm::core::RemoteEntry>();
-        m_fileTable->setRowHidden(row,
-                                  !show && (entry.hidden || entry.name.startsWith(QChar{'.'})));
+        m_fileTable->setRowHidden(row, !m_showHiddenFiles &&
+                                           (entry.hidden || entry.name.startsWith(QChar{'.'})));
+        m_mosaicView->setRowHidden(row, !m_showHiddenFiles &&
+                                            (entry.hidden || entry.name.startsWith(QChar{'.'})));
     }
 }
 
@@ -1434,7 +1598,7 @@ void FileBrowserPane::clear()
     m_fileTable->setRowCount(0);
     clearTransferContext();
     setCutPaths({});
-    updateDropAppearance(false, false);
+    updateDropAppearance(false, false, nullptr);
     setInteractionEnabled(false);
     emit historyChanged();
 }
@@ -1537,15 +1701,17 @@ void FileBrowserPane::setInteractionEnabled(bool enabled)
 {
     if (!enabled && m_fileTable->isEnabled()) {
         QWidget* const focusWidget = QApplication::focusWidget();
-        if (focusWidget == m_fileTable || m_fileTable->isAncestorOf(focusWidget)) {
+        if (focusWidget == m_fileTable || m_fileTable->isAncestorOf(focusWidget) ||
+            focusWidget == m_mosaicView || m_mosaicView->isAncestorOf(focusWidget)) {
             m_pathEdit->setFocus(Qt::OtherFocusReason);
             m_restoreTableFocus = true;
         }
     }
     m_fileTable->setEnabled(enabled);
+    m_mosaicView->setEnabled(enabled);
     if (enabled && m_restoreTableFocus) {
         if (QApplication::focusWidget() == m_pathEdit) {
-            m_fileTable->setFocus(Qt::OtherFocusReason);
+            focusFileView();
         }
         m_restoreTableFocus = false;
     }
@@ -1568,6 +1734,7 @@ void FileBrowserPane::setActiveAppearance(bool active)
     setPalette(panePalette);
     m_pathEdit->setPalette(pathPalette);
     m_fileTable->setPalette(normalPalette);
+    m_mosaicView->setPalette(normalPalette);
 }
 
 void FileBrowserPane::setTransferContext(QString applicationInstanceId,
@@ -1584,7 +1751,7 @@ void FileBrowserPane::clearTransferContext()
     m_applicationInstanceId.clear();
     m_connectionIdentity = {};
     m_paneId = 0;
-    updateDropAppearance(false, false);
+    updateDropAppearance(false, false, nullptr);
 }
 
 void FileBrowserPane::setCutPaths(QSet<QString> paths)
@@ -1706,20 +1873,22 @@ std::optional<rfm::core::BrowserLocation> FileBrowserPane::localFileLocationForR
     return {{rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId), path}};
 }
 
-void FileBrowserPane::prepareContextMenu(const QPoint& position)
+void FileBrowserPane::prepareContextMenu(QAbstractItemView* view, const QPoint& position)
 {
-    if (QTableWidgetItem* const item = m_fileTable->itemAt(position);
-        item != nullptr && !item->isSelected()) {
-        m_contextMenuRow = item->row();
+    const QModelIndex index = view->indexAt(position);
+    if (index.isValid() && !m_fileTable->selectionModel()->isSelected(index)) {
+        m_contextMenuRow = index.row();
         m_fileTable->clearSelection();
-        m_fileTable->selectRow(item->row());
-    } else if (item != nullptr) {
-        m_contextMenuRow = item->row();
-    } else if (item == nullptr) {
+        m_fileTable->selectionModel()->select(m_fileTable->model()->index(index.row(), 0),
+                                              QItemSelectionModel::ClearAndSelect |
+                                                  QItemSelectionModel::Rows);
+    } else if (index.isValid()) {
+        m_contextMenuRow = index.row();
+    } else {
         m_contextMenuRow = -1;
         m_fileTable->clearSelection();
     }
-    emit contextMenuRequested(m_fileTable->viewport()->mapToGlobal(position));
+    emit contextMenuRequested(view->viewport()->mapToGlobal(position));
 }
 
 void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
@@ -1732,7 +1901,8 @@ void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
     emit internalDragStarted();
     auto* const mimeData = new QMimeData;
     mimeData->setData(rfm::core::InternalTransferMimeType, data);
-    QDrag drag(m_fileTable);
+    QDrag drag(m_viewMode == ViewMode::Details ? static_cast<QWidget*>(m_fileTable)
+                                               : static_cast<QWidget*>(m_mosaicView));
     drag.setMimeData(mimeData);
 
     QPixmap pixmap(180, 36);
@@ -1754,21 +1924,22 @@ void FileBrowserPane::startInternalDrag(Qt::DropActions supportedActions)
               qtDropAction(requestedTransferAction(QApplication::keyboardModifiers())));
 }
 
-QString FileBrowserPane::dropDestinationAt(const QPoint& position, int* folderRow) const
+QString FileBrowserPane::dropDestinationAt(const QAbstractItemView* view, const QPoint& position,
+                                           int* folderRow) const
 {
     if (folderRow != nullptr) {
         *folderRow = -1;
     }
-    const QTableWidgetItem* const hit = m_fileTable->itemAt(position);
-    if (hit == nullptr) {
+    const QModelIndex hit = view->indexAt(position);
+    if (!hit.isValid()) {
         return m_currentLocation.path;
     }
-    const QTableWidgetItem* const name = m_fileTable->item(hit->row(), 0);
+    const QTableWidgetItem* const name = m_fileTable->item(hit.row(), 0);
     if (name == nullptr || !name->data(Qt::UserRole).toBool()) {
         return m_currentLocation.path;
     }
     if (folderRow != nullptr) {
-        *folderRow = hit->row();
+        *folderRow = hit.row();
     }
     return m_currentLocation.source == rfm::core::FileSource::Local
                ? QDir(m_currentLocation.path).filePath(name->text())
@@ -1803,7 +1974,8 @@ FileBrowserPane::validateDrop(const rfm::core::InternalTransferPayload& payload,
         rfm::core::InternalTransferCompatibility::AllowLocalAndSsh);
 }
 
-void FileBrowserPane::updateDropAppearance(bool active, bool valid, int folderRow)
+void FileBrowserPane::updateDropAppearance(bool active, bool valid, QAbstractItemView* view,
+                                           int folderRow)
 {
     if (m_dropHighlightRow >= 0 && m_dropHighlightRow < m_fileTable->rowCount()) {
         for (int column = 0; column < m_fileTable->columnCount(); ++column) {
@@ -1823,17 +1995,23 @@ void FileBrowserPane::updateDropAppearance(bool active, bool valid, int folderRo
             }
         }
     }
-    m_fileTable->setProperty("dropState", active ? (valid ? "valid" : "invalid") : "none");
-    m_fileTable->setStyleSheet(
-        QStringLiteral("QTableWidget[dropState=\"valid\"] { border: 2px solid palette(highlight); }"
-                       "QTableWidget[dropState=\"invalid\"] { border: 2px dashed palette(mid); }"));
-    if (active && !valid) {
-        m_fileTable->viewport()->setCursor(Qt::ForbiddenCursor);
-    } else {
-        m_fileTable->viewport()->unsetCursor();
+    for (QAbstractItemView* const candidate : {static_cast<QAbstractItemView*>(m_fileTable),
+                                               static_cast<QAbstractItemView*>(m_mosaicView)}) {
+        candidate->setProperty(
+            "dropState", active && candidate == view ? (valid ? "valid" : "invalid") : "none");
+        candidate->setStyleSheet(
+            QStringLiteral("QAbstractItemView[dropState=\"valid\"] { border: 2px solid "
+                           "palette(highlight); }"
+                           "QAbstractItemView[dropState=\"invalid\"] { border: 2px dashed "
+                           "palette(mid); }"));
+        if (active && !valid && candidate == view) {
+            candidate->viewport()->setCursor(Qt::ForbiddenCursor);
+        } else {
+            candidate->viewport()->unsetCursor();
+        }
+        candidate->style()->unpolish(candidate);
+        candidate->style()->polish(candidate);
     }
-    m_fileTable->style()->unpolish(m_fileTable);
-    m_fileTable->style()->polish(m_fileTable);
 }
 
 void FileBrowserPane::updateCutAppearance()

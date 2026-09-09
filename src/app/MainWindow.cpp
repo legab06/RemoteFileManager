@@ -551,8 +551,17 @@ void MainWindow::createActions()
     m_splitViewAction->setIcon(splitIcon);
     connect(m_splitViewAction, &QAction::toggled, this,
             [this](bool enabled) { m_workspaceTabs->activeWorkspace()->setSplit(enabled); });
-    m_newTabAction = new QAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder),
-                                 tr("New tab"), this);
+    m_viewModeAction = new QAction(this);
+    m_viewModeAction->setObjectName(QStringLiteral("viewModeAction"));
+    m_viewModeAction->setText(tr("View mode"));
+    connect(m_viewModeAction, &QAction::triggered, this, [this] {
+        FileBrowserPane* const pane = m_workspaceTabs->activePane();
+        pane->setViewMode(pane->viewMode() == ViewMode::Details ? ViewMode::Mosaic
+                                                                 : ViewMode::Details);
+    });
+    updateViewModeAction();
+    m_newTabAction =
+        new QAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder), tr("New tab"), this);
     m_newTabAction->setObjectName(QStringLiteral("newTabAction"));
     m_newTabAction->setToolTip(tr("Open a new workspace"));
     connect(m_newTabAction, &QAction::triggered, this,
@@ -628,6 +637,7 @@ void MainWindow::createWorkspaceTabs()
         m_splitViewAction->setChecked(m_workspaceTabs->activeWorkspace()->isSplit());
         updateOperationActions();
         updateNavigationActions();
+        updateViewModeAction();
     });
     connect(m_workspaceTabs, &WorkspaceTabs::paneVisibilityChanged, this,
             [this](quint64 paneId, bool visible) {
@@ -680,6 +690,11 @@ void MainWindow::connectBrowserPane(quint64 paneId)
     connect(pane, &FileBrowserPane::selectionChanged, this, [this, paneId] {
         if (paneId == m_workspaceTabs->paneId(m_workspaceTabs->activePane())) {
             updateOperationActions();
+        }
+    });
+    connect(pane, &FileBrowserPane::viewModeChanged, this, [this, paneId](ViewMode) {
+        if (paneId == m_workspaceTabs->paneId(m_workspaceTabs->activePane())) {
+            updateViewModeAction();
         }
     });
     connect(pane, &FileBrowserPane::contextMenuRequested, this, &MainWindow::showFileContextMenu);
@@ -821,8 +836,14 @@ void MainWindow::createNavigationBar()
     navigationBar->addSeparator();
     navigationBar->addAction(m_splitViewAction);
     // Ensure the split view button shows only icon (not text) in toolbar
-    if (QToolButton* const splitButton = qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_splitViewAction))) {
+    if (QToolButton* const splitButton =
+            qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_splitViewAction))) {
         splitButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    }
+    navigationBar->addAction(m_viewModeAction);
+    if (QToolButton* const viewModeButton =
+            qobject_cast<QToolButton*>(navigationBar->widgetForAction(m_viewModeAction))) {
+        viewModeButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     }
     navigationBar->addAction(m_newTabAction);
     navigationBar->addAction(m_newConnectionAction);
@@ -2167,7 +2188,7 @@ bool MainWindow::startLocalOperation(rfm::core::LocalFileOperationKind kind, qui
 void MainWindow::selectAllInActivePane()
 {
     if (m_workspaceTabs->activePane()->hasLocation()) {
-        m_workspaceTabs->activePane()->fileTable()->selectAll();
+        m_workspaceTabs->activePane()->selectAllEntries();
     }
 }
 
@@ -3852,6 +3873,26 @@ void MainWindow::updateNavigationActions()
     m_refreshAction->setEnabled(available);
     m_backAction->setEnabled(available && pane->canGoBack());
     m_forwardAction->setEnabled(available && pane->canGoForward());
+}
+
+void MainWindow::updateViewModeAction()
+{
+    const FileBrowserPane* const pane = m_workspaceTabs->activePane();
+    if (pane == nullptr) {
+        return;
+    }
+    const bool mosaic = pane->viewMode() == ViewMode::Mosaic;
+    const QIcon icon = mosaic
+                           ? QIcon::fromTheme(
+                                 QStringLiteral("view-list-icons"),
+                                 style()->standardIcon(QStyle::SP_FileDialogContentsView))
+                           : QIcon::fromTheme(
+                                 QStringLiteral("view-list-details"),
+                                 style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    m_viewModeAction->setIcon(icon);
+    m_viewModeAction->setToolTip(mosaic ? tr("Switch to Details view")
+                                        : tr("Switch to Mosaic view"));
+    m_viewModeAction->setEnabled(true);
 }
 
 QString MainWindow::activeRemoteMachineId() const

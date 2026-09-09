@@ -1,5 +1,6 @@
 #include "remotefilemanager/app/FileBrowserPane.hpp"
 #include "remotefilemanager/app/PaneWorkspace.hpp"
+#include "remotefilemanager/app/WorkspaceTabs.hpp"
 #include "remotefilemanager/core/InternalTransfer.hpp"
 
 #include <QApplication>
@@ -12,6 +13,7 @@
 #include <QHeaderView>
 #include <QItemSelectionModel>
 #include <QLineEdit>
+#include <QListView>
 #include <QLocale>
 #include <QMimeData>
 #include <QMimeDatabase>
@@ -25,6 +27,7 @@
 #include <QTest>
 #include <QTimer>
 #include <QUrl>
+#include <QWheelEvent>
 
 #include <algorithm>
 
@@ -35,6 +38,13 @@ class FileBrowserPaneTest final : public QObject
   private slots:
     void init();
     void displaysDirectoryAndBuildsRemoteSelection();
+    void switchesBetweenDetailsAndMosaicWithoutRelisting();
+    void preservesMosaicSelectionAndUsesSharedModel();
+    void preservesMosaicClickSelectionAsDetailsRowSelection();
+    void mosaicZoomHandlesWheelAndBounds();
+    void mosaicZoomIsIndependentAndPersistsAcrossViewSwitch();
+    void keepsViewModeIndependentAcrossPanesAndWorkspaces();
+    void mosaicActivationUsesExistingNavigationPath();
     void togglesHiddenEntriesForLocalAndSsh();
     void presentsFileTypesIconsAndModificationTimesConsistently();
     void configuresIndependentMovableColumns();
@@ -61,6 +71,7 @@ class FileBrowserPaneTest final : public QObject
     void activatesDirectoryAndBrokenSymbolicLinksForBackendResolution();
     void workspaceHistoriesAreIndependent();
     void constructsAndAcceptsOnlyInternalDragPayloads();
+    void mosaicDropUsesTheExistingTransferPipeline();
     void resolvesDropOnCurrentDirectoryAndSubfolder();
     void constructsLocalPayloadAndResolvesLocalDropDestinations();
     void acceptsCrossSourceCopyIntentionsAndPreservesPayload();
@@ -90,7 +101,7 @@ constexpr auto tableSortColumnKey = "ui/fileBrowserPane/sortColumn";
 constexpr auto tableSortOrderKey = "ui/fileBrowserPane/sortOrder";
 constexpr auto tableLayoutModeKey = "ui/fileBrowserPane/layoutMode";
 
-}
+} // namespace
 
 void FileBrowserPaneTest::togglesHiddenEntriesForLocalAndSsh()
 {
@@ -113,8 +124,8 @@ void FileBrowserPaneTest::togglesHiddenEntriesForLocalAndSsh()
     QVERIFY(pane.fileTable()->isRowHidden(1));
     QVERIFY(pane.fileTable()->isRowHidden(2));
 
-    const rfm::core::BrowserLocation ssh{rfm::core::FileSource::Ssh,
-                                         QStringLiteral("remote-id"), QStringLiteral("/home")};
+    const rfm::core::BrowserLocation ssh{rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                                         QStringLiteral("/home")};
     pane.showDirectory(ssh, QStringLiteral("sftp://remote/home"), entries);
     QVERIFY(pane.fileTable()->isRowHidden(1));
     pane.setShowHiddenFiles(true);
@@ -129,6 +140,216 @@ void FileBrowserPaneTest::init()
     settings.remove(QString::fromLatin1(tableSortOrderKey));
     settings.remove(QString::fromLatin1(tableLayoutModeKey));
     settings.sync();
+}
+
+void FileBrowserPaneTest::switchesBetweenDetailsAndMosaicWithoutRelisting()
+{
+    rfm::app::FileBrowserPane pane;
+    const rfm::core::BrowserLocation location{rfm::core::FileSource::Local,
+                                              QString::fromLatin1(rfm::core::LocalMachineId),
+                                              QStringLiteral("/fixture")};
+    pane.showDirectory(location, QStringLiteral("/fixture"),
+                       {{QStringLiteral("photo.jpg"), 42, {}, false, false, false}});
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    QCOMPARE(pane.viewMode(), rfm::app::ViewMode::Details);
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    QCOMPARE(pane.viewMode(), rfm::app::ViewMode::Mosaic);
+    QCOMPARE(pane.currentLocation(), location);
+    QCOMPARE(navigation.count(), 0);
+    pane.setViewMode(rfm::app::ViewMode::Details);
+    QCOMPARE(pane.viewMode(), rfm::app::ViewMode::Details);
+    QCOMPARE(pane.currentLocation(), location);
+    QCOMPARE(navigation.count(), 0);
+}
+
+void FileBrowserPaneTest::preservesMosaicSelectionAndUsesSharedModel()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
+                       QStringLiteral("/fixture"),
+                       {{QStringLiteral("one.txt"), 1, {}, false, false, false},
+                        {QStringLiteral("two.txt"), 2, {}, false, false, false}});
+    auto* const table = pane.fileTable();
+    auto* const mosaic = pane.mosaicView();
+    QCOMPARE(mosaic->model(), table->model());
+    QCOMPARE(mosaic->selectionModel(), table->selectionModel());
+
+    table->selectionModel()->select(table->model()->index(0, 0),
+                                    QItemSelectionModel::ClearAndSelect |
+                                        QItemSelectionModel::Rows);
+    table->selectionModel()->select(table->model()->index(1, 0),
+                                    QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    QCOMPARE(mosaic->selectionModel()->selectedRows(0).size(), 2);
+    pane.setViewMode(rfm::app::ViewMode::Details);
+    QCOMPARE(table->selectionModel()->selectedRows(0).size(), 2);
+}
+
+void FileBrowserPaneTest::preservesMosaicClickSelectionAsDetailsRowSelection()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(480, 320);
+    pane.showDirectory({rfm::core::FileSource::Local,
+                       QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
+                       QStringLiteral("/fixture"),
+                       {{QStringLiteral("one.txt"), 1, {}, false, false, false},
+                        {QStringLiteral("two.txt"), 2, {}, false, false, false},
+                        {QStringLiteral("three.txt"), 3, {}, false, false, false}});
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    pane.show();
+    QTest::qWait(1);
+
+    auto* const mosaic = pane.mosaicView();
+    const QModelIndex index = mosaic->model()->index(0, 0);
+    QTest::mouseClick(mosaic->viewport(), Qt::LeftButton, Qt::NoModifier,
+                      mosaic->visualRect(index).center());
+
+    pane.setViewMode(rfm::app::ViewMode::Details);
+    QVERIFY(pane.fileTable()->selectionModel()->isRowSelected(0, QModelIndex{}));
+
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    QTest::mouseClick(mosaic->viewport(), Qt::LeftButton, Qt::ControlModifier,
+                      mosaic->visualRect(mosaic->model()->index(1, 0)).center());
+    pane.setViewMode(rfm::app::ViewMode::Details);
+    QCOMPARE(pane.fileTable()->selectionModel()->selectedRows(0).size(), 2);
+
+    pane.fileTable()->clearSelection();
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    QTest::mouseClick(mosaic->viewport(), Qt::LeftButton, Qt::NoModifier,
+                      mosaic->visualRect(mosaic->model()->index(0, 0)).center());
+    QTest::mouseClick(mosaic->viewport(), Qt::LeftButton, Qt::ShiftModifier,
+                      mosaic->visualRect(mosaic->model()->index(2, 0)).center());
+    pane.setViewMode(rfm::app::ViewMode::Details);
+    QCOMPARE(pane.fileTable()->selectionModel()->selectedRows(0).size(), 3);
+}
+
+void FileBrowserPaneTest::mosaicZoomHandlesWheelAndBounds()
+{
+    rfm::app::FileBrowserPane pane;
+    pane.resize(480, 320);
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
+                       QStringLiteral("/fixture"),
+                       {{QStringLiteral("one.txt"), 1, {}, false, false, false}});
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    pane.show();
+    QTest::qWait(1);
+
+    auto* const mosaic = pane.mosaicView();
+    QCOMPARE(pane.mosaicIconSize(), 48);
+    QCOMPARE(mosaic->viewMode(), QListView::IconMode);
+    QCOMPARE(mosaic->resizeMode(), QListView::Adjust);
+    QVERIFY(mosaic->gridSize().width() >= mosaic->iconSize().width());
+    mosaic->selectionModel()->select(mosaic->model()->index(0, 0),
+                                     QItemSelectionModel::ClearAndSelect |
+                                         QItemSelectionModel::Rows);
+
+    const auto wheel = [mosaic](int delta, Qt::KeyboardModifiers modifiers) {
+        QWheelEvent event(mosaic->viewport()->rect().center(),
+                          mosaic->viewport()->mapToGlobal(mosaic->viewport()->rect().center()),
+                          QPoint{}, QPoint{0, delta}, Qt::NoButton, modifiers,
+                          Qt::NoScrollPhase, false);
+        QApplication::sendEvent(mosaic->viewport(), &event);
+    };
+    wheel(120, Qt::ControlModifier);
+    QCOMPARE(pane.mosaicIconSize(), 56);
+    QCOMPARE(mosaic->selectionModel()->selectedRows(0).size(), 1);
+    pane.resize(900, 320);
+    QCoreApplication::processEvents();
+    QCOMPARE(pane.mosaicIconSize(), 56);
+    wheel(-120, Qt::ControlModifier);
+    QCOMPARE(pane.mosaicIconSize(), 48);
+    wheel(120, Qt::NoModifier);
+    QCOMPARE(pane.mosaicIconSize(), 48);
+
+    for (int step = 0; step < 20; ++step) {
+        wheel(-120, Qt::ControlModifier);
+    }
+    QCOMPARE(pane.mosaicIconSize(), 32);
+    for (int step = 0; step < 20; ++step) {
+        wheel(120, Qt::ControlModifier);
+    }
+    QCOMPARE(pane.mosaicIconSize(), 128);
+}
+
+void FileBrowserPaneTest::mosaicZoomIsIndependentAndPersistsAcrossViewSwitch()
+{
+    rfm::app::FileBrowserPane first;
+    rfm::app::FileBrowserPane second;
+    const auto location = rfm::core::BrowserLocation{
+        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+        QStringLiteral("/fixture")};
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("one.txt"), 1, {}, false, false, false}};
+    first.showDirectory(location, QStringLiteral("/fixture"), entries);
+    second.showDirectory(location, QStringLiteral("/fixture"), entries);
+    first.setViewMode(rfm::app::ViewMode::Mosaic);
+    second.setViewMode(rfm::app::ViewMode::Mosaic);
+
+    auto zoomOnce = [](rfm::app::FileBrowserPane& pane) {
+        auto* const view = pane.mosaicView();
+        QWheelEvent event(view->viewport()->rect().center(),
+                          view->viewport()->mapToGlobal(view->viewport()->rect().center()), QPoint{},
+                          QPoint{0, 120}, Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase,
+                          false);
+        QApplication::sendEvent(view->viewport(), &event);
+    };
+    zoomOnce(first);
+    QCOMPARE(first.mosaicIconSize(), 56);
+    QCOMPARE(second.mosaicIconSize(), 48);
+    first.setViewMode(rfm::app::ViewMode::Details);
+    first.setViewMode(rfm::app::ViewMode::Mosaic);
+    QCOMPARE(first.mosaicIconSize(), 56);
+
+    rfm::app::WorkspaceTabs tabs;
+    auto* const firstTab = tabs.activeWorkspace();
+    tabs.activePane()->showDirectory(location, QStringLiteral("/fixture"), entries);
+    tabs.activePane()->setViewMode(rfm::app::ViewMode::Mosaic);
+    zoomOnce(*tabs.activePane());
+    auto* const secondTab = tabs.createWorkspace();
+    secondTab->activePane()->showDirectory(location, QStringLiteral("/fixture"), entries);
+    secondTab->activePane()->setViewMode(rfm::app::ViewMode::Mosaic);
+    QCOMPARE(secondTab->activePane()->mosaicIconSize(), 48);
+    tabs.setActiveWorkspace(firstTab);
+    QCOMPARE(tabs.activePane()->mosaicIconSize(), 56);
+}
+
+void FileBrowserPaneTest::keepsViewModeIndependentAcrossPanesAndWorkspaces()
+{
+    rfm::app::PaneWorkspace workspace;
+    workspace.primaryPane()->setViewMode(rfm::app::ViewMode::Mosaic);
+    workspace.setSplit(true);
+    QCOMPARE(workspace.primaryPane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    QCOMPARE(workspace.otherVisiblePane()->viewMode(), rfm::app::ViewMode::Details);
+
+    rfm::app::WorkspaceTabs tabs;
+    auto* const firstWorkspace = tabs.activeWorkspace();
+    tabs.activePane()->setViewMode(rfm::app::ViewMode::Mosaic);
+    auto* const secondWorkspace = tabs.createWorkspace();
+    QCOMPARE(tabs.activePane()->viewMode(), rfm::app::ViewMode::Details);
+    tabs.setActiveWorkspace(firstWorkspace);
+    QCOMPARE(tabs.activePane()->viewMode(), rfm::app::ViewMode::Mosaic);
+    tabs.setActiveWorkspace(secondWorkspace);
+    QCOMPARE(tabs.activePane()->viewMode(), rfm::app::ViewMode::Details);
+}
+
+void FileBrowserPaneTest::mosaicActivationUsesExistingNavigationPath()
+{
+    rfm::app::FileBrowserPane pane;
+    const rfm::core::BrowserLocation location{rfm::core::FileSource::Local,
+                                              QString::fromLatin1(rfm::core::LocalMachineId),
+                                              QStringLiteral("/fixture")};
+    pane.showDirectory(location, QStringLiteral("/fixture"),
+                       {{QStringLiteral("child"), 0, {}, true, false, false}});
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+    pane.setViewMode(rfm::app::ViewMode::Mosaic);
+    pane.mosaicView()->doubleClicked(pane.mosaicView()->model()->index(0, 0));
+    QCOMPARE(navigation.count(), 1);
+    const auto request = navigation.constFirst();
+    QCOMPARE(request.constFirst().value<rfm::core::BrowserLocation>().path,
+             QStringLiteral("/fixture/child"));
 }
 
 void FileBrowserPaneTest::navigatesLocalDirectoriesWithSourceAwareHistory()
@@ -418,9 +639,9 @@ void FileBrowserPaneTest::responsiveLayoutKeepsColumnsUsableAndOrderStable()
     rfm::app::FileBrowserPane pane;
     pane.resize(1200, 360);
     pane.show();
-    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"),
-                       {{QStringLiteral("name-with-a-reasonable-length.txt"), 1, {}, false,
-                         false}});
+    pane.showDirectory(
+        QStringLiteral("/srv"), QStringLiteral("/srv"),
+        {{QStringLiteral("name-with-a-reasonable-length.txt"), 1, {}, false, false}});
     QCoreApplication::processEvents();
     QHeaderView* const header = pane.fileTable()->horizontalHeader();
     const int wideNameWidth = header->sectionSize(0);
@@ -488,8 +709,8 @@ void FileBrowserPaneTest::headerMovesSectionsLiveDuringDrag()
     QCoreApplication::processEvents();
     QHeaderView* const header = pane.fileTable()->horizontalHeader();
     pane.fileTable()->sortItems(1, Qt::DescendingOrder);
-    const QList<int> widths{header->sectionSize(0), header->sectionSize(1),
-                            header->sectionSize(2), header->sectionSize(3)};
+    const QList<int> widths{header->sectionSize(0), header->sectionSize(1), header->sectionSize(2),
+                            header->sectionSize(3)};
     QSignalSpy moved(header, &QHeaderView::sectionMoved);
     const QPoint start(header->sectionViewportPosition(0) + header->sectionSize(0) / 2,
                        header->height() / 2);
@@ -596,13 +817,13 @@ void FileBrowserPaneTest::presentsFileTypesIconsAndModificationTimesConsistently
     QCOMPARE(table->horizontalHeaderItem(1)->text(), QStringLiteral("Size"));
     QCOMPARE(table->horizontalHeaderItem(2)->text(), QStringLiteral("Type"));
     QCOMPARE(table->horizontalHeaderItem(3)->text(), QStringLiteral("Modified"));
-    QCOMPARE(table->item(0, 2)->text(), QMimeDatabase{}
-        .mimeTypeForName(QStringLiteral("inode/directory"))
-        .comment()
-        .trimmed());
+    QCOMPARE(
+        table->item(0, 2)->text(),
+        QMimeDatabase{}.mimeTypeForName(QStringLiteral("inode/directory")).comment().trimmed());
     QVERIFY(table->item(1, 2)->text() != QStringLiteral("File"));
     QVERIFY(table->item(2, 2)->text() != QStringLiteral("File"));
-    // Le fichier sans type connu n'est plus identifié comme "File", mais avec une description locale
+    // Le fichier sans type connu n'est plus identifié comme "File", mais avec une description
+    // locale
     QCOMPARE(table->item(4, 2)->text(), QStringLiteral("Symbolic link"));
     QCOMPARE(table->item(1, 3)->text(), QLocale{}.toString(modified, QLocale::ShortFormat));
     QCOMPARE(table->item(3, 3)->text(), QStringLiteral("—"));
@@ -1307,8 +1528,8 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
         localTypes.push_back(type);
     }
 
-    // Pour les fichiers sans type MIME spécifique, on vérifie qu'ils ne sont pas identifiés comme "File"
-    // mais plutôt avec une description locale ou le nom technique
+    // Pour les fichiers sans type MIME spécifique, on vérifie qu'ils ne sont pas identifiés comme
+    // "File" mais plutôt avec une description locale ou le nom technique
     for (const int row : {4, 5}) {
         clicked = clickRow(row);
         QVERIFY(clicked.has_value());
@@ -1334,10 +1555,8 @@ void FileBrowserPaneTest::buildsPropertiesForTheEntryUnderTheContextClick()
     QCOMPARE(properties.title, QStringLiteral("folder"));
 
     // Vérifier que le type est correctement identifié (utilisant la description locale)
-    const QString expectedFolderType = QMimeDatabase{}
-        .mimeTypeForName(QStringLiteral("inode/directory"))
-        .comment()
-        .trimmed();
+    const QString expectedFolderType =
+        QMimeDatabase{}.mimeTypeForName(QStringLiteral("inode/directory")).comment().trimmed();
     QVERIFY(!expectedFolderType.isEmpty());
     QVERIFY(properties.text.contains(QStringLiteral("Type: ") + expectedFolderType));
 
@@ -1616,6 +1835,56 @@ void FileBrowserPaneTest::workspaceHistoriesAreIndependent()
 
     QVERIFY(primary->canGoBack());
     QVERIFY(!secondary->canGoBack());
+}
+
+void FileBrowserPaneTest::mosaicDropUsesTheExistingTransferPipeline()
+{
+    QTemporaryDir sourceDirectory;
+    QTemporaryDir destinationDirectory;
+    QVERIFY(sourceDirectory.isValid());
+    QVERIFY(destinationDirectory.isValid());
+    QFile sourceFile(QDir(sourceDirectory.path()).filePath(QStringLiteral("item.txt")));
+    QVERIFY(sourceFile.open(QIODevice::WriteOnly));
+    sourceFile.close();
+    QVERIFY(QDir(destinationDirectory.path()).mkdir(QStringLiteral("child")));
+
+    rfm::app::FileBrowserPane source;
+    source.setTransferContext(QStringLiteral("instance"), {}, 1);
+    source.showDirectory({rfm::core::FileSource::Local,
+                          QString::fromLatin1(rfm::core::LocalMachineId), sourceDirectory.path()},
+                         sourceDirectory.path(),
+                         {{QStringLiteral("item.txt"), 1, {}, false, false, false}});
+    source.fileTable()->selectRow(0);
+
+    rfm::app::FileBrowserPane destination;
+    destination.setTransferContext(QStringLiteral("instance"), {}, 2);
+    destination.showDirectory(
+        {rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
+         destinationDirectory.path()},
+        destinationDirectory.path(), {{QStringLiteral("child"), 0, {}, true, false, false}});
+    destination.setViewMode(rfm::app::ViewMode::Mosaic);
+    destination.resize(480, 320);
+    destination.show();
+    QTest::qWait(1);
+
+    QMimeData mime;
+    mime.setData(rfm::core::InternalTransferMimeType, source.createInternalDragData());
+    QSignalSpy drops(&destination, &rfm::app::FileBrowserPane::internalDropRequested);
+    auto* const mosaic = destination.mosaicView();
+    const QPoint position = mosaic->visualRect(mosaic->model()->index(0, 0)).center();
+    QDragEnterEvent enter(position, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                          Qt::NoModifier);
+    QApplication::sendEvent(mosaic->viewport(), &enter);
+    QVERIFY(enter.isAccepted());
+    QCOMPARE(enter.dropAction(), Qt::CopyAction);
+    QCOMPARE(mosaic->property("dropState").toString(), QStringLiteral("valid"));
+    QDropEvent drop(QPointF(position), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+                    Qt::NoModifier);
+    QApplication::sendEvent(mosaic->viewport(), &drop);
+    QVERIFY(drop.isAccepted());
+    QCOMPARE(drops.size(), 1);
+    QCOMPARE(drops.constFirst().at(2).toString(),
+             QDir(destinationDirectory.path()).filePath(QStringLiteral("child")));
 }
 
 void FileBrowserPaneTest::constructsAndAcceptsOnlyInternalDragPayloads()

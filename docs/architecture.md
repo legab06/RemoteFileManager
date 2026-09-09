@@ -141,6 +141,17 @@ refresh et les navigations. L'action View → Reset file view supprime ces préf
 réaffiche toutes les colonnes, réinitialise explicitement l'ordre Name/Size/Type/Modified
 et les largeurs dans tous les panneaux visibles (Local et SSH), puis
 réactive le mode adaptatif sans redémarrage.
+Chaque `FileBrowserPane` propose aussi `Details` et `Mosaic`. Details conserve le
+`QTableWidget` historique ; Mosaic est un `QListView` en mode icônes qui partage son
+modèle et son `QItemSelectionModel`. Le changement de représentation ne provoque donc
+ni listing Local/SSH ni copie des entrées, et conserve tri, sélection, icônes MIME et
+marquage Cut. Le mode reste propre à chaque panneau et démarre en Details ; il n'est pas
+encore persisté. Les deux vues transmettent activation, menu contextuel et Drag & Drop
+aux mêmes intentions de `FileBrowserPane`.
+La grille Mosaic est responsive et utilise des cellules uniformes adaptées aux métriques Qt.
+`Ctrl` + molette ajuste sa taille d'icône entre 32 et 128 unités logiques ; la molette sans
+`Ctrl` conserve le défilement natif. Le niveau de zoom reste propre à chaque panneau pendant
+la session et est conservé lors du retour depuis Details.
 Lors d'un refresh du même emplacement SSH, le panneau réinjecte dans le nouveau listing
 les comptes valides de l'affichage précédent pour les seuls noms encore présents. Ces
 valeurs éphémères restent visibles et continuent d'alimenter le tri pendant le recount ;
