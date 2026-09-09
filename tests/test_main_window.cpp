@@ -49,8 +49,8 @@
 #include <QStackedWidget>
 #include <QStandardPaths>
 #include <QStatusBar>
-#include <QTableWidget>
 #include <QTabWidget>
+#include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
@@ -460,6 +460,7 @@ class MainWindowTest final : public QObject
   private slots:
     void exposesInitialDisconnectedShell();
     void workspaceActionsResolveCurrentTab();
+    void newTabToolbarActionCreatesWorkspace();
     void tabPlacesNavigationAndLateLocalResults();
     void closingTabKeepsLocalCopyRunning();
     void closedTabReleasesRemoteListingQueue_data();
@@ -1444,6 +1445,22 @@ void MainWindowTest::workspaceActionsResolveCurrentTab()
     QVERIFY(!window.findChild<QAction*>(QStringLiteral("switchPaneAction"))->isEnabled());
 }
 
+void MainWindowTest::newTabToolbarActionCreatesWorkspace()
+{
+    rfm::app::MainWindow window;
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    auto* const action = window.findChild<QAction*>(QStringLiteral("newTabAction"));
+    QVERIFY(tabs != nullptr);
+    QVERIFY(action != nullptr);
+    QCOMPARE(tabs->paneIds().size(), 1);
+    action->trigger();
+    QCOMPARE(tabs->paneIds().size(), 2);
+    QCOMPARE(tabs->findChild<QTabWidget*>()->count(), 2);
+    QCOMPARE(tabs->activeWorkspace(), tabs->findChild<QTabWidget*>()->widget(1));
+    QCOMPARE(action->text(), QStringLiteral("New tab"));
+    QCOMPARE(action->toolTip(), QStringLiteral("Open a new workspace"));
+}
+
 void MainWindowTest::tabPlacesNavigationAndLateLocalResults()
 {
     rfm::app::MainWindow window;
@@ -1460,10 +1477,11 @@ void MainWindowTest::tabPlacesNavigationAndLateLocalResults()
         QVERIFY(QMetaObject::invokeMethod(places, "localLocationActivated", Q_ARG(QString, path)));
     };
     auto complete = [&](quint64 id, const QString& path) {
-        const QList<rfm::core::RemoteEntry> entries{{QStringLiteral(".hidden"), 1, {}, false, false}};
-        QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListed",
-                                         Q_ARG(quint64, id), Q_ARG(QString, path),
-                                         Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+        const QList<rfm::core::RemoteEntry> entries{
+            {QStringLiteral(".hidden"), 1, {}, false, false}};
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListed", Q_ARG(quint64, id),
+                                          Q_ARG(QString, path),
+                                          Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     };
     navigate(QStringLiteral("/tmp"));
     const quint64 secondRequest = requests.constLast().at(0).toULongLong();
@@ -1498,8 +1516,8 @@ void MainWindowTest::tabPlacesNavigationAndLateLocalResults()
     QVERIFY(retired.isNull());
     complete(late, QStringLiteral("/late"));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalDirectoryListingError",
-                                     Q_ARG(quint64, late), Q_ARG(QString, QStringLiteral("/late")),
-                                     Q_ARG(QString, QStringLiteral("late failure"))));
+                                      Q_ARG(quint64, late), Q_ARG(QString, QStringLiteral("/late")),
+                                      Q_ARG(QString, QStringLiteral("late failure"))));
     QCOMPARE(tabs->pane(retiredId), nullptr);
     QCOMPARE(second->activePane()->currentPath(), QStringLiteral("/tmp"));
     QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
@@ -1513,7 +1531,8 @@ void MainWindowTest::closingTabKeepsLocalCopyRunning()
     QVERIFY(source.isValid());
     QVERIFY(destination.isValid());
     rfm::app::MainWindow window;
-    QObject::disconnect(&window, &rfm::app::MainWindow::localFileOperationRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localFileOperationRequested, nullptr,
+                        nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
     showLocalSplit(window, source.path(), destination.path(),
                    {{QStringLiteral("file.txt"), 1, {}, false, false}}, {});
@@ -1538,11 +1557,13 @@ void MainWindowTest::closingTabKeepsLocalCopyRunning()
         request.id,
         request.kind,
         {{request.sourcePaths.constFirst(),
-          QDir(destination.path()).filePath(QStringLiteral("file.txt")), true, {},
+          QDir(destination.path()).filePath(QStringLiteral("file.txt")),
+          true,
+          {},
           rfm::core::LocalFileOperationOutcome::Succeeded}},
         false};
     QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
-                                     Q_ARG(rfm::core::LocalFileOperationResult, result)));
+                                      Q_ARG(rfm::core::LocalFileOperationResult, result)));
     QCOMPARE(table->item(rowForId(table, request.id), 3)->text(), QStringLiteral("Completed"));
     QTRY_VERIFY(!listings.isEmpty());
     QCOMPARE(listings.constLast().at(1).toString(), destination.path());
@@ -1572,28 +1593,26 @@ void MainWindowTest::closedTabReleasesRemoteListingQueue()
     auto* const second = tabs->createWorkspace();
     auto* const places = window.findChild<rfm::app::NavigationTree*>();
     QVERIFY(QMetaObject::invokeMethod(places, "remoteLocationActivated",
-                                     Q_ARG(QString, location.machineId),
-                                     Q_ARG(QString, QStringLiteral("/var/log"))));
+                                      Q_ARG(QString, location.machineId),
+                                      Q_ARG(QString, QStringLiteral("/var/log"))));
     QCOMPARE(requests.size(), 1);
     tabs->closeWorkspace(first);
     QCOMPARE(requests.size(), 1); // The single SSH worker is still finishing its request.
     if (failure) {
         QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListingError",
-                                         Q_ARG(quint64, late), Q_ARG(QString, location.path),
-                                         Q_ARG(QString, QStringLiteral("late failure"))));
+                                          Q_ARG(quint64, late), Q_ARG(QString, location.path),
+                                          Q_ARG(QString, QStringLiteral("late failure"))));
     } else {
-        QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Q_ARG(quint64, late),
-                                         Q_ARG(QString, location.path),
-                                         Q_ARG(QList<rfm::core::RemoteEntry>,
-                                               QList<rfm::core::RemoteEntry>{})));
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "handleDirectoryListed", Q_ARG(quint64, late), Q_ARG(QString, location.path),
+            Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     }
     QCOMPARE(requests.size(), 2);
     QCOMPARE(requests.constLast().at(1).toString(), QStringLiteral("/var/log"));
-    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed",
-                                     Q_ARG(quint64, requests.constLast().at(0).toULongLong()),
-                                     Q_ARG(QString, QStringLiteral("/var/log")),
-                                     Q_ARG(QList<rfm::core::RemoteEntry>,
-                                           QList<rfm::core::RemoteEntry>{})));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Q_ARG(quint64, requests.constLast().at(0).toULongLong()),
+        Q_ARG(QString, QStringLiteral("/var/log")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QCOMPARE(second->activePane()->currentPath(), QStringLiteral("/var/log"));
     QVERIFY(window.findChild<QAction*>(QStringLiteral("refreshAction"))->isEnabled());
 }

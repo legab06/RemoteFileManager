@@ -545,6 +545,12 @@ void MainWindow::createActions()
     m_splitViewAction->setCheckable(true);
     connect(m_splitViewAction, &QAction::toggled, this,
             [this](bool enabled) { m_workspaceTabs->activeWorkspace()->setSplit(enabled); });
+    m_newTabAction = new QAction(style()->standardIcon(QStyle::SP_FileDialogNewFolder),
+                                 tr("New tab"), this);
+    m_newTabAction->setObjectName(QStringLiteral("newTabAction"));
+    m_newTabAction->setToolTip(tr("Open a new workspace"));
+    connect(m_newTabAction, &QAction::triggered, this,
+            [this] { m_workspaceTabs->createWorkspace(); });
     m_resetFileViewAction = new QAction(tr("Reset file view"), this);
     m_resetFileViewAction->setObjectName(QStringLiteral("resetFileViewAction"));
     connect(m_resetFileViewAction, &QAction::triggered, this,
@@ -808,6 +814,7 @@ void MainWindow::createNavigationBar()
 
     navigationBar->addSeparator();
     navigationBar->addAction(m_splitViewAction);
+    navigationBar->addAction(m_newTabAction);
     navigationBar->addAction(m_newConnectionAction);
     navigationBar->addAction(m_disconnectAction);
 }

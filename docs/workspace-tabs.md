@@ -1,4 +1,4 @@
-# Onglets globaux — lots 1 et 2
+# Onglets globaux — lots 1 à 3
 
 La pile centrale contient `HomePage` et `WorkspaceTabs`. Ce dernier possède un
 `QTabWidget` démarrant avec un onglet `Tab 1`, contenant un `PaneWorkspace`.
@@ -16,9 +16,24 @@ workspace actif.
 
 Le bouton `+` en haut à droite de la barre crée et active un workspace neuf :
 un seul panneau, aucun emplacement ni historique hérité. L'utilisateur choisit
-son emplacement dans Places. Les titres `Tab N` utilisent un compteur croissant.
+son emplacement dans Places. Les titres `Tab N` sont recalculés selon l'ordre
+visuel actuel après chaque création ou fermeture.
 Les boutons de fermeture sont masqués lorsque le dernier onglet reste seul ;
 l'API refuse également sa fermeture. Aucune fermeture ne déconnecte SSH.
+
+Lorsque le conteneur ne contient qu'un workspace, sa `QTabBar` est entièrement
+masquée. Elle réapparaît dès le deuxième workspace et disparaît après retour à un
+seul. Cette visibilité est calculée directement depuis le nombre réel d'onglets.
+Le bouton `+` est un sibling de la `QTabBar` dans le `QTabWidget` : sa position
+est calculée par mapping depuis le bord droit du dernier onglet. Il n'est donc
+pas soumis au clipping de la barre et suit les insertions, suppressions,
+changements de taille et changements de DPI. Il n'appartient jamais au modèle
+des onglets.
+
+L'action `New tab` de la toolbar utilise exactement `WorkspaceTabs::createWorkspace()`
+comme le bouton `+`. Elle utilise l'icône standard Qt `SP_FileDialogNewFolder`,
+porte le texte `New tab` et l'infobulle `Open a new workspace`. Aucun raccourci
+Ctrl+T n'est ajouté.
 
 Chaque panneau nouvellement créé est raccordé via `paneAdded` et reçoit le choix
 actuel de Show hidden files. Les préférences de colonnes, tri et disposition

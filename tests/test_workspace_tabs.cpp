@@ -4,6 +4,7 @@
 #include <QPointer>
 #include <QSet>
 #include <QSignalSpy>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTest>
 #include <QToolButton>
@@ -65,7 +66,8 @@ class WorkspaceTabsTest final : public QObject
         QCOMPARE(widget->count(), 1);
         auto* const third = tabs.createWorkspace();
         QVERIFY(!retiredIds.contains(tabs.paneId(third->activePane())));
-        QCOMPARE(widget->tabText(1), QStringLiteral("Tab 3"));
+        QCOMPARE(widget->tabText(0), QStringLiteral("Tab 1"));
+        QCOMPARE(widget->tabText(1), QStringLiteral("Tab 2"));
         // Closing an inactive workspace does not change the current one.
         tabs.closeWorkspace(first);
         QCOMPARE(tabs.activeWorkspace(), third);
@@ -92,6 +94,8 @@ class WorkspaceTabsTest final : public QObject
         QCOMPARE(tabs.pane(0), nullptr);
         QCOMPARE(tabs.paneId(nullptr), quint64{0});
         QCOMPARE(tabs.otherVisiblePane(), nullptr);
+        QVERIFY(!widget->findChild<QTabBar*>()->isVisible());
+        QVERIFY(!tabs.addWorkspaceButton()->isVisible());
     }
 
     void splitRelaysVisibilityAndActivation()
@@ -125,6 +129,78 @@ class WorkspaceTabsTest final : public QObject
         QCOMPARE(tabs.otherVisiblePane(), primary);
         QCOMPARE(tabs.paneId(secondary), secondaryId);
         QCOMPARE(tabs.paneIds().size(), 2);
+    }
+
+    void tabBarVisibilityAndAdjacentAddButtonTrackCount()
+    {
+        rfm::app::WorkspaceTabs tabs;
+        tabs.show();
+        tabs.resize(900, 500);
+        QTest::qWait(1);
+        auto* const widget = tabs.findChild<QTabWidget*>();
+        auto* const bar = widget->findChild<QTabBar*>();
+        QVERIFY(bar != nullptr);
+        auto* const add = tabs.addWorkspaceButton();
+        auto* const first = tabs.activeWorkspace();
+        QVERIFY(!bar->isVisible());
+        auto* const second = tabs.createWorkspace();
+        Q_UNUSED(second)
+        QVERIFY(bar->isVisible());
+        QVERIFY(add->isVisible());
+        add->click();
+        QCOMPARE(widget->count(), 3);
+        QCOMPARE(widget->tabText(2), QStringLiteral("Tab 3"));
+        QVERIFY(add->width() > 0);
+        QVERIFY(add->height() > 0);
+        QVERIFY(add->parentWidget()->rect().contains(add->geometry()));
+        const QRect addInBar =
+            QRect(bar->mapFrom(add->parentWidget(), add->geometry().topLeft()), add->size());
+        QVERIFY(addInBar.left() > bar->tabRect(bar->count() - 1).right());
+        QVERIFY(addInBar.left() - bar->tabRect(bar->count() - 1).right() <=
+                add->sizeHint().width());
+        tabs.resize(900, 500);
+        QTest::qWait(1);
+        const QRect resizedLastTab = bar->tabRect(bar->count() - 1);
+        const QRect resizedAddInBar =
+            QRect(bar->mapFrom(add->parentWidget(), add->geometry().topLeft()), add->size());
+        QVERIFY(resizedAddInBar.left() >= resizedLastTab.right());
+        tabs.closeWorkspace(tabs.activeWorkspace());
+        QCOMPARE(bar->count(), 2);
+        QCOMPARE(widget->tabText(0), QStringLiteral("Tab 1"));
+        QCOMPARE(widget->tabText(1), QStringLiteral("Tab 2"));
+        tabs.createWorkspace();
+        QCOMPARE(bar->count(), 3);
+        QCOMPARE(widget->tabText(2), QStringLiteral("Tab 3"));
+        const QRect thirdTab = bar->tabRect(2);
+        const QRect thirdAddInBar =
+            QRect(bar->mapFrom(add->parentWidget(), add->geometry().topLeft()), add->size());
+        QVERIFY(thirdAddInBar.left() >= thirdTab.right());
+        tabs.closeWorkspace(tabs.activeWorkspace());
+        QCOMPARE(bar->count(), 2);
+        tabs.closeWorkspace(tabs.activeWorkspace());
+        QCOMPARE(bar->count(), 1);
+        QVERIFY(!bar->isVisible());
+        QVERIFY(!add->isVisible());
+        QVERIFY(tabs.activeWorkspace() == first);
+    }
+
+    void renumbersLabelsWithoutRecyclingPaneIds()
+    {
+        rfm::app::WorkspaceTabs tabs;
+        auto* const widget = tabs.findChild<QTabWidget*>();
+        auto* const first = tabs.activeWorkspace();
+        auto* const second = tabs.createWorkspace();
+        auto* const third = tabs.createWorkspace();
+        const auto retiredId = tabs.paneId(second->activePane());
+        tabs.closeWorkspace(second);
+        QCOMPARE(widget->count(), 2);
+        QCOMPARE(widget->tabText(0), QStringLiteral("Tab 1"));
+        QCOMPARE(widget->tabText(1), QStringLiteral("Tab 2"));
+        QVERIFY(tabs.activeWorkspace() == third);
+        auto* const replacement = tabs.createWorkspace();
+        QCOMPARE(widget->tabText(2), QStringLiteral("Tab 3"));
+        QVERIFY(tabs.paneId(replacement->activePane()) != retiredId);
+        QVERIFY(tabs.paneIds().contains(tabs.paneId(first->activePane())));
     }
 
     void paneIdsAreUniqueAcrossWorkspacesAndLifetimes()

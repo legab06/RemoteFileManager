@@ -302,6 +302,7 @@ class MainWindow final : public QMainWindow
     QAction* m_removeAction{nullptr};
     QAction* m_filePropertiesAction{nullptr};
     QAction* m_splitViewAction{nullptr};
+    QAction* m_newTabAction{nullptr};
     QAction* m_resetFileViewAction{nullptr};
     QAction* m_showHiddenFilesAction{nullptr};
     QAction* m_placesDockAction{nullptr};

@@ -5,6 +5,7 @@
 #include <QWidget>
 
 class QTabWidget;
+class QToolButton;
 
 namespace rfm::app
 {
@@ -34,6 +35,7 @@ class WorkspaceTabs final : public QWidget
     [[nodiscard]] QList<PaneId> paneIds() const;
     // Panes exposed by each workspace's split state, including inactive tabs.
     [[nodiscard]] QList<PaneId> openPaneIds() const;
+    [[nodiscard]] QToolButton* addWorkspaceButton() const;
 
   signals:
     void activeWorkspaceChanged();
@@ -43,8 +45,10 @@ class WorkspaceTabs final : public QWidget
     void paneVisibilityChanged(quint64 paneId, bool visible);
 
   private:
+    void updateTabBarVisibility();
+    void updateTabTitles();
+
     QTabWidget* m_tabs{nullptr};
-    quint64 m_nextTabNumber{1};
 };
 
 } // namespace rfm::app
