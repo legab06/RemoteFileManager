@@ -8,6 +8,11 @@ target_link_libraries(rfm_server_capabilities_tests PRIVATE Qt6::Test RemoteFile
 rfm_set_project_warnings(rfm_server_capabilities_tests)
 add_test(NAME unit.server_capabilities COMMAND rfm_server_capabilities_tests)
 
+qt_add_executable(rfm_remote_copy_strategy_tests test_remote_copy_strategy.cpp)
+target_link_libraries(rfm_remote_copy_strategy_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_remote_copy_strategy_tests)
+add_test(NAME unit.remote_copy_strategy COMMAND rfm_remote_copy_strategy_tests)
+
 qt_add_executable(rfm_server_capabilities_store_tests test_server_capabilities_store.cpp)
 target_link_libraries(rfm_server_capabilities_store_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_server_capabilities_store_tests)

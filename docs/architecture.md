@@ -49,6 +49,30 @@ reste fondée sur les capabilities annoncées par SFTP, et non sur le système d
 supposé du serveur. `copy-data` est une extension SFTP ; ni sa présence ni les snapshots
 persistés ne déterminent encore la stratégie Remote Copy dans cette branche.
 
+Le cœur expose aussi une sélection pure de méthode de copie distante :
+
+```text
+Current SFTP capabilities
+        ↓
+RemoteCopyMethod selection
+        ↓
+SftpCopyData
+        ou
+ClientMediatedSftp
+```
+
+Dans ce lot, seule une capability SFTP courante dont `copy-data` v1 est `Supported`
+sélectionne `SftpCopyData`; toute autre valeur, y compris `Unknown`, choisit le fallback
+sûr `ClientMediatedSftp`. Cette décision ne s'appuie ni sur le système d'exploitation,
+ni sur OpenSSH, ni sur le hostname. Le moteur de copie ne consomme pas encore ce
+sélecteur. Lors du branchement futur, il devra consommer les capabilities détectées pour
+la session SSH actuelle après `sftp_init()`, jamais un snapshot persistant `Last known`.
+
+La cible future est, dans cet ordre : SFTP `copy-data`, `NativeServerCopy`, puis SFTP
+médié par le client. `NativeServerCopy` figure déjà dans le type pour stabiliser l'API,
+mais n'est ni détecté ni sélectionné tant qu'une détection et une exécution portables et
+sûres n'ont pas été implémentées.
+
 ## Flux actuel
 
 ```mermaid
