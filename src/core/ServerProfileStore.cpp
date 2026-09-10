@@ -113,6 +113,52 @@ void setError(QString* error, const QString& message)
     }
 }
 
+struct ProfileLoadResult {
+    QList<ConnectionProfile> profiles;
+    QString error;
+    bool rejectedEntries{false};
+};
+
+ProfileLoadResult loadProfiles(const QString& path)
+{
+    QFile file(path);
+    if (!file.exists()) {
+        return {};
+    }
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {{}, QStringLiteral("Unable to read the server profiles file."), false};
+    }
+    if (file.size() == 0 || file.size() > maximumFileSize) {
+        return {{}, QStringLiteral("The server profiles file has an invalid size."), false};
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return {{}, QStringLiteral("The server profiles file contains invalid JSON."), false};
+    }
+    const QJsonObject root = document.object();
+    if (root.value(QStringLiteral("version")).toInt(-1) != ServerProfileStore::formatVersion) {
+        return {{}, QStringLiteral("The server profiles file uses an unsupported version."), false};
+    }
+    if (!root.value(QStringLiteral("servers")).isArray()) {
+        return {{}, QStringLiteral("The server profiles file has an invalid structure."), false};
+    }
+
+    ProfileLoadResult result;
+    QSet<QString> identifiers;
+    for (const QJsonValue& value : root.value(QStringLiteral("servers")).toArray()) {
+        const auto profile = deserialize(value);
+        if (!profile.has_value() || identifiers.contains(profile->id)) {
+            result.rejectedEntries = true;
+            continue;
+        }
+        identifiers.insert(profile->id);
+        result.profiles.push_back(*profile);
+    }
+    return result;
+}
+
 } // namespace
 
 ServerProfileStore::ServerProfileStore(QString storageDirectory)
@@ -128,46 +174,9 @@ QString ServerProfileStore::filePath() const
 
 QList<ConnectionProfile> ServerProfileStore::load(QString* error) const
 {
-    setError(error, {});
-    QFile file(filePath());
-    if (!file.exists()) {
-        return {};
-    }
-    if (!file.open(QIODevice::ReadOnly)) {
-        setError(error, QStringLiteral("Unable to read the server profiles file."));
-        return {};
-    }
-    if (file.size() == 0 || file.size() > maximumFileSize) {
-        setError(error, QStringLiteral("The server profiles file has an invalid size."));
-        return {};
-    }
-
-    QJsonParseError parseError;
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        setError(error, QStringLiteral("The server profiles file contains invalid JSON."));
-        return {};
-    }
-    const QJsonObject root = document.object();
-    if (root.value(QStringLiteral("version")).toInt(-1) != formatVersion) {
-        setError(error, QStringLiteral("The server profiles file uses an unsupported version."));
-        return {};
-    }
-    if (!root.value(QStringLiteral("servers")).isArray()) {
-        setError(error, QStringLiteral("The server profiles file has an invalid structure."));
-        return {};
-    }
-
-    QList<ConnectionProfile> profiles;
-    QSet<QString> identifiers;
-    for (const QJsonValue& value : root.value(QStringLiteral("servers")).toArray()) {
-        const auto profile = deserialize(value);
-        if (profile.has_value() && !identifiers.contains(profile->id)) {
-            identifiers.insert(profile->id);
-            profiles.push_back(*profile);
-        }
-    }
-    return profiles;
+    ProfileLoadResult result = loadProfiles(filePath());
+    setError(error, result.error);
+    return std::move(result.profiles);
 }
 
 bool ServerProfileStore::save(const QList<ConnectionProfile>& profiles, QString* error) const
@@ -206,12 +215,17 @@ bool ServerProfileStore::upsert(const ConnectionProfile& profile, QString* error
         setError(error, QStringLiteral("The server profile is invalid."));
         return false;
     }
-    QString loadError;
-    QList<ConnectionProfile> profiles = load(&loadError);
-    if (!loadError.isEmpty()) {
-        setError(error, loadError);
+    ProfileLoadResult loaded = loadProfiles(filePath());
+    if (!loaded.error.isEmpty()) {
+        setError(error, loaded.error);
         return false;
     }
+    if (loaded.rejectedEntries) {
+        setError(error, QStringLiteral("The server profiles file contains invalid or duplicate "
+                                       "entries and cannot be modified safely."));
+        return false;
+    }
+    QList<ConnectionProfile> profiles = std::move(loaded.profiles);
     bool replaced = false;
     for (ConnectionProfile& existing : profiles) {
         if (existing.id == profile.id) {
@@ -233,12 +247,17 @@ bool ServerProfileStore::remove(const QString& id, QString* error) const
         setError(error, QStringLiteral("The server profile identifier is invalid."));
         return false;
     }
-    QString loadError;
-    QList<ConnectionProfile> profiles = load(&loadError);
-    if (!loadError.isEmpty()) {
-        setError(error, loadError);
+    ProfileLoadResult loaded = loadProfiles(filePath());
+    if (!loaded.error.isEmpty()) {
+        setError(error, loaded.error);
         return false;
     }
+    if (loaded.rejectedEntries) {
+        setError(error, QStringLiteral("The server profiles file contains invalid or duplicate "
+                                       "entries and cannot be modified safely."));
+        return false;
+    }
+    QList<ConnectionProfile> profiles = std::move(loaded.profiles);
     const qsizetype originalSize = profiles.size();
     profiles.removeIf(
         [&normalizedId](const ConnectionProfile& profile) { return profile.id == normalizedId; });

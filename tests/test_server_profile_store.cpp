@@ -20,6 +20,15 @@ void writeFile(const QString& path, const QByteArray& contents)
     QCOMPARE(file.write(contents), contents.size());
 }
 
+QByteArray readFile(const QString& path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return file.readAll();
+}
+
 } // namespace
 
 class ServerProfileStoreTest final : public QObject
@@ -35,6 +44,9 @@ class ServerProfileStoreTest final : public QObject
     void skipsInvalidEntries();
     void loadsLegacyPasswordFallbackSetting();
     void replacesAndRemovesProfiles();
+    void refusesUpsertWhenStoreContainsInvalidEntry();
+    void refusesRemoveWhenStoreContainsInvalidEntry();
+    void refusesMutationWhenStoreContainsDuplicateIdentifier();
     void rejectsInvalidProfiles();
 };
 
@@ -207,6 +219,64 @@ void ServerProfileStoreTest::replacesAndRemovesProfiles()
     loaded = store.load(&error);
     QCOMPARE(loaded.size(), 1);
     QCOMPARE(loaded.constFirst().id, QStringLiteral("one"));
+}
+
+void ServerProfileStoreTest::refusesUpsertWhenStoreContainsInvalidEntry()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerProfileStore store(temporary.path());
+    const QByteArray contents = QByteArrayLiteral(R"({"version":1,"servers":[
+        {"id":"valid","name":"NAS","host":"nas.test","username":"me","port":22,"allowPasswordAuthentication":false},
+        {"id":"invalid","name":"Broken","username":"me","port":22,"allowPasswordAuthentication":false}
+    ]})");
+    writeFile(store.filePath(), contents);
+
+    QString error;
+    const QList loaded = store.load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.constFirst().id, QStringLiteral("valid"));
+
+    QVERIFY(!store.upsert(
+        profile(QStringLiteral("valid"), QStringLiteral("Updated"), QStringLiteral("new.test")),
+        &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(readFile(store.filePath()), contents);
+}
+
+void ServerProfileStoreTest::refusesRemoveWhenStoreContainsInvalidEntry()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerProfileStore store(temporary.path());
+    const QByteArray contents = QByteArrayLiteral(R"({"version":1,"servers":[
+        {"id":"valid","name":"NAS","host":"nas.test","username":"me","port":22,"allowPasswordAuthentication":false},
+        {"id":"invalid","name":"Broken","host":"bad.test","username":"me","port":70000,"allowPasswordAuthentication":false}
+    ]})");
+    writeFile(store.filePath(), contents);
+
+    QString error;
+    QVERIFY(!store.remove(QStringLiteral("valid"), &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(readFile(store.filePath()), contents);
+}
+
+void ServerProfileStoreTest::refusesMutationWhenStoreContainsDuplicateIdentifier()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerProfileStore store(temporary.path());
+    const QByteArray contents = QByteArrayLiteral(R"({"version":1,"servers":[
+        {"id":"duplicate","name":"First","host":"first.test","username":"me","port":22,"allowPasswordAuthentication":false},
+        {"id":"duplicate","name":"Second","host":"second.test","username":"me","port":22,"allowPasswordAuthentication":false}
+    ]})");
+    writeFile(store.filePath(), contents);
+
+    QString error;
+    QVERIFY(!store.remove(QStringLiteral("duplicate"), &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(readFile(store.filePath()), contents);
 }
 
 void ServerProfileStoreTest::rejectsInvalidProfiles()
