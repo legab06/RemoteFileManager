@@ -31,6 +31,7 @@ add_library(
     ssh/SshSession.cpp
     ssh/SshAuthenticationPolicy.cpp
     ssh/SftpTransferBackend.cpp
+    ssh/SftpWriteLoop.hpp
     ssh/SshTransportHealth.cpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/LocalFileSystem.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/RemoteFilesystem.hpp

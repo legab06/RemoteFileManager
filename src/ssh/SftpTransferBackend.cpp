@@ -1,4 +1,5 @@
 #include "SftpTransferBackend.hpp"
+#include "SftpWriteLoop.hpp"
 #include "SshTransportHealth.hpp"
 #include <fcntl.h>
 #include <libssh/sftp.h>
@@ -127,8 +128,18 @@ rfm::core::TransferBackendResult SftpTransferBackend::write(quint64 id, const QB
     if (!h)
         return {rfm::core::TransferBackendError::Failure,
                 QStringLiteral("Invalid remote transfer handle.")};
-    auto n = sftp_write(h, d.constData(), static_cast<size_t>(d.size()));
-    return n == d.size() ? rfm::core::TransferBackendResult{} : result();
+    const detail::SftpWriteLoopResult writeResult =
+        detail::writeSftpBuffer(d, [h](const char* data, qsizetype size) {
+            return static_cast<qint64>(sftp_write(h, data, static_cast<size_t>(size)));
+        });
+    if (writeResult == detail::SftpWriteLoopResult::Completed) {
+        return {};
+    }
+    if (writeResult == detail::SftpWriteLoopResult::NoProgress) {
+        return {rfm::core::TransferBackendError::Io,
+                QStringLiteral("Remote SFTP write made no progress.")};
+    }
+    return result();
 }
 rfm::core::TransferBackendResult SftpTransferBackend::close(quint64 id)
 {
