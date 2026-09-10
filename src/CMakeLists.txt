@@ -5,6 +5,8 @@ add_library(
     core/LocalCopyMove.cpp
     core/LocalCopyMove.hpp
     core/LocalFileSystem.cpp
+    core/LinuxMountTable.hpp
+    core/LocalRemove.hpp
     core/LocalStorageTopology.hpp
     core/LocalDownloadPath.cpp
     core/OperationHistoryStore.cpp

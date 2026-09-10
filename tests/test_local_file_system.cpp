@@ -1,5 +1,7 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 
+#include "../src/core/LinuxMountTable.hpp"
+#include "../src/core/LocalRemove.hpp"
 #include "../src/core/LocalStorageTopology.hpp"
 
 #include <QFile>
@@ -58,6 +60,18 @@ class LocalFileSystemTest final : public QObject
     void createsLocalFoldersWithValidation();
     void renamesLocalFilesAndFoldersWithValidation();
     void removesLocalSelectionsRecursivelyWithoutFollowingSymlinks();
+    void refusesRecursiveRemovalAcrossMountBoundary();
+    void refusesInvalidRemovalSelection_data();
+    void refusesInvalidRemovalSelection();
+    void refusesSelectedMountPointAndProbeErrors();
+    void detectsLinuxRemovalMountBoundaries_data();
+    void detectsLinuxRemovalMountBoundaries();
+    void rejectsIncompleteLinuxRemovalMountInfo_data();
+    void rejectsIncompleteLinuxRemovalMountInfo();
+    void keepsOnlyValidRawLinuxMountTableEntries();
+    void removesSymlinksWithoutProbingTargets();
+    void rechecksRemovalBoundariesAfterPreflight();
+    void rechecksNestedRemovalBoundaryAfterPreflight();
     void classifiesInternalStorage();
     void classifiesDirectUsbStorage();
     void classifiesExternalStorageIndependentlyFromRemovableFlag();
@@ -328,6 +342,326 @@ void LocalFileSystemTest::removesLocalSelectionsRecursivelyWithoutFollowingSymli
                                                       {}});
     QVERIFY(!missing.allSucceeded());
     QVERIFY(!missing.items.constFirst().error.isEmpty());
+}
+
+void LocalFileSystemTest::refusesRecursiveRemovalAcrossMountBoundary()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkpath(QStringLiteral("tree/mounted")));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    const QString mounted = parent.filePath(QStringLiteral("tree/mounted"));
+    const QString protectedPath = parent.filePath(QStringLiteral("tree/mounted/protected.txt"));
+    const QString ordinaryPath = parent.filePath(QStringLiteral("tree/file.txt"));
+    const QString firstSource = parent.filePath(QStringLiteral("first.txt"));
+    const QString lastSource = parent.filePath(QStringLiteral("last.txt"));
+    for (const QString& path : {protectedPath, ordinaryPath, firstSource, lastSource}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write("keep"), qint64{4});
+    }
+    QStringList visited;
+    const auto result = rfm::core::detail::executeLocalRemove(
+        {1, rfm::core::LocalFileOperationKind::Remove, parent.path(),
+         {firstSource, tree, lastSource}, {}},
+        [&](const QString& path) {
+            visited.push_back(path);
+            return path == mounted ? rfm::core::detail::RemovalBoundary::MountPoint
+                                   : rfm::core::detail::RemovalBoundary::Clear;
+        });
+    QVERIFY2(!result.allSucceeded(), "Remove must refuse a nested mount before deleting anything");
+    QCOMPARE(result.items.size(), 3);
+    QCOMPARE(result.succeededCount(), 0);
+    QCOMPARE(result.failedCount(), 3);
+    QVERIFY(!result.items.first().error.isEmpty());
+    QVERIFY(result.items.at(1).error.contains(mounted));
+    QVERIFY(QFileInfo::exists(firstSource));
+    QVERIFY(QFileInfo::exists(lastSource));
+    QCOMPARE(visited.count(firstSource), 1);
+    QCOMPARE(visited.count(lastSource), 1);
+    QVERIFY(QFileInfo::exists(protectedPath));
+    QVERIFY(QFileInfo::exists(ordinaryPath));
+    QVERIFY(visited.contains(mounted));
+    for (const QString& path : visited) {
+        QVERIFY(!path.startsWith(mounted + QChar{'/'}));
+    }
+}
+
+void LocalFileSystemTest::refusesInvalidRemovalSelection_data()
+{
+    QTest::addColumn<bool>("missing");
+    QTest::newRow("missing-source") << true;
+    QTest::newRow("outside-parent") << false;
+}
+
+void LocalFileSystemTest::refusesInvalidRemovalSelection()
+{
+    QFETCH(bool, missing);
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    const QString firstSource = parent.filePath(QStringLiteral("first.txt"));
+    QFile file(firstSource);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    const QString invalidSource = missing ? parent.filePath(QStringLiteral("missing"))
+                                          : parent.absolutePath();
+    QStringList visited;
+    const auto result = detail::executeLocalRemove(
+        {1, LocalFileOperationKind::Remove, parent.path(), {firstSource, invalidSource}, {}},
+        [&](const QString& path) {
+            visited.push_back(path);
+            return path == firstSource ? detail::RemovalBoundary::Clear
+                                       : detail::RemovalBoundary::Unavailable;
+        });
+    QCOMPARE(result.failedCount(), 2);
+    QCOMPARE(result.succeededCount(), 0);
+    QVERIFY(file.exists());
+    QCOMPARE(visited, QStringList{firstSource});
+    QCOMPARE(result.items.at(1).error,
+             missing ? QObject::tr("The selected local entry no longer exists.")
+                     : QObject::tr("The selected entry is outside the current local folder."));
+}
+
+void LocalFileSystemTest::refusesSelectedMountPointAndProbeErrors()
+{
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkpath(QStringLiteral("tree")));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    QFile file(QDir(tree).filePath(QStringLiteral("keep.txt")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    for (const auto state :
+         {detail::RemovalBoundary::MountPoint, detail::RemovalBoundary::Unavailable}) {
+        QStringList visited;
+        const auto result = detail::executeLocalRemove(
+            {1, LocalFileOperationKind::Remove, parent.path(), {tree}, {}},
+            [&](const QString& path) {
+                visited.push_back(path);
+                return state;
+            });
+        QVERIFY(!result.allSucceeded());
+        QVERIFY(result.items.first().error.contains(tree));
+        QCOMPARE(visited, QStringList{tree});
+        QVERIFY(file.exists());
+    }
+}
+
+void LocalFileSystemTest::detectsLinuxRemovalMountBoundaries_data()
+{
+    QTest::addColumn<QByteArray>("deviceNumber");
+    QTest::addColumn<QByteArray>("type");
+    QTest::addColumn<bool>("fileMount");
+    QTest::newRow("other-device") << QByteArray("8:2") << QByteArray("ext4") << false;
+    QTest::newRow("same-device-bind") << QByteArray("8:1") << QByteArray("ext4") << false;
+    QTest::newRow("pseudo-filesystem") << QByteArray("0:5") << QByteArray("proc") << false;
+    QTest::newRow("file-bind") << QByteArray("8:1") << QByteArray("ext4") << true;
+}
+
+void LocalFileSystemTest::detectsLinuxRemovalMountBoundaries()
+{
+    QFETCH(QByteArray, deviceNumber);
+    QFETCH(QByteArray, type);
+    QFETCH(bool, fileMount);
+#ifdef Q_OS_WIN
+    QSKIP("Linux mount paths cannot represent a native Windows temporary directory.");
+#endif
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkpath(QStringLiteral("tree")));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    const QString mounted = QDir(tree).filePath(QStringLiteral("mounted space"));
+    if (!fileMount) {
+        QVERIFY(QDir().mkpath(mounted));
+    }
+    const QString protectedPath = fileMount ? mounted : QDir(mounted).filePath("keep.txt");
+    QFile file(protectedPath);
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    QByteArray encodedPoint = QFileInfo(mounted).canonicalFilePath().toUtf8();
+    encodedPoint.replace("\\", "\\134");
+    encodedPoint.replace(" ", "\\040");
+    const QByteArray fixture = "1 99 8:1 / / rw - ext4 /dev/root rw\n2 1 " + deviceNumber +
+                               " /bound " + encodedPoint + " rw - " + type + " /dev/root rw\n";
+    const auto table = detail::parseLinuxMountTable(fixture);
+    QVERIFY(table.complete);
+    QCOMPARE(table.mounts.size(), 2);
+    const auto probe = detail::linuxRemovalBoundaryProbe(fixture);
+    QCOMPARE(probe(tree), detail::RemovalBoundary::Clear);
+    QCOMPARE(probe(mounted), detail::RemovalBoundary::MountPoint);
+    const auto result = detail::executeLocalRemove(
+        {1, LocalFileOperationKind::Remove, parent.path(), {tree}, {}}, probe);
+    QVERIFY(!result.allSucceeded());
+    QVERIFY(file.exists());
+    QVERIFY(result.items.first().error.contains(mounted));
+}
+
+void LocalFileSystemTest::rejectsIncompleteLinuxRemovalMountInfo_data()
+{
+    QTest::addColumn<QByteArray>("fixture");
+    const QByteArray root = "1 99 8:1 / / rw - ext4 /dev/root rw\n";
+    QTest::newRow("unavailable-or-empty") << QByteArray{};
+    QTest::newRow("truncated") << root.chopped(1);
+    QTest::newRow("malformed-line") << root + "broken\n";
+    QTest::newRow("invalid-device") << root + "2 1 invalid / /mnt rw - ext4 none rw\n";
+    QTest::newRow("duplicate-id") << root + "1 99 8:2 / /mnt rw - ext4 none rw\n";
+    QTest::newRow("missing-root") << QByteArray("2 1 8:2 / /mnt rw - ext4 none rw\n");
+    QTest::newRow("bad-escape") << root + "2 1 8:2 / /mnt\\999 rw - ext4 none rw\n";
+    QTest::newRow("noncanonical-path") << root + "2 1 8:2 / /mnt/../other rw - ext4 none rw\n";
+}
+
+void LocalFileSystemTest::rejectsIncompleteLinuxRemovalMountInfo()
+{
+    QFETCH(QByteArray, fixture);
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkdir(QStringLiteral("tree")));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    const auto probe = detail::linuxRemovalBoundaryProbe(fixture);
+    QCOMPARE(probe(tree), detail::RemovalBoundary::Unavailable);
+    const auto result = detail::executeLocalRemove(
+        {1, LocalFileOperationKind::Remove, parent.path(), {tree}, {}}, probe);
+    QVERIFY(!result.allSucceeded());
+    QVERIFY(QFileInfo::exists(tree));
+}
+
+void LocalFileSystemTest::keepsOnlyValidRawLinuxMountTableEntries()
+{
+    using namespace rfm::core;
+    const QByteArray root = "1 99 8:1 / / rw - ext4 /dev/root rw\n";
+    const QByteArray valid = "2 1 8:2 / /valid rw - ext4 /dev/valid rw\n";
+    const QByteArray duplicateId = "2 1 8:3 / /duplicate rw - ext4 /dev/duplicate rw\n";
+    const QByteArray selfParent = "3 3 8:4 / /self rw - ext4 /dev/self rw\n";
+    const QByteArray reusedId = "3 1 8:5 / /reused rw - ext4 /dev/reused rw\n";
+    const QByteArray nulLine =
+        QByteArray("4 1 8:6 / /nul") + QByteArray(1, '\0') + " rw - ext4 /dev/nul rw\n";
+    const QByteArray badEscape = "5 1 8:7 / /bad\\999 rw - ext4 /dev/bad rw\n";
+    const QByteArray noncanonical = "6 1 8:8 / /normal/../bad rw - ext4 /dev/bad rw\n";
+
+    const detail::LinuxMountTable table = detail::parseLinuxMountTable(
+        root + valid + duplicateId + selfParent + reusedId + nulLine + badEscape + noncanonical);
+
+    QVERIFY(!table.complete);
+    QCOMPARE(table.mounts.size(), 3);
+    QCOMPARE(table.mounts.at(0).rootPath, QStringLiteral("/"));
+    QCOMPARE(table.mounts.at(1).rootPath, QStringLiteral("/valid"));
+    QCOMPARE(table.mounts.at(2).rootPath, QStringLiteral("/reused"));
+    QCOMPARE(table.mounts.at(2).mountId, quint64{3});
+    for (const LinuxMountInfo& mount : table.mounts) {
+        QVERIFY(mount.rootPath != QStringLiteral("/duplicate"));
+        QVERIFY(mount.rootPath != QStringLiteral("/self"));
+        QVERIFY(mount.rootPath != QStringLiteral("/nul"));
+        QVERIFY(mount.rootPath != QStringLiteral("/bad"));
+    }
+}
+
+void LocalFileSystemTest::removesSymlinksWithoutProbingTargets()
+{
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkpath(QStringLiteral("target")));
+    QVERIFY(parent.mkpath(QStringLiteral("tree")));
+    const QString target = parent.filePath(QStringLiteral("target"));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    QFile file(QDir(target).filePath(QStringLiteral("keep.txt")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    const QString link = QDir(tree).filePath(QStringLiteral("link"));
+    const QString dangling = QDir(tree).filePath(QStringLiteral("dangling"));
+    if (!QFile::link(target, link) || !QFileInfo(link).isSymbolicLink() ||
+        !QFile::link(parent.filePath(QStringLiteral("missing")), dangling)) {
+        QSKIP("Native symbolic links are not available in this environment.");
+    }
+    QStringList visited;
+    const auto result = detail::executeLocalRemove(
+        {1, LocalFileOperationKind::Remove, parent.path(), {tree}, {}},
+        [&](const QString& path) {
+            visited.push_back(path);
+            return path == tree ? detail::RemovalBoundary::Clear
+                                : detail::RemovalBoundary::MountPoint;
+        });
+    QVERIFY(result.allSucceeded());
+    QVERIFY(file.exists());
+    QVERIFY(!QFileInfo::exists(tree));
+    QVERIFY(!QFileInfo(link).isSymbolicLink());
+    QVERIFY(!QFileInfo(dangling).isSymbolicLink());
+    QCOMPARE(visited, (QStringList{tree, tree}));
+}
+
+void LocalFileSystemTest::rechecksRemovalBoundariesAfterPreflight()
+{
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkpath(QStringLiteral("tree")));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    QFile file(QDir(tree).filePath(QStringLiteral("keep.txt")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    file.close();
+    int rootChecks = 0;
+    const auto result = detail::executeLocalRemove(
+        {1, LocalFileOperationKind::Remove, parent.path(), {tree}, {}},
+        [&](const QString& path) {
+            if (path == tree && ++rootChecks == 2) {
+                return detail::RemovalBoundary::MountPoint;
+            }
+            return detail::RemovalBoundary::Clear;
+        });
+    QVERIFY(!result.allSucceeded());
+    QCOMPARE(rootChecks, 2);
+    QVERIFY(file.exists());
+}
+
+void LocalFileSystemTest::rechecksNestedRemovalBoundaryAfterPreflight()
+{
+    using namespace rfm::core;
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QDir parent(temporary.path());
+    QVERIFY(parent.mkpath(QStringLiteral("tree/nested")));
+    const QString tree = parent.filePath(QStringLiteral("tree"));
+    const QString normal = parent.filePath(QStringLiteral("tree/normal.txt"));
+    const QString nested = parent.filePath(QStringLiteral("tree/nested"));
+    const QString protectedPath = parent.filePath(QStringLiteral("tree/nested/protected.txt"));
+    for (const QString& path : {normal, protectedPath}) {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.close();
+    }
+
+    int nestedChecks = 0;
+    bool mountPointObserved = false;
+    bool probedBelowBoundary = false;
+    const auto result = detail::executeLocalRemove(
+        {1, LocalFileOperationKind::Remove, parent.path(), {tree}, {}},
+        [&](const QString& path) {
+            if (mountPointObserved && path.startsWith(nested + QChar{'/'})) {
+                probedBelowBoundary = true;
+            }
+            if (path == nested && ++nestedChecks == 2) {
+                mountPointObserved = true;
+                return detail::RemovalBoundary::MountPoint;
+            }
+            return detail::RemovalBoundary::Clear;
+        });
+
+    QVERIFY(!result.allSucceeded());
+    QCOMPARE(nestedChecks, 2);
+    QVERIFY(mountPointObserved);
+    QVERIFY(QFileInfo::exists(protectedPath));
+    QVERIFY(!probedBelowBoundary);
 }
 
 void LocalFileSystemTest::classifiesInternalStorage()

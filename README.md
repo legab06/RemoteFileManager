@@ -63,6 +63,8 @@ Ce logiciel a été entièrement vibe-codé pour répondre à un besoin que j'av
 - les transferts Local ↔ SSH ne prennent pas en charge les liens symboliques ni les
   nœuds spéciaux ;
 - suppression définitive après confirmation, sans corbeille ni restauration intégrée ;
+- la suppression locale refuse les arbres traversant un point de montage ou une frontière de volume afin d’éviter la suppression involontaire de données sur un autre filesystem. Les liens symboliques ne sont pas suivis. Les vérifications sont conservatrices et peuvent refuser une suppression si la sécurité ne peut pas être établie ;
+- la suppression n’est pas transactionnelle : une erreur survenant pendant l’opération peut laisser une suppression partielle ;
 - gestion des volumes distants réservée à Linux ; les opérations serveur utilisant
   `cp`, la suppression récursive protégée et le déplacement entre filesystems ont des
   dépendances système supplémentaires détaillées dans l’architecture ;
