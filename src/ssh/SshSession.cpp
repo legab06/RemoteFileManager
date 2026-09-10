@@ -1,5 +1,6 @@
 #include "remotefilemanager/ssh/SshSession.hpp"
 
+#include "RemoteDelete.hpp"
 #include "SftpTransferBackend.hpp"
 #include "SshTransportHealth.hpp"
 #include "remotefilemanager/core/RemoteMoveSafety.hpp"
@@ -140,13 +141,24 @@ std::optional<quint64> remoteFileSystemId(sftp_session sftp, const QString& path
     return id == 0 ? std::nullopt : std::optional<quint64>{id};
 }
 
-std::optional<QByteArray> remoteMountInfo(sftp_session sftp)
+enum class RemoteMountInfoState { Unavailable, Available, Invalid };
+
+struct RemoteMountInfoResult {
+    RemoteMountInfoState state{RemoteMountInfoState::Unavailable};
+    QByteArray contents;
+};
+
+RemoteMountInfoResult remoteMountInfo(sftp_session sftp)
 {
     constexpr qsizetype maximumBytes = 1024 * 1024;
     const QByteArray path = QByteArrayLiteral("/proc/self/mountinfo");
     sftp_file file = sftp_open(sftp, path.constData(), O_RDONLY, 0);
     if (file == nullptr) {
-        return std::nullopt;
+        const int error = sftp_get_error(sftp);
+        return {error == SSH_FX_NO_SUCH_FILE || error == SSH_FX_NO_SUCH_PATH
+                    ? RemoteMountInfoState::Unavailable
+                    : RemoteMountInfoState::Invalid,
+                {}};
     }
     QByteArray contents;
     char buffer[4096];
@@ -154,16 +166,16 @@ std::optional<QByteArray> remoteMountInfo(sftp_session sftp)
         const ssize_t count = sftp_read(file, buffer, sizeof(buffer));
         if (count < 0) {
             sftp_close(file);
-            return std::nullopt;
+            return {RemoteMountInfoState::Invalid, {}};
         }
         if (count == 0) {
             sftp_close(file);
-            return contents;
+            return {RemoteMountInfoState::Available, std::move(contents)};
         }
         contents.append(buffer, static_cast<qsizetype>(count));
     }
     sftp_close(file);
-    return std::nullopt;
+    return {RemoteMountInfoState::Invalid, {}};
 }
 
 std::optional<QString> canonicalRemoteEntryPath(sftp_session sftp, const QString& path)
@@ -528,13 +540,13 @@ class SftpBackend final : public rfm::core::RemoteFileBackend
             const QString sourceContainer = rfm::core::remoteMoveFileSystemContainer(source);
             const QString destinationContainer =
                 rfm::core::remoteMoveFileSystemContainer(destination);
-            const std::optional<QByteArray> mountInfo = remoteMountInfo(m_sftp);
+            const RemoteMountInfoResult mountInfo = remoteMountInfo(m_sftp);
             const std::optional<QString> canonicalSource = canonicalRemoteEntryPath(m_sftp, source);
             const rfm::core::RemoteMoveFallbackEvidence evidence{
                 remoteFileSystemId(m_sftp, sourceContainer),
                 remoteFileSystemId(m_sftp, destinationContainer),
-                mountInfo.has_value() && canonicalSource.has_value()
-                    ? rfm::core::linuxMountPointState(*mountInfo, *canonicalSource)
+                mountInfo.state == RemoteMountInfoState::Available && canonicalSource.has_value()
+                    ? rfm::core::linuxMountPointState(mountInfo.contents, *canonicalSource)
                     : rfm::core::RemoteMountPointState::Unknown};
             if (rfm::core::allowsRemoteMoveFallback(evidence)) {
                 return {rfm::core::RemoteBackendError::CrossDevice, {}};
@@ -2768,8 +2780,42 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
         return;
     }
     SftpBackend backend(m_impl->sftp);
-    rfm::core::RemoteFileOperations operations(backend);
-    emit operationFinished(operations.remove(id, sources, recursive));
+    const RemoteMountInfoResult mountInfo =
+        recursive ? remoteMountInfo(m_impl->sftp) : RemoteMountInfoResult{};
+    const auto mountProbe = [sftp = m_impl->sftp, &mountInfo](const QString& path) {
+        const QByteArray encodedPath = path.toUtf8();
+        sftp_attributes attributes = sftp_lstat(sftp, encodedPath.constData());
+        if (attributes == nullptr) {
+            return rfm::core::RemoteMountPointState::Unknown;
+        }
+        const bool symbolicLink = attributes->type == SSH_FILEXFER_TYPE_SYMLINK;
+        sftp_attributes_free(attributes);
+        if (symbolicLink) {
+            return rfm::core::RemoteMountPointState::NotMountPoint;
+        }
+
+        const std::optional<QString> canonicalPath = canonicalRemoteEntryPath(sftp, path);
+        if (!canonicalPath.has_value()) {
+            return rfm::core::RemoteMountPointState::Unknown;
+        }
+        if (mountInfo.state == RemoteMountInfoState::Available) {
+            return rfm::core::linuxMountPointState(mountInfo.contents, *canonicalPath);
+        }
+        if (mountInfo.state == RemoteMountInfoState::Invalid) {
+            return rfm::core::RemoteMountPointState::Unknown;
+        }
+
+        const std::optional<quint64> entryFileSystem = remoteFileSystemId(sftp, *canonicalPath);
+        const std::optional<quint64> parentFileSystem =
+            remoteFileSystemId(sftp, rfm::core::RemotePath::parent(*canonicalPath));
+        if (!entryFileSystem.has_value() || !parentFileSystem.has_value()) {
+            return rfm::core::RemoteMountPointState::Unknown;
+        }
+        return entryFileSystem == parentFileSystem ? rfm::core::RemoteMountPointState::NotMountPoint
+                                                   : rfm::core::RemoteMountPointState::MountPoint;
+    };
+    emit operationFinished(
+        rfm::ssh::detail::removeRemoteEntriesSafely(backend, id, sources, recursive, mountProbe));
 }
 
 void SshSession::startTransfer(rfm::core::TransferRequest request)
