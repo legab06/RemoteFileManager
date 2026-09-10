@@ -41,6 +41,11 @@ target_link_libraries(rfm_ssh_transfer_lifecycle_tests PRIVATE Qt6::Test RemoteF
 rfm_set_project_warnings(rfm_ssh_transfer_lifecycle_tests)
 add_test(NAME unit.ssh_transfer_lifecycle COMMAND rfm_ssh_transfer_lifecycle_tests)
 
+qt_add_executable(rfm_sftp_write_loop_tests test_sftp_write_loop.cpp)
+target_link_libraries(rfm_sftp_write_loop_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_sftp_write_loop_tests)
+add_test(NAME unit.sftp_write_loop COMMAND rfm_sftp_write_loop_tests)
+
 qt_add_executable(rfm_ssh_authentication_policy_tests test_ssh_authentication_policy.cpp)
 target_link_libraries(rfm_ssh_authentication_policy_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 target_compile_definitions(
