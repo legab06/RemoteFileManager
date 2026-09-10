@@ -9,6 +9,7 @@
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
+#include "remotefilemanager/core/ServerCapabilities.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 #include "remotefilemanager/core/VolumeService.hpp"
@@ -41,6 +42,7 @@ class SshSession;
 namespace rfm::core
 {
 class OperationHistoryStore;
+class ServerCapabilitiesStore;
 class ServerProfileStore;
 class LocalFileSystemWorker;
 class LocalFileOperationWorker;
@@ -138,12 +140,19 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleDirectoryCountFailed(quint64 requestId, const QString& path);
     Q_INVOKABLE void showConnectionError(const QString& message);
     void loadServerProfiles();
+    void loadServerCapabilities();
+    void persistServerCapabilities(const rfm::core::ConnectionProfile& profile,
+                                   const rfm::core::ServerCapabilities& capabilities);
     void refreshServerProfileViews();
     void editSelectedServerProfile();
-    void editServerProfile(const QString& id);
+    Q_INVOKABLE void editServerProfile(const QString& id);
+    Q_INVOKABLE void handleServerCapabilitiesDetected(rfm::core::ConnectionProfile profile,
+                                                      rfm::core::ServerCapabilities capabilities);
+    void associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,
+                                     const rfm::core::ConnectionProfile& savedProfile);
     void removeSelectedServerProfile();
     void connectToSelectedServerProfile();
-    void connectToServerProfile(const QString& id);
+    Q_INVOKABLE void connectToServerProfile(const QString& id);
     void showPlacesContextMenu(const QPoint& position);
     void showSelectedPlaceProperties();
     void showContextEntryProperties();
@@ -336,6 +345,12 @@ class MainWindow final : public QMainWindow
     rfm::core::VolumeOperationWorker* m_volumeOperationWorker{nullptr};
     rfm::core::ConnectionProfile m_activeProfile;
     QString m_activeSavedProfileId;
+    struct ServerCapabilitiesRecord {
+        rfm::core::ConnectionProfile profile;
+        rfm::core::ServerCapabilities capabilities;
+        bool detectedThisRun{false};
+    };
+    QHash<QString, ServerCapabilitiesRecord> m_serverCapabilities;
     QSet<quint64> m_pendingTransferRequests;
     QSet<quint64> m_nonTerminalTransfers;
     struct DirectoryRequest {
@@ -415,6 +430,7 @@ class MainWindow final : public QMainWindow
     QHash<quint64, quint64> m_localClipboardMoveOperations;
     std::unique_ptr<rfm::core::OperationHistoryStore> m_operationHistoryStore;
     std::unique_ptr<rfm::core::ServerProfileStore> m_serverProfileStore;
+    std::unique_ptr<rfm::core::ServerCapabilitiesStore> m_serverCapabilitiesStore;
     QList<rfm::core::ConnectionProfile> m_serverProfiles;
     QPointer<ConnectionDialog> m_connectionDialog;
     QPointer<PasswordAuthenticationDialog> m_passwordAuthenticationDialog;
