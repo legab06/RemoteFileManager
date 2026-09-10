@@ -1,6 +1,8 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 
+#include "LinuxMountTable.hpp"
 #include "LocalCopyMove.hpp"
+#include "LocalRemove.hpp"
 #include "LocalStorageTopology.hpp"
 
 #include <QCryptographicHash>
@@ -16,6 +18,7 @@
 #include <QStringList>
 
 #include <algorithm>
+#include <filesystem>
 #include <utility>
 
 #ifdef Q_OS_LINUX
@@ -410,12 +413,75 @@ QString directChildPath(const QString& parentPath, const QString& sourcePath)
     return normalizedSource;
 }
 
-QString removeLocalEntry(const QString& path)
+detail::RemovalBoundaryProbe platformRemovalBoundaryProbe()
+{
+#ifdef Q_OS_LINUX
+    // Refresh before every entry, but only parse again when the mount table changes.
+    return [previous = QByteArray{},
+            cached = detail::RemovalBoundaryProbe{}](const QString& path) mutable {
+        QFile file(QStringLiteral("/proc/self/mountinfo"));
+        if (!file.open(QIODevice::ReadOnly)) {
+            return detail::RemovalBoundary::Unavailable;
+        }
+        const QByteArray contents = file.readAll();
+        if (file.error() != QFileDevice::NoError) {
+            return detail::RemovalBoundary::Unavailable;
+        }
+        if (!cached || contents != previous) {
+            cached = detail::linuxRemovalBoundaryProbe(contents);
+            previous = contents;
+        }
+        return cached(path);
+    };
+#else
+    return [](const QString& path) {
+        const QFileInfo info(path);
+        // Windows junctions can redirect traversal even within the same volume.
+#ifdef Q_OS_WIN
+        if (info.isJunction()) {
+            return detail::RemovalBoundary::MountPoint;
+        }
+#endif
+        const QString canonical = info.canonicalFilePath();
+        const QStorageInfo storage(path);
+        const QStorageInfo parent(info.absolutePath());
+        if (canonical.isEmpty() || !storage.isValid() || !storage.isReady() || !parent.isValid() ||
+            !parent.isReady() || storage.rootPath().isEmpty() || parent.rootPath().isEmpty()) {
+            return detail::RemovalBoundary::Unavailable;
+        }
+        const QString root = QFileInfo(storage.rootPath()).canonicalFilePath();
+        const QString parentRoot = QFileInfo(parent.rootPath()).canonicalFilePath();
+        if (root.isEmpty() || parentRoot.isEmpty()) {
+            return detail::RemovalBoundary::Unavailable;
+        }
+        // Conservative on case-sensitive macOS volumes too.
+        return canonical.compare(root, Qt::CaseInsensitive) == 0 ||
+                       root.compare(parentRoot, Qt::CaseInsensitive) != 0
+                   ? detail::RemovalBoundary::MountPoint
+                   : detail::RemovalBoundary::Clear;
+    };
+#endif
+}
+
+QString removeLocalEntry(const QString& path, const detail::RemovalBoundaryProbe& probe,
+                         bool preflight)
 {
     const QFileInfo info(path);
+    if (!localEntryExists(info)) {
+        return QObject::tr("The selected local entry no longer exists.");
+    }
+    // Never probe or enumerate a link target, including dangling symbolic links.
+    if (!info.isSymbolicLink()) {
+        const detail::RemovalBoundary boundary = probe(path);
+        if (boundary != detail::RemovalBoundary::Clear) {
+            return boundary == detail::RemovalBoundary::MountPoint
+                       ? QObject::tr("Deletion refused at local mount boundary: %1").arg(path)
+                       : QObject::tr("Cannot safely verify local mount boundaries: %1").arg(path);
+        }
+    }
     if (info.isSymbolicLink() || !info.isDir()) {
-        if (!localEntryExists(info)) {
-            return QObject::tr("The selected local entry no longer exists.");
+        if (preflight) {
+            return {};
         }
         QFile file(path);
         if (!file.remove()) {
@@ -426,14 +492,37 @@ QString removeLocalEntry(const QString& path)
         return {};
     }
 
-    QDir directory(path);
-    const QFileInfoList children = directory.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot |
-                                                           QDir::Hidden | QDir::System);
-    for (const QFileInfo& child : children) {
-        const QString error = removeLocalEntry(child.absoluteFilePath());
+    // QDir's empty list cannot distinguish an empty directory from an enumeration error.
+    // Collect immediate children with an error-reporting portable API before descending.
+#ifdef Q_OS_WIN
+    const std::filesystem::path nativePath(path.toStdWString());
+#else
+    const std::filesystem::path nativePath(QFile::encodeName(path).constData());
+#endif
+    std::error_code enumerationError;
+    std::filesystem::directory_iterator iterator(nativePath, enumerationError);
+    const std::filesystem::directory_iterator end;
+    QStringList children;
+    while (!enumerationError && iterator != end) {
+#ifdef Q_OS_WIN
+        children.push_back(QString::fromStdWString(iterator->path().native()));
+#else
+        children.push_back(QFile::decodeName(iterator->path().native().c_str()));
+#endif
+        iterator.increment(enumerationError);
+    }
+    if (enumerationError) {
+        return QObject::tr("Cannot safely enumerate local folder %1: %2")
+            .arg(path, QString::fromLocal8Bit(enumerationError.message()));
+    }
+    for (const QString& child : children) {
+        const QString error = removeLocalEntry(child, probe, preflight);
         if (!error.isEmpty()) {
             return error;
         }
+    }
+    if (preflight) {
+        return {};
     }
     QDir parent(info.absolutePath());
     if (!parent.rmdir(info.fileName())) {
@@ -648,24 +737,80 @@ LocalFileSystem::executeOperation(const LocalFileOperationRequest& request,
         return result;
     }
 
+    return detail::executeLocalRemove(request);
+}
+
+LocalFileOperationResult detail::executeLocalRemove(const LocalFileOperationRequest& request,
+                                                    const RemovalBoundaryProbe& probe)
+{
+    const RemovalBoundaryProbe activeProbe = probe ? probe : platformRemovalBoundaryProbe();
+    LocalFileOperationResult result{request.id, request.kind, {}};
+    const QString parentPath = validatedParentPath(request.parentPath);
+    if (request.kind != LocalFileOperationKind::Remove || parentPath.isEmpty()) {
+        result.items.push_back(invalidRequestResult(
+            request.parentPath, {}, QObject::tr("The local deletion request is not valid.")));
+        return result;
+    }
     if (request.sourcePaths.isEmpty()) {
         result.items.push_back(
             invalidRequestResult({}, {}, QObject::tr("No local entry was selected for deletion.")));
         return result;
     }
     result.items.reserve(request.sourcePaths.size());
+    QList<qsizetype> validSourceIndexes;
+    bool preflightFailed = false;
     for (const QString& requestedPath : request.sourcePaths) {
         const QString source = directChildPath(parentPath, requestedPath);
         if (source.isEmpty()) {
             result.items.push_back(invalidRequestResult(
                 requestedPath, {},
                 QObject::tr("The selected entry is outside the current local folder.")));
+            preflightFailed = true;
             continue;
         }
-        const QString error = removeLocalEntry(source);
-        result.items.push_back(operationItemResult(source, {}, error.isEmpty(), error));
+        validSourceIndexes.push_back(result.items.size());
+        result.items.push_back(operationItemResult(source, {}, false, {}));
+    }
+    for (const qsizetype index : validSourceIndexes) {
+        auto& item = result.items[index];
+        item.error = removeLocalEntry(item.source, activeProbe, true);
+        preflightFailed = preflightFailed || !item.error.isEmpty();
+    }
+    if (preflightFailed) {
+        for (auto& item : result.items) {
+            if (item.error.isEmpty()) {
+                item.error = QObject::tr(
+                    "No local entry was deleted because the selection failed safety checks.");
+            }
+        }
+        return result;
+    }
+    for (auto& item : result.items) {
+        const QString error = removeLocalEntry(item.source, activeProbe, false);
+        item = operationItemResult(item.source, {}, error.isEmpty(), error);
     }
     return result;
+}
+
+detail::RemovalBoundaryProbe detail::linuxRemovalBoundaryProbe(const QByteArray& mountInfo)
+{
+    const LinuxMountTable table = parseLinuxMountTable(mountInfo);
+    QSet<QString> mountPoints;
+    for (const LinuxMountInfo& mount : table.mounts) {
+        mountPoints.insert(mount.rootPath);
+    }
+    const bool reliable = table.complete && mountPoints.contains(QStringLiteral("/"));
+    return [mountPoints = std::move(mountPoints), reliable](const QString& path) {
+        if (!reliable) {
+            return RemovalBoundary::Unavailable;
+        }
+        const QString canonical = QFileInfo(path).canonicalFilePath();
+        if (canonical.isEmpty()) {
+            return RemovalBoundary::Unavailable;
+        }
+        return mountPoints.contains(canonical) ? RemovalBoundary::MountPoint
+                                              : RemovalBoundary::Clear;
+    };
 }
 
 bool localPathIsAtOrBelow(const QString& path, const QString& rootPath)

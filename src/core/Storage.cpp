@@ -1,5 +1,7 @@
 #include "remotefilemanager/core/Storage.hpp"
 
+#include "LinuxMountTable.hpp"
+
 #include "remotefilemanager/core/RemotePath.hpp"
 
 #include <QCryptographicHash>
@@ -24,7 +26,7 @@ QString meaningfulMetadata(const QString& value)
                                                                                 : trimmed;
 }
 
-QString decodeMountInfoField(const QByteArray& field)
+QString decodeMountInfoField(const QByteArray& field, bool* valid = nullptr)
 {
     QByteArray decoded;
     decoded.reserve(field.size());
@@ -43,9 +45,16 @@ QString decodeMountInfoField(const QByteArray& field)
                 continue;
             }
         }
+        if (valid != nullptr && field.at(index) == '\\') {
+            *valid = false;
+        }
         decoded.push_back(field.at(index));
     }
-    return QString::fromUtf8(decoded);
+    const QString text = QString::fromUtf8(decoded);
+    if (valid != nullptr && text.toUtf8() != decoded) {
+        *valid = false;
+    }
+    return text;
 }
 
 bool preferMountRepresentative(const LinuxMountInfo& candidate, const LinuxMountInfo& current)
@@ -388,19 +397,26 @@ StorageVolume makeStorageVolume(const LinuxMountInfo& mount, const StorageDevice
     return volume;
 }
 
-QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
+detail::LinuxMountTable detail::parseLinuxMountTable(const QByteArray& contents)
 {
     static const QRegularExpression deviceNumberPattern(QStringLiteral("^[0-9]+:[0-9]+$"));
-    QList<QList<LinuxMountInfo>> mountPointGroups;
-    QHash<QString, qsizetype> mountPointIndexes;
-    for (const QByteArray& line : contents.split('\n')) {
+    LinuxMountTable table;
+    table.complete = !contents.isEmpty() && contents.endsWith('\n');
+    QSet<quint64> mountIds;
+    QList<QByteArray> lines = contents.split('\n');
+    if (!lines.isEmpty() && lines.last().isEmpty()) {
+        lines.removeLast();
+    }
+    for (const QByteArray& line : std::as_const(lines)) {
         const qsizetype separator = line.indexOf(" - ");
         if (separator < 0) {
+            table.complete = false;
             continue;
         }
         const QList<QByteArray> left = splitMountInfoFields(line.first(separator));
         const QList<QByteArray> right = splitMountInfoFields(line.sliced(separator + 3));
         if (left.size() < 6 || right.size() < 3) {
+            table.complete = false;
             continue;
         }
         bool mountIdOk = false;
@@ -408,15 +424,25 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
         const quint64 mountId = left.at(0).toULongLong(&mountIdOk);
         const quint64 parentId = left.at(1).toULongLong(&parentIdOk);
         const QString deviceNumber = QString::fromLatin1(left.at(2));
-        const QString mountRoot = RemotePath::normalize(decodeMountInfoField(left.at(3)));
-        const QString rootPath = RemotePath::normalize(decodeMountInfoField(left.at(4)));
+        bool pathsValid = true;
+        const QString decodedRoot = decodeMountInfoField(left.at(3), &pathsValid);
+        const QString decodedPoint = decodeMountInfoField(left.at(4), &pathsValid);
+        const QString mountRoot = RemotePath::normalize(decodedRoot);
+        const QString rootPath = RemotePath::normalize(decodedPoint);
         const QByteArray fileSystemType = right.at(0);
         const QString device = decodeMountInfoField(right.at(1));
         if (!mountIdOk || !parentIdOk || mountId == 0 || parentId == 0 ||
             !deviceNumberPattern.match(deviceNumber).hasMatch() ||
             !mountRoot.startsWith(QChar{'/'}) || !rootPath.startsWith(QChar{'/'})) {
+            table.complete = false;
             continue;
         }
+        if (mountIds.contains(mountId) || mountId == parentId || line.contains('\0') ||
+            !pathsValid || mountRoot != decodedRoot || rootPath != decodedPoint) {
+            table.complete = false;
+            continue;
+        }
+        mountIds.insert(mountId);
         const QList<QByteArray> options = left.at(5).split(',');
         LinuxMountInfo mount{rootPath,
                              device,
@@ -427,7 +453,19 @@ QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
                              parentId,
                              mountRoot,
                              left.sliced(6)};
+        table.mounts.push_back(std::move(mount));
+    }
+    table.complete = table.complete && !table.mounts.isEmpty();
+    return table;
+}
 
+QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents)
+{
+    QList<QList<LinuxMountInfo>> mountPointGroups;
+    QHash<QString, qsizetype> mountPointIndexes;
+    detail::LinuxMountTable table = detail::parseLinuxMountTable(contents);
+    for (LinuxMountInfo& mount : table.mounts) {
+        const QString rootPath = mount.rootPath;
         const auto existing = mountPointIndexes.constFind(rootPath);
         if (existing == mountPointIndexes.cend()) {
             mountPointIndexes.insert(rootPath, mountPointGroups.size());
