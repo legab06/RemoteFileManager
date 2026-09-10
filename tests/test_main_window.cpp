@@ -13,6 +13,7 @@
 #include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
+#include "remotefilemanager/core/ServerCapabilitiesStore.hpp"
 #include "remotefilemanager/core/ServerProfileStore.hpp"
 #include "remotefilemanager/core/TransferCoordinator.hpp"
 
@@ -60,10 +61,13 @@
 #include <QTreeWidget>
 #include <QUrl>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <ranges>
 
 namespace
 {
@@ -476,6 +480,10 @@ class MainWindowTest final : public QObject
     void passwordPromptHandlesRejectionAndCancellation();
     void placesButtonTracksActiveAndSelectedProfiles();
     void addsEditsAndRemovesSavedServers();
+    void editsProfileWhenCapabilitiesCacheIsMalformed();
+    void removesProfileWhenCapabilitiesCacheUsesUnknownVersion();
+    void keepsServerCapabilitiesIsolatedAndReplacesSnapshots();
+    void restoresLastKnownCapabilitiesAndTracksCurrentDetection();
     void savesManualServerOnlyAfterSuccessAndAvoidsDuplicates();
     void disconnectActionFollowsSessionLifecycle();
     void coalescesConnectionErrorsFromOneDisconnect();
@@ -2225,6 +2233,15 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     QCOMPARE(passwordOnlySaved.constFirst().authenticationMode,
              rfm::core::AuthenticationMode::PasswordOnly);
     QVERIFY(passwordOnlySaved.constFirst().privateKeyPath.isEmpty());
+    const rfm::core::ServerCapabilitiesStore capabilitiesStore(temporary.path());
+    const auto detectedCapabilities = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc(), 3);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleServerCapabilitiesDetected", Qt::DirectConnection,
+        Q_ARG(rfm::core::ConnectionProfile, passwordOnlySaved.constFirst()),
+        Q_ARG(rfm::core::ServerCapabilities, detectedCapabilities)));
+    QCOMPARE(capabilitiesStore.load(&error).size(), 1);
+    QVERIFY(error.isEmpty());
 
     auto* const edit = qobject_cast<QToolButton*>(list->itemWidget(serverProfileItem(list, 0), 1));
     QVERIFY(edit != nullptr);
@@ -2264,6 +2281,14 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
     QCOMPARE(saved.constFirst().privateKeyPath, QStringLiteral("~/.ssh/rfm_windows_server"));
     QCOMPARE(saved.constFirst().authenticationMode, rfm::core::AuthenticationMode::KeyOrAgent);
     QVERIFY(saved.constFirst().allowPasswordAuthentication);
+    QVERIFY(capabilitiesStore.load(&error).isEmpty());
+    QVERIFY(error.isEmpty());
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, saved.constFirst()),
+                                      Q_ARG(rfm::core::ServerCapabilities, detectedCapabilities)));
+    QCOMPARE(capabilitiesStore.load(&error).size(), 1);
+    QVERIFY(error.isEmpty());
 
     window.show();
     QTest::qWait(1);
@@ -2288,8 +2313,296 @@ void MainWindowTest::addsEditsAndRemovesSavedServers()
                                       Q_ARG(QPoint, contextPosition)));
     QCOMPARE(store.load(&error).size(), 0);
     QVERIFY(error.isEmpty());
+    QVERIFY(capabilitiesStore.load(&error).isEmpty());
+    QVERIFY(error.isEmpty());
     QCOMPARE(homeList->count(), 1);
     QCOMPARE(homeList->item(0)->text(), QStringLiteral("No saved servers yet"));
+}
+
+void MainWindowTest::editsProfileWhenCapabilitiesCacheIsMalformed()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ConnectionProfile profile{
+        QStringLiteral("Original server"), QStringLiteral("original.example.test"),
+        QStringLiteral("alice"), 22, QStringLiteral("profile-a")};
+    const rfm::core::ServerProfileStore profileStore(temporary.path());
+    QString error;
+    QVERIFY2(profileStore.save({profile}, &error), qPrintable(error));
+    const rfm::core::ServerCapabilitiesStore capabilitiesStore(temporary.path());
+    const QByteArray malformedContents = QByteArrayLiteral("{not-json");
+    QFile cacheFile(capabilitiesStore.filePath());
+    QVERIFY(cacheFile.open(QIODevice::WriteOnly));
+    QCOMPARE(cacheFile.write(malformedContents), malformedContents.size());
+    cacheFile.close();
+
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    const auto capabilities = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc(), 3);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, profile),
+                                      Q_ARG(rfm::core::ServerCapabilities, capabilities)));
+
+    QTimer::singleShot(0, [] {
+        auto* const dialog =
+            qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        dialog->findChild<QLineEdit*>(QStringLiteral("serverHostEdit"))
+            ->setText(QStringLiteral("changed.example.test"));
+        dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Save)->click();
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "editServerProfile", Qt::DirectConnection,
+                                      Q_ARG(QString, profile.id)));
+
+    const QList saved = profileStore.load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(saved.size(), 1);
+    QCOMPARE(saved.constFirst().host, QStringLiteral("changed.example.test"));
+    QVERIFY(cacheFile.open(QIODevice::ReadOnly));
+    QCOMPARE(cacheFile.readAll(), malformedContents);
+    cacheFile.close();
+
+    QString capabilityStatus;
+    QTimer::singleShot(0, &window, [&] {
+        auto* const dialog =
+            qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        capabilityStatus =
+            dialog->findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text();
+        dialog->reject();
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "editServerProfile", Qt::DirectConnection,
+                                      Q_ARG(QString, profile.id)));
+    QCOMPARE(capabilityStatus, QStringLiteral("Not detected"));
+}
+
+void MainWindowTest::removesProfileWhenCapabilitiesCacheUsesUnknownVersion()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ConnectionProfile profile{
+        QStringLiteral("Server to remove"), QStringLiteral("remove.example.test"),
+        QStringLiteral("alice"), 22, QStringLiteral("profile-a")};
+    const rfm::core::ServerProfileStore profileStore(temporary.path());
+    QString error;
+    QVERIFY2(profileStore.save({profile}, &error), qPrintable(error));
+    const rfm::core::ServerCapabilitiesStore capabilitiesStore(temporary.path());
+    const QByteArray unknownVersionContents = QByteArrayLiteral(R"({"version":99,"snapshots":[]})");
+    QFile cacheFile(capabilitiesStore.filePath());
+    QVERIFY(cacheFile.open(QIODevice::WriteOnly));
+    QCOMPARE(cacheFile.write(unknownVersionContents), unknownVersionContents.size());
+    cacheFile.close();
+
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    auto* const list = window.findChild<QTreeWidget*>(QStringLiteral("navigationTree"));
+    QVERIFY(list != nullptr);
+    window.show();
+    QTest::qWait(1);
+    selectServerProfile(list, 0);
+    list->scrollToItem(serverProfileItem(list, 0));
+    QTimer::singleShot(0, [] {
+        auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        QVERIFY(menu != nullptr);
+        QAction* removeAction = nullptr;
+        for (QAction* action : menu->actions()) {
+            if (action->text() == QStringLiteral("Remove server")) {
+                removeAction = action;
+                break;
+            }
+        }
+        QVERIFY(removeAction != nullptr);
+        acceptNextQuestion();
+        removeAction->trigger();
+    });
+    const QPoint contextPosition = list->visualItemRect(serverProfileItem(list, 0)).center();
+    QVERIFY(QMetaObject::invokeMethod(list, "customContextMenuRequested", Qt::DirectConnection,
+                                      Q_ARG(QPoint, contextPosition)));
+
+    QVERIFY(profileStore.load(&error).isEmpty());
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QVERIFY(cacheFile.open(QIODevice::ReadOnly));
+    QCOMPARE(cacheFile.readAll(), unknownVersionContents);
+}
+
+void MainWindowTest::keepsServerCapabilitiesIsolatedAndReplacesSnapshots()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ConnectionProfile profileA{
+        QStringLiteral("Server A"), QStringLiteral("a.example.test"), QStringLiteral("alice"), 22,
+        QStringLiteral("profile-a")};
+    const rfm::core::ConnectionProfile profileB{
+        QStringLiteral("Server B"), QStringLiteral("b.example.test"), QStringLiteral("bob"), 2222,
+        QStringLiteral("profile-b")};
+    rfm::core::ServerProfileStore store(temporary.path());
+    QString error;
+    QVERIFY(store.upsert(profileA, &error));
+    QVERIFY(error.isEmpty());
+    QVERIFY(store.upsert(profileB, &error));
+    QVERIFY(error.isEmpty());
+
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    const auto capabilitiesA = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc(), 3);
+    const auto capabilitiesB = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("fsync@openssh.com"), QStringLiteral("1")}},
+        QDateTime::currentDateTimeUtc(), 3);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, profileA),
+                                      Q_ARG(rfm::core::ServerCapabilities, capabilitiesA)));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, profileB),
+                                      Q_ARG(rfm::core::ServerCapabilities, capabilitiesB)));
+
+    const auto verifyProfile = [&window](const QString& profileId, const QString& expectedStatus,
+                                         const QString& expectedVersion,
+                                         const QString& expectedExtension) {
+        bool inspected = false;
+        QString actualStatus;
+        QString actualVersion;
+        QString actualExtension;
+        QTimer::singleShot(0, &window, [&] {
+            auto* const dialog =
+                qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog != nullptr);
+            actualStatus =
+                dialog->findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text();
+            actualVersion =
+                dialog->findChild<QLabel*>(QStringLiteral("sftpProtocolVersionLabel"))->text();
+            auto* const extensions =
+                dialog->findChild<QTableWidget*>(QStringLiteral("sftpExtensionsTable"));
+            QVERIFY(extensions != nullptr);
+            if (extensions->rowCount() == 1 && extensions->item(0, 0) != nullptr) {
+                actualExtension = extensions->item(0, 0)->text();
+            }
+            inspected = true;
+            dialog->reject();
+        });
+        QVERIFY(QMetaObject::invokeMethod(&window, "editServerProfile", Qt::DirectConnection,
+                                          Q_ARG(QString, profileId)));
+        QVERIFY(inspected);
+        QCOMPARE(actualStatus, expectedStatus);
+        QCOMPARE(actualVersion, expectedVersion);
+        QCOMPARE(actualExtension, expectedExtension);
+    };
+
+    verifyProfile(profileA.id, QStringLiteral("Supported"), QStringLiteral("3"),
+                  QStringLiteral("copy-data"));
+    verifyProfile(profileB.id, QStringLiteral("Not supported"), QStringLiteral("3"),
+                  QStringLiteral("fsync@openssh.com"));
+
+    const auto reconnectedA = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("2")}}, QDateTime::currentDateTimeUtc(), 4);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, profileA),
+                                      Q_ARG(rfm::core::ServerCapabilities, reconnectedA)));
+    verifyProfile(profileA.id, QStringLiteral("Not supported"), QStringLiteral("4"),
+                  QStringLiteral("copy-data"));
+    verifyProfile(profileB.id, QStringLiteral("Not supported"), QStringLiteral("3"),
+                  QStringLiteral("fsync@openssh.com"));
+}
+
+void MainWindowTest::restoresLastKnownCapabilitiesAndTracksCurrentDetection()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ConnectionProfile profileA{
+        QStringLiteral("Server A"), QStringLiteral("a.example.test"), QStringLiteral("alice"), 22,
+        QStringLiteral("profile-a")};
+    const rfm::core::ConnectionProfile profileB{
+        QStringLiteral("Server B"), QStringLiteral("b.example.test"), QStringLiteral("bob"), 2222,
+        QStringLiteral("profile-b")};
+    rfm::core::ServerProfileStore profileStore(temporary.path());
+    QString error;
+    QVERIFY2(profileStore.save({profileA, profileB}, &error), qPrintable(error));
+
+    const auto lastKnown =
+        rfm::core::detectedServerCapabilities({{QStringLiteral("copy-data"), QStringLiteral("1")}},
+                                              QDateTime::currentDateTimeUtc().addSecs(-60), 3);
+    const auto ignored = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("future-extension@example.test"), QStringLiteral("1")}},
+        QDateTime::currentDateTimeUtc().addSecs(-120), 3);
+    const rfm::core::ServerCapabilitiesStore capabilitiesStore(temporary.path());
+    QVERIFY2(capabilitiesStore.save(
+                 {{profileA.id, profileA.host, profileA.username, profileA.port, lastKnown},
+                  {QStringLiteral("orphan"), QStringLiteral("orphan.example.test"),
+                   QStringLiteral("nobody"), 22, ignored},
+                  {profileB.id, QStringLiteral("other.example.test"), profileB.username,
+                   profileB.port, ignored}},
+                 &error),
+             qPrintable(error));
+
+    const auto verifyProfile = [](rfm::app::MainWindow& window, const QString& profileId,
+                                  const QString& expectedContext, const QString& expectedStatus,
+                                  const QString& expectedVersion) {
+        bool inspected = false;
+        QString actualContext;
+        QString actualStatus;
+        QString actualVersion;
+        QTimer::singleShot(0, &window, [&] {
+            auto* const dialog =
+                qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog != nullptr);
+            actualContext =
+                dialog->findChild<QLabel*>(QStringLiteral("capabilitiesContextLabel"))->text();
+            actualStatus =
+                dialog->findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text();
+            actualVersion =
+                dialog->findChild<QLabel*>(QStringLiteral("sftpProtocolVersionLabel"))->text();
+            inspected = true;
+            dialog->reject();
+        });
+        QVERIFY(QMetaObject::invokeMethod(&window, "editServerProfile", Qt::DirectConnection,
+                                          Q_ARG(QString, profileId)));
+        QVERIFY(inspected);
+        QVERIFY(actualContext.startsWith(expectedContext));
+        QCOMPARE(actualStatus, expectedStatus);
+        QCOMPARE(actualVersion, expectedVersion);
+    };
+
+    const auto current = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("2")}}, QDateTime::currentDateTimeUtc(), 4);
+    {
+        rfm::app::MainWindow window(nullptr, {}, temporary.path());
+        verifyProfile(window, profileA.id, QStringLiteral("Last known"),
+                      QStringLiteral("Supported"), QStringLiteral("3"));
+        verifyProfile(window, profileB.id, QStringLiteral("Not detected"),
+                      QStringLiteral("Not detected"), QStringLiteral("Not detected"));
+
+        QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+        QVERIFY(QMetaObject::invokeMethod(&window, "connectToServerProfile", Qt::DirectConnection,
+                                          Q_ARG(QString, profileA.id)));
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                          Qt::DirectConnection,
+                                          Q_ARG(rfm::core::ConnectionProfile, profileA),
+                                          Q_ARG(rfm::core::ServerCapabilities, current)));
+        QVERIFY(QMetaObject::invokeMethod(
+            &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+            Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+        verifyProfile(window, profileA.id, QStringLiteral("Currently detected"),
+                      QStringLiteral("Not supported"), QStringLiteral("4"));
+
+        QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+        verifyProfile(window, profileA.id, QStringLiteral("Last known"),
+                      QStringLiteral("Not supported"), QStringLiteral("4"));
+    }
+
+    const QList persisted = capabilitiesStore.load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    const auto updated = std::ranges::find_if(
+        persisted, [&profileA](const auto& snapshot) { return snapshot.profileId == profileA.id; });
+    QVERIFY(updated != persisted.cend());
+    QCOMPARE(updated->capabilities.sftpProtocolVersion, std::optional<int>{4});
+
+    rfm::app::MainWindow restartedWindow(nullptr, {}, temporary.path());
+    verifyProfile(restartedWindow, profileA.id, QStringLiteral("Last known"),
+                  QStringLiteral("Not supported"), QStringLiteral("4"));
+    verifyProfile(restartedWindow, profileB.id, QStringLiteral("Not detected"),
+                  QStringLiteral("Not detected"), QStringLiteral("Not detected"));
 }
 
 void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
@@ -2299,6 +2612,7 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     rfm::app::MainWindow window(nullptr, {}, temporary.path());
     QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
     const rfm::core::ServerProfileStore store(temporary.path());
+    const rfm::core::ServerCapabilitiesStore capabilitiesStore(temporary.path());
     QString error;
     const QString ephemeralSecret(18, QChar{'x'});
 
@@ -2339,6 +2653,15 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     authentication->findChild<QLineEdit*>(QStringLiteral("authenticationPasswordEdit"))
         ->setText(ephemeralSecret);
     authentication->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    const rfm::core::ConnectionProfile temporaryProfile = dialog->profile();
+    const auto temporaryCapabilities = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc(), 3);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, temporaryProfile),
+                                      Q_ARG(rfm::core::ServerCapabilities, temporaryCapabilities)));
+    QVERIFY(capabilitiesStore.load(&error).isEmpty());
+    QVERIFY(error.isEmpty());
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
@@ -2349,12 +2672,29 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QCOMPARE(saved.constFirst().host, QStringLiteral("saved.example.test"));
     QVERIFY(saved.constFirst().allowPasswordAuthentication);
     QCOMPARE(saved.constFirst().privateKeyPath, QStringLiteral("~/.ssh/saved_server"));
+    QCOMPARE(capabilitiesStore.load(&error).size(), 1);
+    QVERIFY(error.isEmpty());
     QFile serialized(store.filePath());
     QVERIFY(serialized.open(QIODevice::ReadOnly));
     QVERIFY(!serialized.readAll().contains(ephemeralSecret.toUtf8()));
 
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
     QTRY_VERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
+    bool promotedSnapshotFound = false;
+    QString promotedStatus;
+    QTimer::singleShot(0, &window, [&] {
+        auto* const properties =
+            qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+        QVERIFY(properties != nullptr);
+        promotedStatus =
+            properties->findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text();
+        promotedSnapshotFound = true;
+        properties->reject();
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "editServerProfile", Qt::DirectConnection,
+                                      Q_ARG(QString, saved.constFirst().id)));
+    QVERIFY(promotedSnapshotFound);
+    QCOMPARE(promotedStatus, QStringLiteral("Supported"));
     dialog = openManualConnection();
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(
@@ -2377,12 +2717,19 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
         ->setText(QStringLiteral("guest"));
     QVERIFY(!dialog->findChild<QCheckBox*>(QStringLiteral("saveServerCheck"))->isChecked());
     dialog->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok)->click();
+    const rfm::core::ConnectionProfile ephemeralProfile = dialog->profile();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, ephemeralProfile),
+                                      Q_ARG(rfm::core::ServerCapabilities, temporaryCapabilities)));
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     saved = store.load(&error);
     QVERIFY(error.isEmpty());
     QCOMPARE(saved.size(), 1);
+    QCOMPARE(capabilitiesStore.load(&error).size(), 1);
+    QVERIFY(error.isEmpty());
 }
 
 void MainWindowTest::disconnectActionFollowsSessionLifecycle()

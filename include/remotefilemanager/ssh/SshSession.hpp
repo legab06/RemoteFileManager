@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
 #include "remotefilemanager/core/SecurePassword.hpp"
+#include "remotefilemanager/core/ServerCapabilities.hpp"
 #include "remotefilemanager/core/Storage.hpp"
 #include "remotefilemanager/core/TransferTypes.hpp"
 #include "remotefilemanager/core/VolumeService.hpp"
@@ -67,6 +68,8 @@ class SshSession final : public QObject
     void hostKeyConfirmationRequired(QString host, QString fingerprint);
     void passwordAuthenticationRequired(rfm::ssh::PasswordAuthenticationReason reason);
     void passwordAuthenticationRejected(QString message);
+    void serverCapabilitiesDetected(rfm::core::ConnectionProfile profile,
+                                    rfm::core::ServerCapabilities capabilities);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);

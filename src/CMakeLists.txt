@@ -16,6 +16,8 @@ add_library(
     core/RemoteMoveSafety.cpp
     core/RemotePath.cpp
     core/SecurePassword.cpp
+    core/ServerCapabilities.cpp
+    core/ServerCapabilitiesStore.cpp
     core/ServerProfileStore.cpp
     core/Storage.cpp
     core/ServerSideCopyJob.cpp
@@ -39,6 +41,8 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/RemoteMoveSafety.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/Storage.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/SecurePassword.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/ServerCapabilities.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/ServerCapabilitiesStore.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/TransferCoordinator.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp

@@ -110,6 +110,23 @@ rfm::core::RemoteBackendError backendError(int sftpError)
     }
 }
 
+QList<rfm::core::SftpExtensionCapability> announcedSftpExtensions(sftp_session sftp)
+{
+    QList<rfm::core::SftpExtensionCapability> extensions;
+    const unsigned int count = sftp_extensions_get_count(sftp);
+    extensions.reserve(static_cast<qsizetype>(count));
+    for (unsigned int index = 0; index < count; ++index) {
+        const char* const name = sftp_extensions_get_name(sftp, index);
+        if (name == nullptr) {
+            continue;
+        }
+        const char* const data = sftp_extensions_get_data(sftp, index);
+        extensions.push_back(
+            {QString::fromUtf8(name), data == nullptr ? QString{} : QString::fromUtf8(data)});
+    }
+    return extensions;
+}
+
 bool isFatalSftpError(int sftpError)
 {
     return sftpError == SSH_FX_NO_CONNECTION || sftpError == SSH_FX_CONNECTION_LOST;
@@ -1790,13 +1807,18 @@ class SshSession::Impl final
     quint64 nextAuthenticationToken{0};
 };
 
-SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_unique<Impl>()) {}
+SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_unique<Impl>())
+{
+    qRegisterMetaType<rfm::core::ServerCapabilities>();
+}
 
 SshSession::SshSession(TransferBackendFactory transferBackendFactory,
                        std::function<bool()> transferConnectionAvailable, QObject* parent)
     : QObject(parent), m_impl(std::make_unique<Impl>(std::move(transferBackendFactory),
                                                      std::move(transferConnectionAvailable)))
-{}
+{
+    qRegisterMetaType<rfm::core::ServerCapabilities>();
+}
 
 SshSession::~SshSession()
 {
@@ -2067,6 +2089,12 @@ void SshSession::openSftp()
                  .arg(QString::fromUtf8(ssh_get_error(m_impl->session))));
         return;
     }
+
+    const int sftpProtocolVersion = sftp_server_version(m_impl->sftp);
+    const rfm::core::ServerCapabilities capabilities = rfm::core::detectedServerCapabilities(
+        announcedSftpExtensions(m_impl->sftp), QDateTime::currentDateTimeUtc(),
+        sftpProtocolVersion < 0 ? std::nullopt : std::optional<int>{sftpProtocolVersion});
+    emit serverCapabilitiesDetected(m_impl->profile, capabilities);
 
     char* const canonicalHome = sftp_canonicalize_path(m_impl->sftp, ".");
     if (canonicalHome == nullptr) {

@@ -13,6 +13,7 @@
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationHistoryStore.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
+#include "remotefilemanager/core/ServerCapabilitiesStore.hpp"
 #include "remotefilemanager/core/ServerProfileStore.hpp"
 #include "remotefilemanager/core/TransferCoordinator.hpp"
 #include "remotefilemanager/ssh/LibsshRuntime.hpp"
@@ -99,6 +100,26 @@ bool profilesHaveSameConnectionSettings(const rfm::core::ConnectionProfile& firs
            first.authenticationMode == second.authenticationMode;
 }
 
+QString serverCapabilitiesIdentity(const rfm::core::ConnectionProfile& profile)
+{
+    const QString profileId = profile.id.trimmed();
+    if (!profileId.isEmpty()) {
+        return QStringLiteral("profile:%1").arg(profileId);
+    }
+    return QStringLiteral("connection:%1@%2:%3")
+        .arg(QString::fromLatin1(QUrl::toPercentEncoding(profile.username.trimmed())),
+             QString::fromLatin1(QUrl::toPercentEncoding(profile.host.trimmed().toCaseFolded())),
+             QString::number(profile.port));
+}
+
+bool persistedCapabilitiesMatchProfile(const rfm::core::PersistedServerCapabilities& snapshot,
+                                       const rfm::core::ConnectionProfile& profile)
+{
+    return snapshot.profileId == profile.id &&
+           snapshot.host.compare(profile.host.trimmed(), Qt::CaseInsensitive) == 0 &&
+           snapshot.username == profile.username.trimmed() && snapshot.port == profile.port;
+}
+
 QStringList knownMountPointsForDevice(const QList<rfm::core::StorageVolume>& volumes,
                                       const QString& device)
 {
@@ -123,8 +144,9 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     : QMainWindow(parent),
       m_operationHistoryStore(
           std::make_unique<rfm::core::OperationHistoryStore>(std::move(operationHistoryDirectory))),
-      m_serverProfileStore(
-          std::make_unique<rfm::core::ServerProfileStore>(std::move(serverProfileDirectory)))
+      m_serverProfileStore(std::make_unique<rfm::core::ServerProfileStore>(serverProfileDirectory)),
+      m_serverCapabilitiesStore(
+          std::make_unique<rfm::core::ServerCapabilitiesStore>(std::move(serverProfileDirectory)))
 {
     setObjectName(QStringLiteral("mainWindow"));
     m_applicationInstanceId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -138,6 +160,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     createNavigationBar();
     createCentralPages();
     createPlacesDock();
+    loadServerCapabilities();
     createOperationDock();
     createMenus();
 
@@ -192,6 +215,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
     });
 
     qRegisterMetaType<rfm::core::ConnectionProfile>();
+    qRegisterMetaType<rfm::core::ServerCapabilities>();
     qRegisterMetaType<rfm::ssh::PasswordAuthenticationReason>();
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
@@ -333,6 +357,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::showPasswordAuthenticationForReason);
     connect(m_sshSession, &rfm::ssh::SshSession::passwordAuthenticationRejected, this,
             &MainWindow::showPasswordAuthenticationError);
+    connect(m_sshSession, &rfm::ssh::SshSession::serverCapabilitiesDetected, this,
+            &MainWindow::handleServerCapabilitiesDetected);
     connect(m_sshSession, &rfm::ssh::SshSession::connected, this, &MainWindow::handleConnected);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListed, this,
             &MainWindow::handleDirectoryListed);
@@ -1104,6 +1130,46 @@ void MainWindow::loadServerProfiles()
     }
 }
 
+void MainWindow::loadServerCapabilities()
+{
+    QString error;
+    const QList snapshots = m_serverCapabilitiesStore->load(&error);
+    m_serverCapabilities.clear();
+    for (const rfm::core::PersistedServerCapabilities& snapshot : snapshots) {
+        const auto profile = std::ranges::find_if(
+            m_serverProfiles, [&snapshot](const rfm::core::ConnectionProfile& candidate) {
+                return persistedCapabilitiesMatchProfile(snapshot, candidate);
+            });
+        if (profile != m_serverProfiles.cend()) {
+            m_serverCapabilities.insert(serverCapabilitiesIdentity(*profile),
+                                        {*profile, snapshot.capabilities, false});
+        }
+    }
+    if (!error.isEmpty()) {
+        statusBar()->showMessage(tr("Unable to load server capabilities: %1").arg(error), 10000);
+    }
+}
+
+void MainWindow::persistServerCapabilities(const rfm::core::ConnectionProfile& profile,
+                                           const rfm::core::ServerCapabilities& capabilities)
+{
+    const auto savedProfile = std::ranges::find_if(
+        m_serverProfiles, [&profile](const rfm::core::ConnectionProfile& candidate) {
+            return candidate.id == profile.id &&
+                   profilesHaveSameConnectionSettings(candidate, profile);
+        });
+    if (savedProfile == m_serverProfiles.cend() || !savedProfile->isValidSavedProfile()) {
+        return;
+    }
+    const rfm::core::PersistedServerCapabilities snapshot{
+        savedProfile->id, savedProfile->host.trimmed(), savedProfile->username.trimmed(),
+        savedProfile->port, capabilities};
+    QString error;
+    if (!m_serverCapabilitiesStore->upsert(snapshot, &error)) {
+        statusBar()->showMessage(tr("Unable to save server capabilities: %1").arg(error), 10000);
+    }
+}
+
 void MainWindow::refreshServerProfileViews()
 {
     if (m_homePage != nullptr) {
@@ -1160,15 +1226,61 @@ void MainWindow::editServerProfile(const QString& id)
     }
     ServerProfileDialog dialog(this);
     dialog.setProfile(*selected);
+    const auto capabilities = m_serverCapabilities.constFind(serverCapabilitiesIdentity(*selected));
+    if (capabilities != m_serverCapabilities.cend() &&
+        profilesHaveSameConnectionSettings(capabilities->profile, *selected)) {
+        const bool currentlyConnected =
+            capabilities->detectedThisRun && m_connected &&
+            profilesHaveSameConnectionSettings(m_activeProfile, *selected);
+        dialog.setServerCapabilities(capabilities->capabilities, currentlyConnected);
+    }
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
+    const rfm::core::ConnectionProfile editedProfile = dialog.profile();
+    const bool connectionSettingsChanged =
+        !profilesHaveSameConnectionSettings(*selected, editedProfile);
     QString error;
-    if (!m_serverProfileStore->upsert(dialog.profile(), &error)) {
+    if (connectionSettingsChanged) {
+        m_serverCapabilities.remove(serverCapabilitiesIdentity(*selected));
+        QString cacheError;
+        if (!m_serverCapabilitiesStore->remove(selected->id, &cacheError)) {
+            statusBar()->showMessage(
+                tr("Unable to remove saved server capabilities: %1").arg(cacheError), 10000);
+        }
+    }
+    if (!m_serverProfileStore->upsert(editedProfile, &error)) {
         QMessageBox::warning(this, tr("Unable to save server"), error);
         return;
     }
     loadServerProfiles();
+}
+
+void MainWindow::handleServerCapabilitiesDetected(rfm::core::ConnectionProfile profile,
+                                                  rfm::core::ServerCapabilities capabilities)
+{
+    if (!profile.isValid() ||
+        capabilities.detectionState != rfm::core::CapabilityDetectionState::Detected) {
+        return;
+    }
+    const QString identity = serverCapabilitiesIdentity(profile);
+    m_serverCapabilities.insert(identity, {profile, capabilities, true});
+    persistServerCapabilities(profile, capabilities);
+}
+
+void MainWindow::associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,
+                                             const rfm::core::ConnectionProfile& savedProfile)
+{
+    const QString previousIdentity = serverCapabilitiesIdentity(previousProfile);
+    auto previous = m_serverCapabilities.find(previousIdentity);
+    if (previous == m_serverCapabilities.end()) {
+        return;
+    }
+    ServerCapabilitiesRecord record = std::move(previous.value());
+    m_serverCapabilities.erase(previous);
+    record.profile = savedProfile;
+    persistServerCapabilities(savedProfile, record.capabilities);
+    m_serverCapabilities.insert(serverCapabilitiesIdentity(savedProfile), std::move(record));
 }
 
 void MainWindow::removeSelectedServerProfile()
@@ -1188,6 +1300,12 @@ void MainWindow::removeSelectedServerProfile()
     if (!m_serverProfileStore->remove(selected.id, &error)) {
         QMessageBox::warning(this, tr("Unable to remove server"), error);
         return;
+    }
+    m_serverCapabilities.remove(serverCapabilitiesIdentity(selected));
+    QString cacheError;
+    if (!m_serverCapabilitiesStore->remove(selected.id, &cacheError)) {
+        statusBar()->showMessage(
+            tr("Unable to remove saved server capabilities: %1").arg(cacheError), 10000);
     }
     loadServerProfiles();
 }
@@ -1499,10 +1617,12 @@ QString MainWindow::saveConnectedProfileIfRequested()
         !m_activeProfile.id.trimmed().isEmpty()) {
         return {};
     }
+    const rfm::core::ConnectionProfile temporaryProfile = m_activeProfile;
     for (const rfm::core::ConnectionProfile& existing : std::as_const(m_serverProfiles)) {
         if (profilesHaveSameConnectionSettings(existing, m_activeProfile)) {
             m_activeProfile.id = existing.id;
             m_activeProfile.displayName = existing.displayName;
+            associateServerCapabilities(temporaryProfile, m_activeProfile);
             return {};
         }
     }
@@ -1515,6 +1635,7 @@ QString MainWindow::saveConnectedProfileIfRequested()
     }
     m_activeProfile = profile;
     loadServerProfiles();
+    associateServerCapabilities(temporaryProfile, m_activeProfile);
     return {};
 }
 

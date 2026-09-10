@@ -11,6 +11,44 @@
 
 La règle principale est que l’interface ne doit jamais manipuler directement `ssh_session`, `sftp_session` ou un autre type de libssh. Elle déclenche des intentions et reçoit des résultats métier.
 
+Les capacités SFTP annoncées par le serveur sont représentées par un snapshot
+`ServerCapabilities` du cœur, indépendant de libssh et distinct de
+`ConnectionProfile`. Après chaque `sftp_init()` réussi, `SshSession` énumère les
+extensions et relève la version du protocole avec l'API publique libssh, puis publie
+le snapshot avec le profil de la connexion courante. L'état dérivé `copy-data` v1
+n'est `Supported` que pour une extension annoncée dont le nom vaut `copy-data` et la
+donnée vaut `1`; il reste `Unknown` avant détection et devient `Unsupported` après
+une détection sans cette paire exacte. Cette donnée runtime ne modifie pas encore la
+stratégie Remote Copy.
+
+`MainWindow` conserve le dernier snapshot en mémoire par identité de profil. Un profil
+enregistré utilise son identifiant stable ; une connexion temporaire utilise l'identité
+utilisateur/hôte/port, puis son snapshot est réassocié à l'identifiant créé si le profil
+est enregistré après connexion. Les Properties d'un serveur transmettent uniquement le
+snapshot correspondant à `ServerProfileDialog`. Son onglet `Capabilities` en lecture
+seule distingue explicitement `Not detected`, `Last known` et `Currently detected`. Une
+déconnexion conserve le snapshot courant, mais celui-ci est alors présenté comme dernier
+résultat connu.
+
+Les snapshots des seuls profils enregistrés sont persistés séparément des profils dans
+`server-capabilities.json`. Le format JSON versionné v1 contient l'identifiant du profil,
+une identité serveur non sensible (hôte, utilisateur et port), l'horodatage de détection,
+la version SFTP optionnelle et la liste nom/donnée des extensions. Il ne contient aucun
+paramètre d'authentification. `copy-data` est recalculé depuis cette liste afin d'éviter
+deux sources de vérité. Le fichier est écrit atomiquement par `QSaveFile`; les fichiers
+absents sont acceptés, les versions inconnues ou documents malformés sont signalés, et
+les entrées partielles sont ignorées. Au chargement, les entrées orphelines ou dont
+l'identité serveur ne correspond plus au profil sont ignorées. Une modification des
+paramètres de connexion invalide le snapshot avant l'enregistrement du profil et une
+suppression de profil supprime également son snapshot.
+
+Un snapshot relu au démarrage est toujours une information `Last known`, jamais une
+preuve de la connexion courante. Toute future connexion exécute à nouveau la découverte
+réelle depuis le protocole SFTP et remplace ensuite le snapshot persistant. La découverte
+reste fondée sur les capabilities annoncées par SFTP, et non sur le système d'exploitation
+supposé du serveur. `copy-data` est une extension SFTP ; ni sa présence ni les snapshots
+persistés ne déterminent encore la stratégie Remote Copy dans cette branche.
+
 ## Flux actuel
 
 ```mermaid

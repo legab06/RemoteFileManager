@@ -3,6 +3,16 @@ target_link_libraries(rfm_core_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_core_tests)
 add_test(NAME unit.connection_profile COMMAND rfm_core_tests)
 
+qt_add_executable(rfm_server_capabilities_tests test_server_capabilities.cpp)
+target_link_libraries(rfm_server_capabilities_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_server_capabilities_tests)
+add_test(NAME unit.server_capabilities COMMAND rfm_server_capabilities_tests)
+
+qt_add_executable(rfm_server_capabilities_store_tests test_server_capabilities_store.cpp)
+target_link_libraries(rfm_server_capabilities_store_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_server_capabilities_store_tests)
+add_test(NAME unit.server_capabilities_store COMMAND rfm_server_capabilities_store_tests)
+
 qt_add_executable(rfm_server_profile_store_tests test_server_profile_store.cpp)
 target_link_libraries(rfm_server_profile_store_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_server_profile_store_tests)
@@ -102,6 +112,12 @@ target_link_libraries(rfm_connection_dialog_tests PRIVATE Qt6::Test RemoteFileMa
 rfm_set_project_warnings(rfm_connection_dialog_tests)
 add_test(NAME ui.connection_dialog COMMAND rfm_connection_dialog_tests)
 set_tests_properties(ui.connection_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(rfm_server_profile_dialog_tests test_server_profile_dialog.cpp)
+target_link_libraries(rfm_server_profile_dialog_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
+rfm_set_project_warnings(rfm_server_profile_dialog_tests)
+add_test(NAME ui.server_profile_dialog COMMAND rfm_server_profile_dialog_tests)
+set_tests_properties(ui.server_profile_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 qt_add_executable(rfm_password_authentication_dialog_tests test_password_authentication_dialog.cpp)
 target_link_libraries(rfm_password_authentication_dialog_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
