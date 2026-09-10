@@ -25,6 +25,7 @@ add_library(
     core/TransferQueue.cpp
     core/VolumeService.cpp
     ssh/LibsshRuntime.cpp
+    ssh/RemoteDelete.hpp
     ssh/RemoteCopyCommand.cpp
     ssh/RemoteStorageScanner.cpp
     ssh/RemoteVolumeService.cpp

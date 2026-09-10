@@ -6,6 +6,8 @@
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
+#include "../src/ssh/RemoteDelete.hpp"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -529,6 +531,10 @@ class RemoteFileOperationsTest final : public QObject
     void doesNotFallbackForAnUnqualifiedRenameFailure();
     void classifiesRemoteFilesystemIdsConservatively();
     void removesFileAndRecursiveTreeWithGuards();
+    void refusesSelectedAndNestedRemoteMountPoints();
+    void preflightsAllRemoteSourcesBeforeRemoval();
+    void detectsBindMountAndMalformedMountInfo();
+    void doesNotTraverseRemoteSymlinksAndRemovesOrdinaryTrees();
     void emitsWorkerOperationErrors();
     void treatsListingWithoutSessionAsFatal();
 };
@@ -1958,6 +1964,134 @@ void RemoteFileOperationsTest::removesFileAndRecursiveTreeWithGuards()
         false);
     QVERIFY(partial.items.at(0).success);
     QVERIFY(!partial.items.at(1).success);
+}
+
+void RemoteFileOperationsTest::refusesSelectedAndNestedRemoteMountPoints()
+{
+    FakeRemoteBackend selectedBackend;
+    selectedBackend.nodes.insert(QStringLiteral("/tree"), true);
+    selectedBackend.listings.insert(QStringLiteral("/tree"), {});
+    const auto selectedResult = rfm::ssh::detail::removeRemoteEntriesSafely(
+        selectedBackend, 12, {{QStringLiteral("/tree"), true}}, true, [](const QString& path) {
+            return path == QStringLiteral("/tree")
+                       ? rfm::core::RemoteMountPointState::MountPoint
+                       : rfm::core::RemoteMountPointState::NotMountPoint;
+        });
+    QVERIFY(!selectedResult.allSucceeded());
+    QVERIFY(selectedBackend.nodes.contains(QStringLiteral("/tree")));
+    QVERIFY(!selectedBackend.calls.contains(QStringLiteral("rmdir:/tree")));
+
+    FakeRemoteBackend nestedBackend;
+    nestedBackend.nodes.insert(QStringLiteral("/tree"), true);
+    nestedBackend.nodes.insert(QStringLiteral("/tree/normal.txt"), false);
+    nestedBackend.nodes.insert(QStringLiteral("/tree/nested"), true);
+    nestedBackend.nodes.insert(QStringLiteral("/tree/nested/protected.txt"), false);
+    nestedBackend.listings.insert(QStringLiteral("/tree"), {{QStringLiteral("normal.txt"), false},
+                                                            {QStringLiteral("nested"), true}});
+    nestedBackend.listings.insert(QStringLiteral("/tree/nested"),
+                                  {{QStringLiteral("protected.txt"), false}});
+    QStringList probed;
+    const auto nestedResult = rfm::ssh::detail::removeRemoteEntriesSafely(
+        nestedBackend, 13, {{QStringLiteral("/tree"), true}}, true, [&probed](const QString& path) {
+            probed.push_back(path);
+            return path == QStringLiteral("/tree/nested")
+                       ? rfm::core::RemoteMountPointState::MountPoint
+                       : rfm::core::RemoteMountPointState::NotMountPoint;
+        });
+    QVERIFY(!nestedResult.allSucceeded());
+    QVERIFY(nestedBackend.nodes.contains(QStringLiteral("/tree/normal.txt")));
+    QVERIFY(nestedBackend.nodes.contains(QStringLiteral("/tree/nested/protected.txt")));
+    QVERIFY(std::ranges::none_of(nestedBackend.calls, [](const QString& call) {
+        return call.startsWith(QStringLiteral("unlink:")) ||
+               call.startsWith(QStringLiteral("rmdir:"));
+    }));
+    QVERIFY(!probed.contains(QStringLiteral("/tree/nested/protected.txt")));
+}
+
+void RemoteFileOperationsTest::preflightsAllRemoteSourcesBeforeRemoval()
+{
+    FakeRemoteBackend backend;
+    backend.nodes.insert(QStringLiteral("/safe"), true);
+    backend.nodes.insert(QStringLiteral("/dangerous"), true);
+    backend.nodes.insert(QStringLiteral("/dangerous/mounted"), true);
+    backend.listings.insert(QStringLiteral("/safe"), {});
+    backend.listings.insert(QStringLiteral("/dangerous"), {{QStringLiteral("mounted"), true}});
+    backend.listings.insert(QStringLiteral("/dangerous/mounted"), {});
+
+    const auto result = rfm::ssh::detail::removeRemoteEntriesSafely(
+        backend, 14, {{QStringLiteral("/safe"), true}, {QStringLiteral("/dangerous"), true}}, true,
+        [](const QString& path) {
+            return path == QStringLiteral("/dangerous/mounted")
+                       ? rfm::core::RemoteMountPointState::MountPoint
+                       : rfm::core::RemoteMountPointState::NotMountPoint;
+        });
+
+    QVERIFY(!result.allSucceeded());
+    QVERIFY(backend.nodes.contains(QStringLiteral("/safe")));
+    QVERIFY(std::ranges::none_of(backend.calls, [](const QString& call) {
+        return call.startsWith(QStringLiteral("unlink:")) ||
+               call.startsWith(QStringLiteral("rmdir:"));
+    }));
+}
+
+void RemoteFileOperationsTest::detectsBindMountAndMalformedMountInfo()
+{
+    const QByteArray namespaceRootMountInfo = "24 24 8:1 / / rw - ext4 /dev/sda1 rw\n";
+    QCOMPARE(rfm::core::linuxMountPointState(namespaceRootMountInfo, QStringLiteral("/")),
+             rfm::core::RemoteMountPointState::MountPoint);
+
+    const QByteArray extensibleMountInfo =
+        "24 24 8:1 / / rw future_tag:value-1 - ext4 /dev/sda1 rw\n";
+    QCOMPARE(rfm::core::linuxMountPointState(extensibleMountInfo, QStringLiteral("/")),
+             rfm::core::RemoteMountPointState::MountPoint);
+
+    const QByteArray malformedOptionalField = "24 24 8:1 / / rw future_tag: - ext4 /dev/sda1 rw\n";
+    QCOMPARE(rfm::core::linuxMountPointState(malformedOptionalField, QStringLiteral("/")),
+             rfm::core::RemoteMountPointState::Unknown);
+
+    const QByteArray bindMountInfo = "24 1 8:1 / / rw - ext4 /dev/sda1 rw\n"
+                                     "25 24 8:1 /bound /tree/nested rw - ext4 /dev/sda1 rw\n";
+    QCOMPARE(rfm::core::linuxMountPointState(bindMountInfo, QStringLiteral("/tree/nested")),
+             rfm::core::RemoteMountPointState::MountPoint);
+
+    const QByteArray malformedMountInfo = bindMountInfo + "not a valid mountinfo record\n";
+    QCOMPARE(rfm::core::linuxMountPointState(malformedMountInfo, QStringLiteral("/tree")),
+             rfm::core::RemoteMountPointState::Unknown);
+
+    FakeRemoteBackend backend;
+    backend.nodes.insert(QStringLiteral("/tree"), true);
+    backend.listings.insert(QStringLiteral("/tree"), {});
+    const auto result = rfm::ssh::detail::removeRemoteEntriesSafely(
+        backend, 15, {{QStringLiteral("/tree"), true}}, true,
+        [&malformedMountInfo](const QString& path) {
+            return rfm::core::linuxMountPointState(malformedMountInfo, path);
+        });
+    QVERIFY(!result.allSucceeded());
+    QVERIFY(backend.nodes.contains(QStringLiteral("/tree")));
+}
+
+void RemoteFileOperationsTest::doesNotTraverseRemoteSymlinksAndRemovesOrdinaryTrees()
+{
+    FakeRemoteBackend backend;
+    backend.nodes.insert(QStringLiteral("/tree"), true);
+    backend.nodes.insert(QStringLiteral("/tree/normal.txt"), false);
+    backend.nodes.insert(QStringLiteral("/tree/link"), false);
+    backend.listings.insert(QStringLiteral("/tree"), {{QStringLiteral("normal.txt"), false},
+                                                      {QStringLiteral("link"), false}});
+    backend.listings.insert(QStringLiteral("/tree/link"),
+                            {{QStringLiteral("must-not-be-visited"), true}});
+    QStringList probed;
+    const auto result = rfm::ssh::detail::removeRemoteEntriesSafely(
+        backend, 16, {{QStringLiteral("/tree"), true}}, true, [&probed](const QString& path) {
+            probed.push_back(path);
+            return rfm::core::RemoteMountPointState::NotMountPoint;
+        });
+
+    QVERIFY(result.allSucceeded());
+    QVERIFY(!backend.calls.contains(QStringLiteral("list:/tree/link")));
+    QVERIFY(!probed.contains(QStringLiteral("/tree/link/must-not-be-visited")));
+    QVERIFY(backend.calls.contains(QStringLiteral("unlink:/tree/link")));
+    QVERIFY(backend.calls.contains(QStringLiteral("rmdir:/tree")));
 }
 
 void RemoteFileOperationsTest::emitsWorkerOperationErrors()
