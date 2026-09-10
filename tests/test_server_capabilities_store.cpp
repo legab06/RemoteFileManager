@@ -39,6 +39,7 @@ class ServerCapabilitiesStoreTest final : public QObject
     void rejectsTemporaryProfiles();
     void reportsMalformedJsonAndUnsupportedVersions();
     void skipsInvalidEntriesAndPreservesUnknownExtensions();
+    void rejectsSerializedContentsThatExceedMaximumFileSize();
 };
 
 void ServerCapabilitiesStoreTest::missingFileIsAnEmptyStore()
@@ -164,6 +165,42 @@ void ServerCapabilitiesStoreTest::skipsInvalidEntriesAndPreservesUnknownExtensio
     const QList recovered = store.load(&error);
     QVERIFY2(error.isEmpty(), qPrintable(error));
     QCOMPARE(recovered.size(), 2);
+}
+
+void ServerCapabilitiesStoreTest::rejectsSerializedContentsThatExceedMaximumFileSize()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerCapabilitiesStore store(temporary.path());
+    QString error;
+    const auto original = snapshot(QStringLiteral("original"), QStringLiteral("original.test"), {});
+    QVERIFY2(store.save({original}, &error), qPrintable(error));
+
+    QFile existing(store.filePath());
+    QVERIFY(existing.open(QIODevice::ReadOnly));
+    const QByteArray originalContents = existing.readAll();
+    existing.close();
+
+    const QString maximumExtensionData(16 * 1024, QChar{'x'});
+    QList<rfm::core::SftpExtensionCapability> extensions;
+    extensions.reserve(512);
+    for (int index = 0; index < 512; ++index) {
+        extensions.push_back({QStringLiteral("extension-%1").arg(index), maximumExtensionData});
+    }
+    const auto oversized = snapshot(QStringLiteral("oversized"), QStringLiteral("oversized.test"),
+                                    std::move(extensions));
+    QVERIFY(oversized.isValid());
+
+    QVERIFY(!store.save({oversized}, &error));
+    QVERIFY(error.contains(QStringLiteral("maximum allowed size")));
+
+    QVERIFY(existing.open(QIODevice::ReadOnly));
+    QCOMPARE(existing.readAll(), originalContents);
+    existing.close();
+    const QList loaded = store.load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(loaded.size(), 1);
+    QCOMPARE(loaded.constFirst().profileId, QStringLiteral("original"));
 }
 
 QTEST_APPLESS_MAIN(ServerCapabilitiesStoreTest)

@@ -1241,17 +1241,17 @@ void MainWindow::editServerProfile(const QString& id)
     const bool connectionSettingsChanged =
         !profilesHaveSameConnectionSettings(*selected, editedProfile);
     QString error;
-    if (connectionSettingsChanged && !m_serverCapabilitiesStore->remove(selected->id, &error)) {
-        QMessageBox::warning(this, tr("Unable to update server"),
-                             tr("Unable to invalidate its saved capabilities: %1").arg(error));
-        return;
+    if (connectionSettingsChanged) {
+        m_serverCapabilities.remove(serverCapabilitiesIdentity(*selected));
+        QString cacheError;
+        if (!m_serverCapabilitiesStore->remove(selected->id, &cacheError)) {
+            statusBar()->showMessage(
+                tr("Unable to remove saved server capabilities: %1").arg(cacheError), 10000);
+        }
     }
     if (!m_serverProfileStore->upsert(editedProfile, &error)) {
         QMessageBox::warning(this, tr("Unable to save server"), error);
         return;
-    }
-    if (connectionSettingsChanged) {
-        m_serverCapabilities.remove(serverCapabilitiesIdentity(*selected));
     }
     loadServerProfiles();
 }
@@ -1297,16 +1297,16 @@ void MainWindow::removeSelectedServerProfile()
         return;
     }
     QString error;
-    if (!m_serverCapabilitiesStore->remove(selected.id, &error)) {
-        QMessageBox::warning(this, tr("Unable to remove server"),
-                             tr("Unable to remove its saved capabilities: %1").arg(error));
-        return;
-    }
     if (!m_serverProfileStore->remove(selected.id, &error)) {
         QMessageBox::warning(this, tr("Unable to remove server"), error);
         return;
     }
     m_serverCapabilities.remove(serverCapabilitiesIdentity(selected));
+    QString cacheError;
+    if (!m_serverCapabilitiesStore->remove(selected.id, &cacheError)) {
+        statusBar()->showMessage(
+            tr("Unable to remove saved server capabilities: %1").arg(cacheError), 10000);
+    }
     loadServerProfiles();
 }
 

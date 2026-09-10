@@ -245,13 +245,23 @@ bool ServerCapabilitiesStore::save(const QList<PersistedServerCapabilities>& sna
         profileIds.insert(snapshot.profileId);
         serialized.push_back(serialize(snapshot));
     }
+    const QJsonDocument document(QJsonObject{{QStringLiteral("version"), formatVersion},
+                                             {QStringLiteral("snapshots"), serialized}});
+    const QByteArray contents = document.toJson(QJsonDocument::Indented);
+    if (contents.isEmpty()) {
+        setError(error, QStringLiteral("The server capabilities file serialization is empty."));
+        return false;
+    }
+    if (contents.size() > MaximumFileSize) {
+        setError(error,
+                 QStringLiteral("The server capabilities file would exceed the maximum allowed "
+                                "size."));
+        return false;
+    }
     if (m_storageDirectory.isEmpty() || !QDir().mkpath(m_storageDirectory)) {
         setError(error, QStringLiteral("Unable to create the server capabilities directory."));
         return false;
     }
-    const QJsonDocument document(QJsonObject{{QStringLiteral("version"), formatVersion},
-                                             {QStringLiteral("snapshots"), serialized}});
-    const QByteArray contents = document.toJson(QJsonDocument::Indented);
     QSaveFile file(filePath());
     if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() ||
         !file.commit()) {
