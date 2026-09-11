@@ -20,8 +20,12 @@ class ServerProfileDialogTest final : public QObject
     void exposesGeneralAndCapabilitiesTabs();
     void startsWithCapabilitiesNotDetected();
     void displaysSupportedCopyDataAndExtensionsReadOnly();
+    void displaysRuntimeCopyCapabilitiesAndEffectiveNativeMethod();
+    void displaysClientMediatedFallbackWhenNoServerCopyIsAvailable();
+    void displaysEffectiveMethodOnlyForCurrentRuntimeSession();
     void displaysUnsupportedCopyData_data();
     void displaysUnsupportedCopyData();
+    void displaysStorageCapabilitiesAndOtherProviderAsNotApplicable();
 };
 
 void ServerProfileDialogTest::exposesGeneralAndCapabilitiesTabs()
@@ -90,7 +94,13 @@ void ServerProfileDialogTest::displaysSupportedCopyDataAndExtensionsReadOnly()
                 .startsWith(QStringLiteral("Last known")));
     QVERIFY(dialog.findChild<QLabel*>(QStringLiteral("copyDataDescriptionLabel"))
                 ->text()
-                .contains(QStringLiteral("without passing through this computer")));
+                .contains(QStringLiteral("server advertises SFTP copy-data")));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataBackendStatusLabel"))->text(),
+             QStringLiteral("Not detected"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("nativeCopyStatusLabel"))->text(),
+             QStringLiteral("Not detected"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("effectiveCopyMethodLabel"))->text(),
+             QStringLiteral("Not detected"));
 
     auto* const extensions = dialog.findChild<QTableWidget*>(QStringLiteral("sftpExtensionsTable"));
     QVERIFY(extensions != nullptr);
@@ -106,6 +116,77 @@ void ServerProfileDialogTest::displaysSupportedCopyDataAndExtensionsReadOnly()
     QVERIFY(dialog.findChild<QLabel*>(QStringLiteral("capabilitiesContextLabel"))
                 ->text()
                 .startsWith(QStringLiteral("Currently detected")));
+}
+
+void ServerProfileDialogTest::displaysRuntimeCopyCapabilitiesAndEffectiveNativeMethod()
+{
+    rfm::app::ServerProfileDialog dialog;
+    const auto capabilities = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc());
+    const rfm::core::RemoteCopyExecutionCapabilities runtime{
+        false, rfm::core::CapabilitySupport::Supported,
+        rfm::core::NativeServerCopyPrimitive::PosixCp};
+    dialog.setServerCapabilities(capabilities, true, runtime);
+
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataBackendStatusLabel"))->text(),
+             QStringLiteral("Not supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("nativeCopyStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("effectiveCopyMethodLabel"))->text(),
+             QStringLiteral("Native server copy (POSIX cp)"));
+    const QString description =
+        dialog.findChild<QLabel*>(QStringLiteral("copyDataDescriptionLabel"))->text();
+    QVERIFY(description.contains(QStringLiteral("cannot invoke")));
+    QVERIFY(!description.contains(QStringLiteral("without passing through this computer")));
+
+    const rfm::core::RemoteCopyExecutionCapabilities sftpRuntime{
+        true, rfm::core::CapabilitySupport::Supported,
+        rfm::core::NativeServerCopyPrimitive::PosixCp};
+    dialog.setServerCapabilities(capabilities, true, sftpRuntime);
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataBackendStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("effectiveCopyMethodLabel"))->text(),
+             QStringLiteral("SFTP copy-data"));
+}
+
+void ServerProfileDialogTest::displaysClientMediatedFallbackWhenNoServerCopyIsAvailable()
+{
+    rfm::app::ServerProfileDialog dialog;
+    const auto capabilities =
+        rfm::core::detectedServerCapabilities({}, QDateTime::currentDateTimeUtc());
+    const rfm::core::RemoteCopyExecutionCapabilities runtime{
+        false, rfm::core::CapabilitySupport::Unsupported,
+        rfm::core::NativeServerCopyPrimitive::None};
+    dialog.setServerCapabilities(capabilities, true, runtime);
+
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text(),
+             QStringLiteral("Not supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataBackendStatusLabel"))->text(),
+             QStringLiteral("Not supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("nativeCopyStatusLabel"))->text(),
+             QStringLiteral("Not supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("effectiveCopyMethodLabel"))->text(),
+             QStringLiteral("Client-mediated SFTP"));
+}
+
+void ServerProfileDialogTest::displaysEffectiveMethodOnlyForCurrentRuntimeSession()
+{
+    rfm::app::ServerProfileDialog dialog;
+    const auto capabilities = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc());
+    const rfm::core::RemoteCopyExecutionCapabilities runtime{
+        true, rfm::core::CapabilitySupport::Supported,
+        rfm::core::NativeServerCopyPrimitive::PosixCp};
+
+    dialog.setServerCapabilities(capabilities, false, runtime);
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("copyDataBackendStatusLabel"))->text(),
+             QStringLiteral("Not detected"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("effectiveCopyMethodLabel"))->text(),
+             QStringLiteral("Not detected"));
 }
 
 void ServerProfileDialogTest::displaysUnsupportedCopyData_data()
@@ -129,6 +210,52 @@ void ServerProfileDialogTest::displaysUnsupportedCopyData()
     QVERIFY(dialog.findChild<QLabel*>(QStringLiteral("copyDataDescriptionLabel"))
                 ->text()
                 .contains(QStringLiteral("does not advertise")));
+}
+
+void ServerProfileDialogTest::displaysStorageCapabilitiesAndOtherProviderAsNotApplicable()
+{
+    rfm::app::ServerProfileDialog dialog;
+    auto capabilities = rfm::core::detectedServerCapabilities({}, QDateTime::currentDateTimeUtc());
+    capabilities.storage.detectionState = rfm::core::CapabilityDetectionState::Detected;
+    capabilities.storage.windowsPowerShell = rfm::core::CapabilitySupport::Supported;
+    capabilities.storage.windowsGetVolume = rfm::core::CapabilitySupport::Supported;
+    capabilities.storage.windowsGetDisk = rfm::core::CapabilitySupport::Unsupported;
+    capabilities.storage.provider = rfm::core::selectRemoteStorageProvider(capabilities.storage);
+    dialog.setServerCapabilities(capabilities, true);
+
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("storageDiscoveryStatusLabel"))->text(),
+             QStringLiteral("Completed"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("storageVolumeListingStatusLabel"))->text(),
+             QStringLiteral("Not implemented"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("storageProviderLabel"))->text(),
+             QStringLiteral("Windows PowerShell"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("linuxMountInfoStatusLabel"))->text(),
+             QStringLiteral("Not applicable"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("lsblkStatusLabel"))->text(),
+             QStringLiteral("Not applicable"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("windowsPowerShellStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("windowsGetVolumeStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("windowsGetDiskStatusLabel"))->text(),
+             QStringLiteral("Not supported"));
+
+    capabilities.storage = {};
+    capabilities.storage.detectionState = rfm::core::CapabilityDetectionState::Detected;
+    capabilities.storage.linuxMountInfo = rfm::core::CapabilitySupport::Supported;
+    capabilities.storage.lsblk = rfm::core::CapabilitySupport::Supported;
+    capabilities.storage.provider = rfm::core::selectRemoteStorageProvider(capabilities.storage);
+    dialog.setServerCapabilities(capabilities, true);
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("storageProviderLabel"))->text(),
+             QStringLiteral("Linux"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("storageVolumeListingStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("linuxMountInfoStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("lsblkStatusLabel"))->text(),
+             QStringLiteral("Supported"));
+    QCOMPARE(dialog.findChild<QLabel*>(QStringLiteral("windowsPowerShellStatusLabel"))->text(),
+             QStringLiteral("Not applicable"));
 }
 
 QTEST_MAIN(ServerProfileDialogTest)

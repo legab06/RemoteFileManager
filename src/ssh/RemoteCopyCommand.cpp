@@ -37,14 +37,21 @@ QString RemoteCopyCommand::quoteArgument(const QString& argument)
 
 QString RemoteCopyCommand::build(const QString& source, const QString& destination, bool recursive)
 {
-    const QString quotedSource = quoteArgument(source);
-    const QString quotedDestination = quoteArgument(destination);
+    const QString safeSource =
+        source.startsWith(QChar{'-'}) ? QStringLiteral("./") + source : source;
+    const QString safeDestination =
+        destination.startsWith(QChar{'-'}) ? QStringLiteral("./") + destination : destination;
+    const QString quotedSource = quoteArgument(safeSource);
+    const QString quotedDestination = quoteArgument(safeDestination);
     if (source.isEmpty() || destination.isEmpty() || quotedSource.isEmpty() ||
         quotedDestination.isEmpty()) {
         return {};
     }
+    // -P, -p and -R are POSIX cp options. The exclusive staging path makes non-standard -n
+    // unnecessary. Relative operands beginning with '-' are prefixed with './', avoiding the
+    // non-standard '--' option delimiter without changing the referenced path.
     return wrapCopyCommand(
-        QStringLiteral("cp -P %1-n -- %2 %3")
+        QStringLiteral("cp -P -p %1%2 %3")
             .arg(recursive ? QStringLiteral("-R ") : QString{}, quotedSource, quotedDestination));
 }
 

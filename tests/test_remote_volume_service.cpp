@@ -59,15 +59,21 @@ class RemoteVolumeServiceTest final : public QObject
 void RemoteVolumeServiceTest::parsesCapabilitiesAndUsesOnlyFixedProbe()
 {
     const auto capabilities = rfm::ssh::RemoteLinuxVolumeService::parseCapabilities(
-        QByteArrayLiteral("lsblk\nudisksctl\numount\n"));
+        QByteArrayLiteral("RFM_POSIX_STORAGE_V1\nlsblk\nudisksctl\numount\n"));
     QVERIFY(capabilities.known);
     QVERIFY(capabilities.lsblk);
     QVERIFY(capabilities.udisksctl);
     QVERIFY(!capabilities.mount);
     QVERIFY(capabilities.umount);
     const QString probe = rfm::ssh::RemoteLinuxVolumeService::capabilityProbeCommand();
+    QVERIFY(probe.contains(QStringLiteral("RFM_POSIX_STORAGE_V1")));
     QVERIFY(probe.contains(QStringLiteral("lsblk udisksctl mount umount")));
     QVERIFY(!probe.contains(QStringLiteral("sudo")));
+
+    const auto unmarked = rfm::ssh::RemoteLinuxVolumeService::parseCapabilities(
+        QByteArrayLiteral("lsblk\nudisksctl\numount\n"));
+    QVERIFY(unmarked.known);
+    QVERIFY(!unmarked.lsblk);
 }
 
 void RemoteVolumeServiceTest::buildsAndAppliesLateUnmountTopologyProbe()

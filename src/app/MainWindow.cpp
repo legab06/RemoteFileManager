@@ -216,6 +216,7 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
 
     qRegisterMetaType<rfm::core::ConnectionProfile>();
     qRegisterMetaType<rfm::core::ServerCapabilities>();
+    qRegisterMetaType<rfm::core::RemoteStorageCapabilities>();
     qRegisterMetaType<rfm::ssh::PasswordAuthenticationReason>();
     qRegisterMetaType<QList<rfm::core::RemoteEntry>>();
     qRegisterMetaType<QList<rfm::core::RemoteSelection>>();
@@ -359,6 +360,10 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::showPasswordAuthenticationError);
     connect(m_sshSession, &rfm::ssh::SshSession::serverCapabilitiesDetected, this,
             &MainWindow::handleServerCapabilitiesDetected);
+    connect(m_sshSession, &rfm::ssh::SshSession::remoteCopyExecutionCapabilitiesDetected, this,
+            &MainWindow::handleRemoteCopyExecutionCapabilitiesDetected);
+    connect(m_sshSession, &rfm::ssh::SshSession::remoteStorageCapabilitiesDetected, this,
+            &MainWindow::handleRemoteStorageCapabilitiesDetected);
     connect(m_sshSession, &rfm::ssh::SshSession::connected, this, &MainWindow::handleConnected);
     connect(m_sshSession, &rfm::ssh::SshSession::directoryListed, this,
             &MainWindow::handleDirectoryListed);
@@ -374,10 +379,14 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &MainWindow::handleRemoteStorageVolumes);
     connect(m_sshSession, &rfm::ssh::SshSession::storageVolumeListingFailed, this,
             &MainWindow::handleRemoteStorageError);
+    connect(m_sshSession, &rfm::ssh::SshSession::storageVolumeListingUnsupported, this,
+            &MainWindow::handleRemoteStorageUnsupported);
     connect(m_sshSession, &rfm::ssh::SshSession::storageMountInfoFingerprint, this,
             &MainWindow::handleRemoteStorageFingerprint);
     connect(m_sshSession, &rfm::ssh::SshSession::storageMountsProbed, this,
             &MainWindow::handleRemoteStorageProbe);
+    connect(m_sshSession, &rfm::ssh::SshSession::storageMountProbeUnsupported, this,
+            &MainWindow::handleRemoteStorageProbeUnsupported);
     connect(m_sshSession, &rfm::ssh::SshSession::storageMountProbeFailed, this,
             &MainWindow::handleRemoteStorageProbeError);
     connect(m_sshSession, &rfm::ssh::SshSession::volumeOperationFinished, this,
@@ -1055,6 +1064,21 @@ void MainWindow::handleRemoteStorageVolumes(quint64 requestId,
     }
 }
 
+void MainWindow::handleRemoteStorageUnsupported(quint64 requestId)
+{
+    if (requestId == 0 || requestId != m_remoteStorageRequestId ||
+        m_remoteStorageRequestConnectionGeneration != m_connectionGeneration) {
+        return;
+    }
+    m_remoteStorageRefreshPending = false;
+    m_remoteStorageRequestId = 0;
+    m_remoteStorageRequestConnectionGeneration = 0;
+    m_pendingRemoteStorageFingerprint.clear();
+    if (std::exchange(m_remoteStorageRefreshAfterCurrent, false) && m_connected) {
+        refreshStorage();
+    }
+}
+
 void MainWindow::handleRemoteStorageError(quint64 requestId, const QString& error)
 {
     if (requestId == 0 || requestId != m_remoteStorageRequestId ||
@@ -1103,6 +1127,16 @@ void MainWindow::handleRemoteStorageProbe(quint64 requestId, const QByteArray& f
     if (fingerprint != m_remoteStorageFingerprint) {
         refreshStorage();
     }
+}
+
+void MainWindow::handleRemoteStorageProbeUnsupported(quint64 requestId)
+{
+    if (requestId == 0 || requestId != m_remoteStorageProbeRequestId) {
+        return;
+    }
+    m_remoteStorageProbePending = false;
+    m_remoteStorageProbeRequestId = 0;
+    m_remoteStorageProbeConnectionGeneration = 0;
 }
 
 void MainWindow::handleRemoteStorageProbeError(quint64 requestId, const QString& error)
@@ -1232,7 +1266,13 @@ void MainWindow::editServerProfile(const QString& id)
         const bool currentlyConnected =
             capabilities->detectedThisRun && m_connected &&
             profilesHaveSameConnectionSettings(m_activeProfile, *selected);
-        dialog.setServerCapabilities(capabilities->capabilities, currentlyConnected);
+        const auto runtimeCopyCapabilities =
+            currentlyConnected && m_remoteCopyExecutionCapabilities.has_value() &&
+                    profilesHaveSameConnectionSettings(m_activeProfile, *selected)
+                ? m_remoteCopyExecutionCapabilities
+                : std::nullopt;
+        dialog.setServerCapabilities(capabilities->capabilities, currentlyConnected,
+                                     runtimeCopyCapabilities);
     }
     if (dialog.exec() != QDialog::Accepted) {
         return;
@@ -1266,6 +1306,34 @@ void MainWindow::handleServerCapabilitiesDetected(rfm::core::ConnectionProfile p
     const QString identity = serverCapabilitiesIdentity(profile);
     m_serverCapabilities.insert(identity, {profile, capabilities, true});
     persistServerCapabilities(profile, capabilities);
+}
+
+void MainWindow::handleRemoteCopyExecutionCapabilitiesDetected(
+    rfm::core::RemoteCopyExecutionCapabilities capabilities)
+{
+    if (!m_connecting && !m_connected) {
+        return;
+    }
+    m_remoteCopyExecutionCapabilities = capabilities;
+}
+
+void MainWindow::handleRemoteStorageCapabilitiesDetected(
+    rfm::core::RemoteStorageCapabilities capabilities)
+{
+    if (!m_connected || capabilities.detectionState !=
+                            rfm::core::CapabilityDetectionState::Detected) {
+        return;
+    }
+    const QString identity = serverCapabilitiesIdentity(m_activeProfile);
+    auto existing = m_serverCapabilities.find(identity);
+    if (existing == m_serverCapabilities.end() ||
+        !profilesHaveSameConnectionSettings(existing->profile, m_activeProfile)) {
+        return;
+    }
+    existing->capabilities.storage = capabilities;
+    existing->capabilities.detectedAt = QDateTime::currentDateTimeUtc();
+    existing->detectedThisRun = true;
+    persistServerCapabilities(m_activeProfile, existing->capabilities);
 }
 
 void MainWindow::associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,
@@ -1529,6 +1597,7 @@ void MainWindow::beginConnection(const rfm::core::ConnectionProfile& profile)
     updatePaneTransferContexts();
     stopAutomaticRefresh();
     m_activeProfile = profile;
+    m_remoteCopyExecutionCapabilities.reset();
     m_connecting = true;
     setBusy(true, tr("Connecting securely to %1…").arg(m_activeProfile.host));
     emit connectionRequested(m_activeProfile);
@@ -1893,6 +1962,7 @@ void MainWindow::resetDisconnectedUi()
     m_centralStack->setCurrentWidget(hasLocalPane ? static_cast<QWidget*>(m_workspaceTabs)
                                                   : static_cast<QWidget*>(m_homePage));
     m_activeProfile = {};
+    m_remoteCopyExecutionCapabilities.reset();
     m_activeSavedProfileId.clear();
     m_activeRemoteMachineId.clear();
     m_remoteInitialPath.clear();

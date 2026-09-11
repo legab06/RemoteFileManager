@@ -46,6 +46,77 @@ bool validExtension(const SftpExtensionCapability& extension)
            extension.data.size() <= MaximumExtensionDataLength;
 }
 
+QString capabilitySupportName(CapabilitySupport support)
+{
+    switch (support) {
+    case CapabilitySupport::Unknown:
+        return QStringLiteral("unknown");
+    case CapabilitySupport::Unsupported:
+        return QStringLiteral("unsupported");
+    case CapabilitySupport::Supported:
+        return QStringLiteral("supported");
+    }
+    return {};
+}
+
+std::optional<CapabilitySupport> capabilitySupportFromName(const QJsonValue& value)
+{
+    if (!value.isString()) {
+        return std::nullopt;
+    }
+    if (value.toString() == QStringLiteral("unknown")) {
+        return CapabilitySupport::Unknown;
+    }
+    if (value.toString() == QStringLiteral("unsupported")) {
+        return CapabilitySupport::Unsupported;
+    }
+    if (value.toString() == QStringLiteral("supported")) {
+        return CapabilitySupport::Supported;
+    }
+    return std::nullopt;
+}
+
+QJsonObject serializeStorageCapabilities(const RemoteStorageCapabilities& capabilities)
+{
+    return {
+        {QStringLiteral("linuxMountInfo"), capabilitySupportName(capabilities.linuxMountInfo)},
+        {QStringLiteral("lsblk"), capabilitySupportName(capabilities.lsblk)},
+        {QStringLiteral("windowsPowerShell"),
+         capabilitySupportName(capabilities.windowsPowerShell)},
+        {QStringLiteral("windowsGetVolume"), capabilitySupportName(capabilities.windowsGetVolume)},
+        {QStringLiteral("windowsGetDisk"), capabilitySupportName(capabilities.windowsGetDisk)}};
+}
+
+std::optional<RemoteStorageCapabilities> deserializeStorageCapabilities(const QJsonValue& value)
+{
+    if (!value.isObject()) {
+        return std::nullopt;
+    }
+    const QJsonObject object = value.toObject();
+    const auto linuxMountInfo =
+        capabilitySupportFromName(object.value(QStringLiteral("linuxMountInfo")));
+    const auto lsblk = capabilitySupportFromName(object.value(QStringLiteral("lsblk")));
+    const auto windowsPowerShell =
+        capabilitySupportFromName(object.value(QStringLiteral("windowsPowerShell")));
+    const auto windowsGetVolume =
+        capabilitySupportFromName(object.value(QStringLiteral("windowsGetVolume")));
+    const auto windowsGetDisk =
+        capabilitySupportFromName(object.value(QStringLiteral("windowsGetDisk")));
+    if (!linuxMountInfo.has_value() || !lsblk.has_value() || !windowsPowerShell.has_value() ||
+        !windowsGetVolume.has_value() || !windowsGetDisk.has_value()) {
+        return std::nullopt;
+    }
+    RemoteStorageCapabilities capabilities;
+    capabilities.detectionState = CapabilityDetectionState::Detected;
+    capabilities.linuxMountInfo = *linuxMountInfo;
+    capabilities.lsblk = *lsblk;
+    capabilities.windowsPowerShell = *windowsPowerShell;
+    capabilities.windowsGetVolume = *windowsGetVolume;
+    capabilities.windowsGetDisk = *windowsGetDisk;
+    capabilities.provider = selectRemoteStorageProvider(capabilities);
+    return capabilities;
+}
+
 QJsonObject serialize(const PersistedServerCapabilities& snapshot)
 {
     QJsonArray extensions;
@@ -63,6 +134,10 @@ QJsonObject serialize(const PersistedServerCapabilities& snapshot)
     if (snapshot.capabilities.sftpProtocolVersion.has_value()) {
         object.insert(QStringLiteral("sftpProtocolVersion"),
                       *snapshot.capabilities.sftpProtocolVersion);
+    }
+    if (snapshot.capabilities.storage.detectionState == CapabilityDetectionState::Detected) {
+        object.insert(QStringLiteral("storage"),
+                      serializeStorageCapabilities(snapshot.capabilities.storage));
     }
     return object;
 }
@@ -137,6 +212,14 @@ std::optional<PersistedServerCapabilities> deserialize(const QJsonValue& value)
     snapshot.port = static_cast<quint16>(port);
     snapshot.capabilities =
         detectedServerCapabilities(std::move(extensions), detectedAt.toUTC(), sftpProtocolVersion);
+    const QJsonValue storageValue = object.value(QStringLiteral("storage"));
+    if (!storageValue.isUndefined()) {
+        const auto storage = deserializeStorageCapabilities(storageValue);
+        if (!storage.has_value()) {
+            return std::nullopt;
+        }
+        snapshot.capabilities.storage = *storage;
+    }
     return snapshot.isValid() ? std::optional{std::move(snapshot)} : std::nullopt;
 }
 
@@ -199,6 +282,8 @@ bool PersistedServerCapabilities::isValid() const
            capabilities.detectedAt.isValid() &&
            (!capabilities.sftpProtocolVersion.has_value() ||
             *capabilities.sftpProtocolVersion >= 0) &&
+           (capabilities.storage.detectionState == CapabilityDetectionState::NotDetected ||
+            capabilities.storage.provider == selectRemoteStorageProvider(capabilities.storage)) &&
            capabilities.sftpExtensions.size() <= MaximumExtensions &&
            std::ranges::all_of(capabilities.sftpExtensions, validExtension);
 }

@@ -2,6 +2,7 @@
 
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
+#include "remotefilemanager/core/RemoteCopyStrategy.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
@@ -70,6 +71,9 @@ class SshSession final : public QObject
     void passwordAuthenticationRejected(QString message);
     void serverCapabilitiesDetected(rfm::core::ConnectionProfile profile,
                                     rfm::core::ServerCapabilities capabilities);
+    void remoteCopyExecutionCapabilitiesDetected(
+        rfm::core::RemoteCopyExecutionCapabilities capabilities);
+    void remoteStorageCapabilitiesDetected(rfm::core::RemoteStorageCapabilities capabilities);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
@@ -80,7 +84,9 @@ class SshSession final : public QObject
     void storageMountInfoFingerprint(quint64 requestId, QByteArray fingerprint);
     void storageMountsProbed(quint64 requestId, QByteArray fingerprint);
     void storageMountProbeFailed(quint64 requestId, QString error);
+    void storageMountProbeUnsupported(quint64 requestId);
     void storageVolumeListingFailed(quint64 requestId, QString error);
+    void storageVolumeListingUnsupported(quint64 requestId);
     void volumeOperationFinished(rfm::core::VolumeOperationResult result);
     void operationFinished(rfm::core::RemoteOperationResult result);
     void remoteOperationFinished(rfm::core::RemoteOperationResult result);
@@ -110,6 +116,14 @@ class SshSession final : public QObject
     void authenticateAndOpen();
     void authenticateWithPassword(rfm::core::SecurePassword password);
     void openSftp();
+    void startRemoteCopyCapabilityProbe();
+    void processRemoteCopyCapabilityProbe();
+    void scheduleRemoteCopyCapabilityProbe(bool activityAvailable = true);
+    void startRemoteStorageCapabilityProbe();
+    void startNextRemoteStorageCapabilityProbe();
+    void processRemoteStorageCapabilityProbe();
+    void scheduleRemoteStorageCapabilityProbe(bool activityAvailable = true);
+    void finishRemoteStorageCapabilityProbe();
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();

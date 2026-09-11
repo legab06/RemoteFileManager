@@ -10,7 +10,9 @@
 #include "remotefilemanager/core/TransferDirectoryJob.hpp"
 #include "remotefilemanager/core/TransferFileJob.hpp"
 #include "remotefilemanager/core/TransferJob.hpp"
+#include "remotefilemanager/ssh/RemoteCopyCapabilityProbe.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
+#include "remotefilemanager/ssh/RemoteStorageCapabilityProbe.hpp"
 #include "remotefilemanager/ssh/RemoteStorageScanner.hpp"
 #include "remotefilemanager/ssh/RemoteVolumeService.hpp"
 #include "remotefilemanager/ssh/SshAuthenticationPolicy.hpp"
@@ -23,6 +25,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDebug>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QHash>
@@ -606,8 +609,11 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
   public:
     enum class CommandKind { Copy, MoveStagingCopy, Remove };
 
-    SshServerSideCopyBackend(ssh_session session, sftp_session sftp)
-        : m_session(session), m_sftp(sftp)
+    SshServerSideCopyBackend(ssh_session session, sftp_session sftp,
+                             rfm::core::RemoteCopyMethod copyMethod,
+                             rfm::core::NativeServerCopyPrimitive nativePrimitive)
+        : m_session(session), m_sftp(sftp), m_copyMethod(copyMethod),
+          m_nativePrimitive(nativePrimitive)
     {}
 
     ~SshServerSideCopyBackend() override
@@ -640,6 +646,22 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     {
         if (source.isEmpty() || destination.isEmpty() || m_sftp == nullptr) {
             return {rfm::core::RemoteBackendError::InvalidPath, {}};
+        }
+        if (m_copyMethod == rfm::core::RemoteCopyMethod::NativeServerCopy) {
+            if (m_nativePrimitive != rfm::core::NativeServerCopyPrimitive::PosixCp) {
+                return {rfm::core::RemoteBackendError::Unsupported,
+                        QStringLiteral("No executable native remote copy primitive is available.")};
+            }
+            const QString command =
+                rfm::ssh::RemoteCopyCommand::build(source, destination, recursive);
+            if (command.isEmpty()) {
+                return {rfm::core::RemoteBackendError::InvalidPath, {}};
+            }
+            return startCommand(command, CommandKind::Copy);
+        }
+        if (m_copyMethod == rfm::core::RemoteCopyMethod::SftpCopyData) {
+            return {rfm::core::RemoteBackendError::Unsupported,
+                    QStringLiteral("SFTP copy-data is not executable by the current backend.")};
         }
         closeChannel();
         closeCopyHandles();
@@ -1278,6 +1300,9 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
 
     ssh_session m_session;
     sftp_session m_sftp;
+    rfm::core::RemoteCopyMethod m_copyMethod{rfm::core::RemoteCopyMethod::ClientMediatedSftp};
+    rfm::core::NativeServerCopyPrimitive m_nativePrimitive{
+        rfm::core::NativeServerCopyPrimitive::None};
     ssh_channel m_channel{nullptr};
     QList<CopyTask> m_copyTasks;
     QList<RemoveTask> m_removeTasks;
@@ -1310,7 +1335,11 @@ struct SshCommandPollResult {
 class SshCommandProcess final
 {
   public:
-    explicit SshCommandProcess(ssh_session session) : m_session(session) {}
+    explicit SshCommandProcess(
+        ssh_session session,
+        qint64 timeout = rfm::ssh::SshCommandPollScheduler::commandTimeoutMilliseconds)
+        : m_session(session), m_timeoutMilliseconds(timeout)
+    {}
     ~SshCommandProcess() { closeChannel(); }
 
     bool start(const QString& command)
@@ -1372,7 +1401,7 @@ class SshCommandProcess final
                                                false, false};
         }
         appendBounded(m_standardOutput, buffer, outputBytes);
-        if (m_timer.elapsed() >= timeoutMilliseconds) {
+        if (m_timer.elapsed() >= m_timeoutMilliseconds) {
             const QString output = QString::fromUtf8(m_standardOutput);
             const QString error = QString::fromUtf8(m_standardError);
             closeChannel();
@@ -1397,8 +1426,6 @@ class SshCommandProcess final
     }
 
   private:
-    static constexpr qint64 timeoutMilliseconds =
-        rfm::ssh::SshCommandPollScheduler::commandTimeoutMilliseconds;
     static constexpr qsizetype maximumOutputBytes = 2 * 1024 * 1024;
 
     static void appendBounded(QByteArray& destination, const char* data, int count)
@@ -1435,6 +1462,7 @@ class SshCommandProcess final
     }
 
     ssh_session m_session{nullptr};
+    qint64 m_timeoutMilliseconds{rfm::ssh::SshCommandPollScheduler::commandTimeoutMilliseconds};
     ssh_channel m_channel{nullptr};
     ssh_channel_callbacks_struct m_callbacks{};
     QByteArray m_standardOutput;
@@ -1687,6 +1715,22 @@ bool isTerminalTransferState(rfm::core::TransferState state)
            state == rfm::core::TransferState::Failed;
 }
 
+QString remoteCopyMethodDescription(rfm::core::RemoteCopyMethod method,
+                                    rfm::core::NativeServerCopyPrimitive primitive)
+{
+    switch (method) {
+    case rfm::core::RemoteCopyMethod::SftpCopyData:
+        return QStringLiteral("SftpCopyData");
+    case rfm::core::RemoteCopyMethod::NativeServerCopy:
+        return primitive == rfm::core::NativeServerCopyPrimitive::PosixCp
+                   ? QStringLiteral("NativeServerCopy (PosixCp)")
+                   : QStringLiteral("NativeServerCopy (unavailable primitive)");
+    case rfm::core::RemoteCopyMethod::ClientMediatedSftp:
+        return QStringLiteral("ClientMediatedSftp");
+    }
+    return QStringLiteral("Unknown");
+}
+
 } // namespace
 
 namespace rfm::ssh
@@ -1719,6 +1763,11 @@ class SshSession::Impl final
 
     void reset()
     {
+        remoteCopyCapabilityProcess.reset();
+        remoteCopyCapabilityPollScheduler.cancel();
+        storageCapabilityProcess.reset();
+        storageCapabilityPollScheduler.cancel();
+        storageCapabilityLifecycle.reset();
         volumeCommandProcess.reset();
         interactiveVolumeCommandProcess.reset();
         activeVolumeCommand.reset();
@@ -1730,6 +1779,8 @@ class SshSession::Impl final
         awaitingVolumeAuthentications.clear();
         volumePollScheduler.cancel();
         volumeCapabilityCache.reset();
+        currentServerCapabilities = {};
+        remoteCopyExecutionCapabilities = {};
         if (storageProbeFile != nullptr) {
             sftp_close(storageProbeFile);
             storageProbeFile = nullptr;
@@ -1781,6 +1832,8 @@ class SshSession::Impl final
     std::unique_ptr<SshServerSideCopyBackend> copyBackend;
     std::unique_ptr<rfm::core::ServerSideCopyJob> activeCopyJob;
     std::unique_ptr<rfm::ssh::RemoteStorageScanner> storageScanner;
+    std::unique_ptr<SshCommandProcess> remoteCopyCapabilityProcess;
+    std::unique_ptr<SshCommandProcess> storageCapabilityProcess;
     std::unique_ptr<SshCommandProcess> volumeCommandProcess;
     std::unique_ptr<SshInteractivePolkitProcess> interactiveVolumeCommandProcess;
     std::optional<SshVolumeCommandTask> activeVolumeCommand;
@@ -1790,6 +1843,11 @@ class SshSession::Impl final
     QHash<quint64, AwaitingVolumeAuthentication> awaitingVolumeAuthentications;
     QList<rfm::core::LinuxBlockDevice> pendingBlockDevices;
     rfm::ssh::RemoteLinuxVolumeCapabilityCache volumeCapabilityCache;
+    rfm::core::ServerCapabilities currentServerCapabilities;
+    rfm::core::RemoteCopyExecutionCapabilities remoteCopyExecutionCapabilities;
+    rfm::ssh::SshCommandPollScheduler remoteCopyCapabilityPollScheduler;
+    rfm::ssh::SshCommandPollScheduler storageCapabilityPollScheduler;
+    rfm::ssh::RemoteStorageCapabilityLifecycle storageCapabilityLifecycle;
     rfm::ssh::SshCommandPollScheduler volumePollScheduler;
     sftp_file storageProbeFile{nullptr};
     QByteArray storageProbeData;
@@ -1810,6 +1868,8 @@ class SshSession::Impl final
 SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_unique<Impl>())
 {
     qRegisterMetaType<rfm::core::ServerCapabilities>();
+    qRegisterMetaType<rfm::core::RemoteCopyExecutionCapabilities>();
+    qRegisterMetaType<rfm::core::RemoteStorageCapabilities>();
 }
 
 SshSession::SshSession(TransferBackendFactory transferBackendFactory,
@@ -1818,6 +1878,8 @@ SshSession::SshSession(TransferBackendFactory transferBackendFactory,
                                                      std::move(transferConnectionAvailable)))
 {
     qRegisterMetaType<rfm::core::ServerCapabilities>();
+    qRegisterMetaType<rfm::core::RemoteCopyExecutionCapabilities>();
+    qRegisterMetaType<rfm::core::RemoteStorageCapabilities>();
 }
 
 SshSession::~SshSession()
@@ -2091,10 +2153,10 @@ void SshSession::openSftp()
     }
 
     const int sftpProtocolVersion = sftp_server_version(m_impl->sftp);
-    const rfm::core::ServerCapabilities capabilities = rfm::core::detectedServerCapabilities(
+    m_impl->currentServerCapabilities = rfm::core::detectedServerCapabilities(
         announcedSftpExtensions(m_impl->sftp), QDateTime::currentDateTimeUtc(),
         sftpProtocolVersion < 0 ? std::nullopt : std::optional<int>{sftpProtocolVersion});
-    emit serverCapabilitiesDetected(m_impl->profile, capabilities);
+    emit serverCapabilitiesDetected(m_impl->profile, m_impl->currentServerCapabilities);
 
     char* const canonicalHome = sftp_canonicalize_path(m_impl->sftp, ".");
     if (canonicalHome == nullptr) {
@@ -2138,7 +2200,195 @@ void SshSession::openSftp()
     std::ranges::sort(entries, {}, [](const auto& entry) {
         return std::pair{!entry.directory, entry.name.toCaseFolded()};
     });
+    startRemoteCopyCapabilityProbe();
+    startRemoteStorageCapabilityProbe();
     emit connected(initialPath, entries);
+}
+
+void SshSession::startRemoteCopyCapabilityProbe()
+{
+    m_impl->remoteCopyExecutionCapabilities = rfm::ssh::RemoteCopyCapabilityProbe::unavailable();
+    m_impl->remoteCopyCapabilityProcess = std::make_unique<SshCommandProcess>(m_impl->session);
+    if (!m_impl->remoteCopyCapabilityProcess->start(
+            rfm::ssh::RemoteCopyCapabilityProbe::command())) {
+        m_impl->remoteCopyCapabilityProcess.reset();
+        emit remoteCopyExecutionCapabilitiesDetected(m_impl->remoteCopyExecutionCapabilities);
+        return;
+    }
+    scheduleRemoteCopyCapabilityProbe();
+}
+
+void SshSession::scheduleRemoteCopyCapabilityProbe(bool activityAvailable)
+{
+    if (m_impl->remoteCopyCapabilityProcess == nullptr) {
+        return;
+    }
+    const auto schedule = m_impl->remoteCopyCapabilityPollScheduler.schedule(activityAvailable);
+    if (schedule.has_value()) {
+        QTimer::singleShot(schedule->delayMilliseconds, this, [this, schedule] {
+            if (m_impl->remoteCopyCapabilityPollScheduler.consume(schedule->generation)) {
+                processRemoteCopyCapabilityProbe();
+            }
+        });
+    }
+}
+
+void SshSession::processRemoteCopyCapabilityProbe()
+{
+    if (m_impl->remoteCopyCapabilityProcess == nullptr) {
+        return;
+    }
+    const SshCommandPollResult poll = m_impl->remoteCopyCapabilityProcess->poll();
+    if (!poll.connectionLost && !poll.result.has_value()) {
+        scheduleRemoteCopyCapabilityProbe(poll.activityAvailable);
+        return;
+    }
+    if (poll.result.has_value()) {
+        m_impl->remoteCopyExecutionCapabilities =
+            rfm::ssh::RemoteCopyCapabilityProbe::capabilitiesFrom(*poll.result);
+    } else {
+        m_impl->remoteCopyExecutionCapabilities =
+            rfm::ssh::RemoteCopyCapabilityProbe::unavailable();
+    }
+    m_impl->remoteCopyCapabilityProcess.reset();
+    emit remoteCopyExecutionCapabilitiesDetected(m_impl->remoteCopyExecutionCapabilities);
+}
+
+void SshSession::startRemoteStorageCapabilityProbe()
+{
+    m_impl->currentServerCapabilities.storage = {};
+    m_impl->storageCapabilityLifecycle.reset();
+    startNextRemoteStorageCapabilityProbe();
+}
+
+void SshSession::startNextRemoteStorageCapabilityProbe()
+{
+    constexpr qint64 capabilityProbeTimeoutMilliseconds = 10'000;
+    while (m_impl->session != nullptr && ssh_is_connected(m_impl->session) != 0) {
+        const auto stage = m_impl->storageCapabilityLifecycle.stage();
+        if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::Posix ||
+            stage == rfm::ssh::RemoteStorageCapabilityProbeStage::WindowsPowerShell) {
+            const QString command =
+                stage == rfm::ssh::RemoteStorageCapabilityProbeStage::Posix
+                    ? rfm::ssh::RemoteStorageCapabilityProbe::posixCommand()
+                    : rfm::ssh::RemoteStorageCapabilityProbe::windowsPowerShellCommand();
+            m_impl->storageCapabilityProcess = std::make_unique<SshCommandProcess>(
+                m_impl->session, capabilityProbeTimeoutMilliseconds);
+            if (m_impl->storageCapabilityProcess->start(command)) {
+                scheduleRemoteStorageCapabilityProbe();
+                return;
+            }
+            m_impl->storageCapabilityProcess.reset();
+            if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::Posix) {
+                m_impl->storageCapabilityLifecycle.skipPosix();
+                m_impl->volumeCapabilityCache.update({true, false, false, false, false});
+            } else {
+                m_impl->storageCapabilityLifecycle.skipWindows();
+            }
+            continue;
+        }
+        if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::MountInfo) {
+            const QByteArray path = QByteArrayLiteral("/proc/self/mountinfo");
+            sftp_file mountInfo = sftp_open(m_impl->sftp, path.constData(), O_RDONLY, 0);
+            if (mountInfo == nullptr) {
+                const int status = sftp_get_error(m_impl->sftp);
+                if (isFatalSftpError(status) || ssh_is_connected(m_impl->session) == 0) {
+                    fail(tr("The SSH connection was lost while probing remote storage "
+                            "capabilities."));
+                    return;
+                }
+                m_impl->storageCapabilityLifecycle.recordMountInfo(
+                    rfm::ssh::RemoteStorageCapabilityProbe::mountInfoCapabilityFromSftpStatus(
+                        status, false));
+                finishRemoteStorageCapabilityProbe();
+                return;
+            }
+            char byte = '\0';
+            const ssize_t bytesRead = sftp_read(mountInfo, &byte, 1);
+            const int status = bytesRead >= 0 ? SSH_FX_OK : sftp_get_error(m_impl->sftp);
+            sftp_close(mountInfo);
+            if (bytesRead < 0) {
+                if (isFatalSftpError(status) || ssh_is_connected(m_impl->session) == 0) {
+                    fail(tr("The SSH connection was lost while reading remote mount "
+                            "information."));
+                } else {
+                    fail(tr("Unable to read remote mount information after opening it."));
+                }
+                return;
+            }
+            m_impl->storageCapabilityLifecycle.recordMountInfo(
+                rfm::core::CapabilitySupport::Supported);
+            finishRemoteStorageCapabilityProbe();
+            return;
+        }
+        finishRemoteStorageCapabilityProbe();
+        return;
+    }
+    fail(tr("The SSH connection was lost while probing remote storage capabilities."));
+}
+
+void SshSession::scheduleRemoteStorageCapabilityProbe(bool activityAvailable)
+{
+    if (m_impl->storageCapabilityProcess == nullptr) {
+        return;
+    }
+    const auto schedule = m_impl->storageCapabilityPollScheduler.schedule(activityAvailable);
+    if (schedule.has_value()) {
+        QTimer::singleShot(schedule->delayMilliseconds, this, [this, schedule] {
+            if (m_impl->storageCapabilityPollScheduler.consume(schedule->generation)) {
+                processRemoteStorageCapabilityProbe();
+            }
+        });
+    }
+}
+
+void SshSession::processRemoteStorageCapabilityProbe()
+{
+    if (m_impl->storageCapabilityProcess == nullptr) {
+        return;
+    }
+    const SshCommandPollResult poll = m_impl->storageCapabilityProcess->poll();
+    if (!poll.connectionLost && !poll.result.has_value()) {
+        scheduleRemoteStorageCapabilityProbe(poll.activityAvailable);
+        return;
+    }
+
+    if (poll.connectionLost &&
+        (m_impl->session == nullptr || ssh_is_connected(m_impl->session) == 0)) {
+        fail(tr("The SSH connection was lost while probing remote storage capabilities."));
+        return;
+    }
+
+    const auto stage = m_impl->storageCapabilityLifecycle.stage();
+    if (poll.result.has_value()) {
+        if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::Posix) {
+            m_impl->storageCapabilityLifecycle.recordPosixResult(*poll.result);
+            m_impl->volumeCapabilityCache.update(
+                rfm::ssh::RemoteLinuxVolumeService::parseCapabilities(
+                    poll.result->standardOutput.toUtf8()));
+        } else if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::WindowsPowerShell) {
+            m_impl->storageCapabilityLifecycle.recordWindowsResult(*poll.result);
+        }
+    } else if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::Posix) {
+        m_impl->storageCapabilityLifecycle.skipPosix();
+        m_impl->volumeCapabilityCache.update({true, false, false, false, false});
+    } else if (stage == rfm::ssh::RemoteStorageCapabilityProbeStage::WindowsPowerShell) {
+        m_impl->storageCapabilityLifecycle.skipWindows();
+    }
+    m_impl->storageCapabilityProcess.reset();
+    startNextRemoteStorageCapabilityProbe();
+}
+
+void SshSession::finishRemoteStorageCapabilityProbe()
+{
+    if (m_impl->storageCapabilityLifecycle.stage() !=
+        rfm::ssh::RemoteStorageCapabilityProbeStage::Complete) {
+        return;
+    }
+    m_impl->currentServerCapabilities.storage =
+        m_impl->storageCapabilityLifecycle.capabilities();
+    emit remoteStorageCapabilitiesDetected(m_impl->currentServerCapabilities.storage);
+    startPendingRemoteWork();
 }
 
 void SshSession::listDirectory(quint64 requestId, QString path)
@@ -2252,7 +2502,12 @@ void SshSession::listStorageVolumes(quint64 requestId)
 
 void SshSession::startRemoteStorageScanner(quint64 requestId)
 {
-    if (requestId == 0 || m_impl->sftp == nullptr) {
+    const auto& storage = m_impl->currentServerCapabilities.storage;
+    if (requestId == 0 || m_impl->sftp == nullptr ||
+        !rfm::ssh::RemoteStorageCapabilityProbe::linuxScannerApplicable(storage)) {
+        if (requestId != 0) {
+            emit storageVolumeListingUnsupported(requestId);
+        }
         return;
     }
     m_impl->storageScanner = std::make_unique<rfm::ssh::RemoteStorageScanner>(
@@ -2325,6 +2580,13 @@ void SshSession::operateVolume(rfm::core::VolumeOperationRequest request)
         emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
             request, rfm::core::VolumeOperationError::ConnectionLost,
             QStringLiteral("No active SSH session is available.")));
+        return;
+    }
+    if (m_impl->currentServerCapabilities.storage.provider !=
+        rfm::core::RemoteStorageProvider::Linux) {
+        emit volumeOperationFinished(rfm::core::makeVolumeOperationResult(
+            request, rfm::core::VolumeOperationError::ToolUnavailable,
+            QStringLiteral("Remote Linux volume operations are unavailable for this session.")));
         return;
     }
     if (!rfm::core::isSafeLinuxDevicePath(request.target.device)) {
@@ -2401,6 +2663,18 @@ void SshSession::startPendingRemoteWork()
     if (m_impl->session == nullptr || ssh_is_connected(m_impl->session) == 0) {
         return;
     }
+    if (m_impl->pendingStorageRequestId != 0) {
+        const auto& storage = m_impl->currentServerCapabilities.storage;
+        if (storage.detectionState != rfm::core::CapabilityDetectionState::Detected) {
+            return;
+        }
+        if (storage.provider != rfm::core::RemoteStorageProvider::Linux) {
+            const quint64 requestId = std::exchange(m_impl->pendingStorageRequestId, quint64{0});
+            m_impl->pendingBlockDevices.clear();
+            emit storageVolumeListingUnsupported(requestId);
+            return;
+        }
+    }
     if (!m_impl->volumeCapabilityCache.value().known) {
         const bool capabilityActive =
             m_impl->activeVolumeCommand.has_value() &&
@@ -2430,8 +2704,11 @@ void SshSession::startPendingRemoteWork()
                 requestId,
                 {},
                 {}});
-        } else {
+        } else if (m_impl->currentServerCapabilities.storage.linuxMountInfo ==
+                   rfm::core::CapabilitySupport::Supported) {
             startRemoteStorageScanner(requestId);
+        } else {
+            emit storageVolumeListingUnsupported(requestId);
         }
     }
 
@@ -2587,6 +2864,16 @@ void SshSession::processVolumeCommandStep()
         } else {
             m_impl->pendingBlockDevices.clear();
         }
+        if (m_impl->currentServerCapabilities.storage.linuxMountInfo !=
+            rfm::core::CapabilitySupport::Supported) {
+            QList<rfm::core::StorageVolume> volumes =
+                rfm::core::mergeLinuxBlockDevices({}, m_impl->pendingBlockDevices);
+            m_impl->pendingBlockDevices.clear();
+            emit storageMountInfoFingerprint(task.storageRequestId,
+                                             rfm::core::storageVolumeFingerprint(volumes));
+            emit storageVolumesListed(task.storageRequestId, std::move(volumes));
+            break;
+        }
         startRemoteStorageScanner(task.storageRequestId);
         break;
     case SshVolumeCommandPurpose::RevalidateVolumeOperation: {
@@ -2640,6 +2927,11 @@ void SshSession::probeStorageMounts(quint64 requestId)
         return;
     }
     if (m_impl->storageScanner != nullptr || m_impl->storageProbeRequestId != 0) {
+        return;
+    }
+    const auto& storage = m_impl->currentServerCapabilities.storage;
+    if (!rfm::ssh::RemoteStorageCapabilityProbe::linuxScannerApplicable(storage)) {
+        emit storageMountProbeUnsupported(requestId);
         return;
     }
     const QByteArray path = QByteArrayLiteral("/proc/self/mountinfo");
@@ -2776,7 +3068,18 @@ void SshSession::startRemoteOperation(rfm::core::RemoteOperationRequest request)
         fail(tr("The remote operation executor received overlapping jobs."));
         return;
     }
-    m_impl->copyBackend = std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteCopyMethod copyMethod = rfm::core::RemoteCopyMethod::ClientMediatedSftp;
+    rfm::core::NativeServerCopyPrimitive nativePrimitive =
+        rfm::core::NativeServerCopyPrimitive::None;
+    if (request.kind == rfm::core::RemoteOperationKind::Copy) {
+        copyMethod = rfm::core::selectRemoteCopyMethod(m_impl->currentServerCapabilities,
+                                                       m_impl->remoteCopyExecutionCapabilities);
+        nativePrimitive = m_impl->remoteCopyExecutionCapabilities.nativePrimitive;
+        qDebug().noquote() << QStringLiteral("Remote copy method: %1")
+                                  .arg(remoteCopyMethodDescription(copyMethod, nativePrimitive));
+    }
+    m_impl->copyBackend = std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp,
+                                                                     copyMethod, nativePrimitive);
     m_impl->activeCopyJob = std::make_unique<rfm::core::ServerSideCopyJob>(
         *m_impl->copyBackend, request.id, std::move(request.sources),
         std::move(request.destinationDirectory), request.kind);
@@ -3056,6 +3359,9 @@ void SshSession::disconnectFromHost()
 {
     cancelStorageProbe();
     cancelStorageScan();
+    m_impl->remoteCopyCapabilityProcess.reset();
+    m_impl->remoteCopyCapabilityPollScheduler.cancel();
+    m_impl->remoteCopyExecutionCapabilities = {};
     m_impl->disconnecting = true;
     if (m_impl->activeTransferJob != nullptr && !m_impl->activeTransferJob->isFinished()) {
         static_cast<void>(m_impl->activeTransferJob->requestCancel());
