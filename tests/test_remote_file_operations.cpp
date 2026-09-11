@@ -534,6 +534,7 @@ class RemoteFileOperationsTest final : public QObject
     void refusesSelectedAndNestedRemoteMountPoints();
     void preflightsAllRemoteSourcesBeforeRemoval();
     void detectsBindMountAndMalformedMountInfo();
+    void acceptsFileSystemSpecificMountRoots();
     void doesNotTraverseRemoteSymlinksAndRemovesOrdinaryTrees();
     void emitsWorkerOperationErrors();
     void treatsListingWithoutSessionAsFatal();
@@ -2068,6 +2069,31 @@ void RemoteFileOperationsTest::detectsBindMountAndMalformedMountInfo()
         });
     QVERIFY(!result.allSucceeded());
     QVERIFY(backend.nodes.contains(QStringLiteral("/tree")));
+}
+
+void RemoteFileOperationsTest::acceptsFileSystemSpecificMountRoots()
+{
+    const QByteArray representativeMountInfo =
+        "34 2 8:2 / / rw,relatime shared:1 - ext4 /dev/sda2 rw\n"
+        "399 32 0:5 net:[4026531833] /run/docker/netns/default rw shared:281 - nsfs nsfs rw\n"
+        "833 34 0:90 / /mnt/usbtemp rw,relatime shared:456 - btrfs /dev/sdi1 "
+        "rw,space_cache=v2,subvolid=5,subvol=/\n";
+
+    QCOMPARE(rfm::core::linuxMountPointState(representativeMountInfo,
+                                             QStringLiteral("/home/gabriel/rfm-big.bin")),
+             rfm::core::RemoteMountPointState::NotMountPoint);
+    QCOMPARE(rfm::core::linuxMountPointState(representativeMountInfo, QStringLiteral("/")),
+             rfm::core::RemoteMountPointState::MountPoint);
+    QCOMPARE(
+        rfm::core::linuxMountPointState(representativeMountInfo, QStringLiteral("/mnt/usbtemp")),
+        rfm::core::RemoteMountPointState::MountPoint);
+
+    const QByteArray malformedMountInfo =
+        representativeMountInfo +
+        "900 34 0:5 invalid\\999 /run/invalid rw shared:500 - nsfs nsfs rw\n";
+    QCOMPARE(rfm::core::linuxMountPointState(malformedMountInfo,
+                                             QStringLiteral("/home/gabriel/rfm-big.bin")),
+             rfm::core::RemoteMountPointState::Unknown);
 }
 
 void RemoteFileOperationsTest::doesNotTraverseRemoteSymlinksAndRemovesOrdinaryTrees()
