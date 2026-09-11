@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/InternalTransfer.hpp"
 #include "remotefilemanager/core/LocalFileSystem.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
+#include "remotefilemanager/core/RemoteCopyStrategy.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
@@ -148,6 +149,10 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void editServerProfile(const QString& id);
     Q_INVOKABLE void handleServerCapabilitiesDetected(rfm::core::ConnectionProfile profile,
                                                       rfm::core::ServerCapabilities capabilities);
+    Q_INVOKABLE void handleRemoteCopyExecutionCapabilitiesDetected(
+        rfm::core::RemoteCopyExecutionCapabilities capabilities);
+    Q_INVOKABLE void handleRemoteStorageCapabilitiesDetected(
+        rfm::core::RemoteStorageCapabilities capabilities);
     void associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,
                                      const rfm::core::ConnectionProfile& savedProfile);
     void removeSelectedServerProfile();
@@ -266,10 +271,12 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleLocalStorageProbe(quint64 requestId, const QByteArray& fingerprint);
     Q_INVOKABLE void handleRemoteStorageVolumes(quint64 requestId,
                                                 const QList<rfm::core::StorageVolume>& volumes);
+    Q_INVOKABLE void handleRemoteStorageUnsupported(quint64 requestId);
     Q_INVOKABLE void handleRemoteStorageError(quint64 requestId, const QString& error);
     Q_INVOKABLE void handleRemoteStorageFingerprint(quint64 requestId,
                                                     const QByteArray& fingerprint);
     Q_INVOKABLE void handleRemoteStorageProbe(quint64 requestId, const QByteArray& fingerprint);
+    Q_INVOKABLE void handleRemoteStorageProbeUnsupported(quint64 requestId);
     Q_INVOKABLE void handleRemoteStorageProbeError(quint64 requestId, const QString& error);
     void updateNavigationActions();
     [[nodiscard]] QString activeRemoteMachineId() const;
@@ -344,6 +351,7 @@ class MainWindow final : public QMainWindow
     rfm::core::LocalFileOperationWorker* m_localFileOperationWorker{nullptr};
     rfm::core::VolumeOperationWorker* m_volumeOperationWorker{nullptr};
     rfm::core::ConnectionProfile m_activeProfile;
+    std::optional<rfm::core::RemoteCopyExecutionCapabilities> m_remoteCopyExecutionCapabilities;
     QString m_activeSavedProfileId;
     struct ServerCapabilitiesRecord {
         rfm::core::ConnectionProfile profile;

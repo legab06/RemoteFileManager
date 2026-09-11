@@ -484,6 +484,7 @@ class MainWindowTest final : public QObject
     void removesProfileWhenCapabilitiesCacheUsesUnknownVersion();
     void keepsServerCapabilitiesIsolatedAndReplacesSnapshots();
     void restoresLastKnownCapabilitiesAndTracksCurrentDetection();
+    void propagatesRuntimeCopyCapabilitiesToCurrentProperties();
     void savesManualServerOnlyAfterSuccessAndAvoidsDuplicates();
     void disconnectActionFollowsSessionLifecycle();
     void coalescesConnectionErrorsFromOneDisconnect();
@@ -559,6 +560,7 @@ class MainWindowTest final : public QObject
     void temporaryConnectionAppearsInPlacesAndRejectsStaleStorage();
     void ignoresStaleResultsAfterSwitchingNavigationSource();
     void refreshesRemoteStorageOnlyAfterProbeFingerprintChanges();
+    void unsupportedRemoteStorageProbeIsSilentAndCanRetry();
     void volumeRequestsPreserveDeviceMountPoints();
     void volumeRequestsPreserveInconsistentSiblingEvidence();
     void volumeOperationSuccessWaitsForSystemRefresh();
@@ -1020,6 +1022,31 @@ void MainWindowTest::refreshesRemoteStorageOnlyAfterProbeFingerprintChanges()
                                       Q_ARG(quint64, changedProbe),
                                       Q_ARG(QByteArray, QByteArrayLiteral("changed-mounts"))));
     QCOMPARE(refreshes.size(), 2);
+}
+
+void MainWindowTest::unsupportedRemoteStorageProbeIsSilentAndCanRetry()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageProbeRequested, nullptr,
+                        nullptr);
+    QSignalSpy refreshes(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy probes(&window, &rfm::app::MainWindow::remoteStorageProbeRequested);
+    setConnectionIdentity(window);
+    const quint64 initialRefresh = refreshes.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageUnsupported",
+                                      Qt::DirectConnection, Q_ARG(quint64, initialRefresh)));
+
+    window.statusBar()->showMessage(QStringLiteral("unchanged"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "probeStorage", Qt::DirectConnection));
+    QCOMPARE(probes.size(), 1);
+    const quint64 unsupportedProbe = probes.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteStorageProbeUnsupported",
+                                      Qt::DirectConnection, Q_ARG(quint64, unsupportedProbe)));
+    QCOMPARE(window.statusBar()->currentMessage(), QStringLiteral("unchanged"));
+
+    QVERIFY(QMetaObject::invokeMethod(&window, "probeStorage", Qt::DirectConnection));
+    QCOMPARE(probes.size(), 2);
 }
 
 void MainWindowTest::opensLocalDirectoryWithoutSshAndNavigatesAsynchronously()
@@ -2605,6 +2632,61 @@ void MainWindowTest::restoresLastKnownCapabilitiesAndTracksCurrentDetection()
                   QStringLiteral("Not detected"), QStringLiteral("Not detected"));
 }
 
+void MainWindowTest::propagatesRuntimeCopyCapabilitiesToCurrentProperties()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ConnectionProfile profile{
+        QStringLiteral("Server A"), QStringLiteral("a.example.test"), QStringLiteral("alice"), 22,
+        QStringLiteral("profile-a")};
+    rfm::core::ServerProfileStore profileStore(temporary.path());
+    QString error;
+    QVERIFY(profileStore.save({profile}, &error));
+
+    rfm::app::MainWindow window(nullptr, {}, temporary.path());
+    QObject::disconnect(&window, &rfm::app::MainWindow::connectionRequested, nullptr, nullptr);
+    QVERIFY(QMetaObject::invokeMethod(&window, "connectToServerProfile", Qt::DirectConnection,
+                                      Q_ARG(QString, profile.id)));
+    const auto serverCapabilities = rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc());
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleServerCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::ConnectionProfile, profile),
+                                      Q_ARG(rfm::core::ServerCapabilities, serverCapabilities)));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    const rfm::core::RemoteCopyExecutionCapabilities runtime{
+        false, rfm::core::CapabilitySupport::Supported,
+        rfm::core::NativeServerCopyPrimitive::PosixCp};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleRemoteCopyExecutionCapabilitiesDetected",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteCopyExecutionCapabilities, runtime)));
+
+    bool inspected = false;
+    QString backendStatus;
+    QString nativeStatus;
+    QString effectiveMethod;
+    QTimer::singleShot(0, &window, [&] {
+        auto* const dialog =
+            qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        backendStatus =
+            dialog->findChild<QLabel*>(QStringLiteral("copyDataBackendStatusLabel"))->text();
+        nativeStatus = dialog->findChild<QLabel*>(QStringLiteral("nativeCopyStatusLabel"))->text();
+        effectiveMethod =
+            dialog->findChild<QLabel*>(QStringLiteral("effectiveCopyMethodLabel"))->text();
+        inspected = true;
+        dialog->reject();
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "editServerProfile", Qt::DirectConnection,
+                                      Q_ARG(QString, profile.id)));
+    QVERIFY(inspected);
+    QCOMPARE(backendStatus, QStringLiteral("Not supported"));
+    QCOMPARE(nativeStatus, QStringLiteral("Supported"));
+    QCOMPARE(effectiveMethod, QStringLiteral("Native server copy (POSIX cp)"));
+}
+
 void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
 {
     QTemporaryDir temporary;
@@ -2665,6 +2747,17 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
         Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+    rfm::core::RemoteStorageCapabilities storageCapabilities;
+    storageCapabilities.detectionState = rfm::core::CapabilityDetectionState::Detected;
+    storageCapabilities.linuxMountInfo = rfm::core::CapabilitySupport::Unsupported;
+    storageCapabilities.windowsPowerShell = rfm::core::CapabilitySupport::Supported;
+    storageCapabilities.windowsGetVolume = rfm::core::CapabilitySupport::Supported;
+    storageCapabilities.windowsGetDisk = rfm::core::CapabilitySupport::Supported;
+    storageCapabilities.provider =
+        rfm::core::selectRemoteStorageProvider(storageCapabilities);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageCapabilitiesDetected", Qt::DirectConnection,
+        Q_ARG(rfm::core::RemoteStorageCapabilities, storageCapabilities)));
     QList saved = store.load(&error);
     QVERIFY(error.isEmpty());
     QCOMPARE(saved.size(), 1);
@@ -2672,7 +2765,10 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QCOMPARE(saved.constFirst().host, QStringLiteral("saved.example.test"));
     QVERIFY(saved.constFirst().allowPasswordAuthentication);
     QCOMPARE(saved.constFirst().privateKeyPath, QStringLiteral("~/.ssh/saved_server"));
-    QCOMPARE(capabilitiesStore.load(&error).size(), 1);
+    const auto savedCapabilities = capabilitiesStore.load(&error);
+    QCOMPARE(savedCapabilities.size(), 1);
+    QCOMPARE(savedCapabilities.constFirst().capabilities.storage.provider,
+             rfm::core::RemoteStorageProvider::WindowsPowerShell);
     QVERIFY(error.isEmpty());
     QFile serialized(store.filePath());
     QVERIFY(serialized.open(QIODevice::ReadOnly));
@@ -2682,12 +2778,15 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     QTRY_VERIFY(window.findChild<rfm::app::ConnectionDialog*>() == nullptr);
     bool promotedSnapshotFound = false;
     QString promotedStatus;
+    QString promotedStorageProvider;
     QTimer::singleShot(0, &window, [&] {
         auto* const properties =
             qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
         QVERIFY(properties != nullptr);
         promotedStatus =
             properties->findChild<QLabel*>(QStringLiteral("copyDataStatusLabel"))->text();
+        promotedStorageProvider =
+            properties->findChild<QLabel*>(QStringLiteral("storageProviderLabel"))->text();
         promotedSnapshotFound = true;
         properties->reject();
     });
@@ -2695,6 +2794,7 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
                                       Q_ARG(QString, saved.constFirst().id)));
     QVERIFY(promotedSnapshotFound);
     QCOMPARE(promotedStatus, QStringLiteral("Supported"));
+    QCOMPARE(promotedStorageProvider, QStringLiteral("Windows PowerShell"));
     dialog = openManualConnection();
     QVERIFY(dialog != nullptr);
     QVERIFY(QMetaObject::invokeMethod(

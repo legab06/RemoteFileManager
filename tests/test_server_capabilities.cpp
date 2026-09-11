@@ -24,6 +24,9 @@ void ServerCapabilitiesTest::startsUndetectedWithUnknownCapabilities()
     QVERIFY(!capabilities.detectedAt.isValid());
     QVERIFY(!capabilities.sftpProtocolVersion.has_value());
     QVERIFY(capabilities.sftpExtensions.isEmpty());
+    QCOMPARE(capabilities.storage.detectionState,
+             rfm::core::CapabilityDetectionState::NotDetected);
+    QCOMPARE(capabilities.storage.provider, rfm::core::RemoteStorageProvider::None);
 }
 
 void ServerCapabilitiesTest::supportsCopyDataRevisionOne()

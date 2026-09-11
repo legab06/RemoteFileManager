@@ -30,6 +30,7 @@ add_library(
     ssh/LibsshRuntime.cpp
     ssh/RemoteDelete.hpp
     ssh/RemoteCopyCapabilityProbe.cpp
+    ssh/RemoteStorageCapabilityProbe.cpp
     ssh/RemoteCopyCommand.cpp
     ssh/RemoteStorageScanner.cpp
     ssh/RemoteVolumeService.cpp
@@ -50,6 +51,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteCopyCapabilityProbe.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageCapabilityProbe.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshAuthenticationPolicy.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageScanner.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteVolumeService.hpp

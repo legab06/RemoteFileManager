@@ -73,6 +73,7 @@ class SshSession final : public QObject
                                     rfm::core::ServerCapabilities capabilities);
     void remoteCopyExecutionCapabilitiesDetected(
         rfm::core::RemoteCopyExecutionCapabilities capabilities);
+    void remoteStorageCapabilitiesDetected(rfm::core::RemoteStorageCapabilities capabilities);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
@@ -83,7 +84,9 @@ class SshSession final : public QObject
     void storageMountInfoFingerprint(quint64 requestId, QByteArray fingerprint);
     void storageMountsProbed(quint64 requestId, QByteArray fingerprint);
     void storageMountProbeFailed(quint64 requestId, QString error);
+    void storageMountProbeUnsupported(quint64 requestId);
     void storageVolumeListingFailed(quint64 requestId, QString error);
+    void storageVolumeListingUnsupported(quint64 requestId);
     void volumeOperationFinished(rfm::core::VolumeOperationResult result);
     void operationFinished(rfm::core::RemoteOperationResult result);
     void remoteOperationFinished(rfm::core::RemoteOperationResult result);
@@ -116,6 +119,11 @@ class SshSession final : public QObject
     void startRemoteCopyCapabilityProbe();
     void processRemoteCopyCapabilityProbe();
     void scheduleRemoteCopyCapabilityProbe(bool activityAvailable = true);
+    void startRemoteStorageCapabilityProbe();
+    void startNextRemoteStorageCapabilityProbe();
+    void processRemoteStorageCapabilityProbe();
+    void scheduleRemoteStorageCapabilityProbe(bool activityAvailable = true);
+    void finishRemoteStorageCapabilityProbe();
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();
