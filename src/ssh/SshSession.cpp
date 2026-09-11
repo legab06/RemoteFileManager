@@ -24,6 +24,7 @@
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
+#include <QDebug>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QHash>
@@ -607,8 +608,11 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
   public:
     enum class CommandKind { Copy, MoveStagingCopy, Remove };
 
-    SshServerSideCopyBackend(ssh_session session, sftp_session sftp)
-        : m_session(session), m_sftp(sftp)
+    SshServerSideCopyBackend(ssh_session session, sftp_session sftp,
+                             rfm::core::RemoteCopyMethod copyMethod,
+                             rfm::core::NativeServerCopyPrimitive nativePrimitive)
+        : m_session(session), m_sftp(sftp), m_copyMethod(copyMethod),
+          m_nativePrimitive(nativePrimitive)
     {}
 
     ~SshServerSideCopyBackend() override
@@ -641,6 +645,22 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     {
         if (source.isEmpty() || destination.isEmpty() || m_sftp == nullptr) {
             return {rfm::core::RemoteBackendError::InvalidPath, {}};
+        }
+        if (m_copyMethod == rfm::core::RemoteCopyMethod::NativeServerCopy) {
+            if (m_nativePrimitive != rfm::core::NativeServerCopyPrimitive::PosixCp) {
+                return {rfm::core::RemoteBackendError::Unsupported,
+                        QStringLiteral("No executable native remote copy primitive is available.")};
+            }
+            const QString command =
+                rfm::ssh::RemoteCopyCommand::build(source, destination, recursive);
+            if (command.isEmpty()) {
+                return {rfm::core::RemoteBackendError::InvalidPath, {}};
+            }
+            return startCommand(command, CommandKind::Copy);
+        }
+        if (m_copyMethod == rfm::core::RemoteCopyMethod::SftpCopyData) {
+            return {rfm::core::RemoteBackendError::Unsupported,
+                    QStringLiteral("SFTP copy-data is not executable by the current backend.")};
         }
         closeChannel();
         closeCopyHandles();
@@ -1279,6 +1299,9 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
 
     ssh_session m_session;
     sftp_session m_sftp;
+    rfm::core::RemoteCopyMethod m_copyMethod{rfm::core::RemoteCopyMethod::ClientMediatedSftp};
+    rfm::core::NativeServerCopyPrimitive m_nativePrimitive{
+        rfm::core::NativeServerCopyPrimitive::None};
     ssh_channel m_channel{nullptr};
     QList<CopyTask> m_copyTasks;
     QList<RemoveTask> m_removeTasks;
@@ -1688,6 +1711,22 @@ bool isTerminalTransferState(rfm::core::TransferState state)
            state == rfm::core::TransferState::Failed;
 }
 
+QString remoteCopyMethodDescription(rfm::core::RemoteCopyMethod method,
+                                    rfm::core::NativeServerCopyPrimitive primitive)
+{
+    switch (method) {
+    case rfm::core::RemoteCopyMethod::SftpCopyData:
+        return QStringLiteral("SftpCopyData");
+    case rfm::core::RemoteCopyMethod::NativeServerCopy:
+        return primitive == rfm::core::NativeServerCopyPrimitive::PosixCp
+                   ? QStringLiteral("NativeServerCopy (PosixCp)")
+                   : QStringLiteral("NativeServerCopy (unavailable primitive)");
+    case rfm::core::RemoteCopyMethod::ClientMediatedSftp:
+        return QStringLiteral("ClientMediatedSftp");
+    }
+    return QStringLiteral("Unknown");
+}
+
 } // namespace
 
 namespace rfm::ssh
@@ -1733,6 +1772,7 @@ class SshSession::Impl final
         awaitingVolumeAuthentications.clear();
         volumePollScheduler.cancel();
         volumeCapabilityCache.reset();
+        currentServerCapabilities = {};
         remoteCopyExecutionCapabilities = {};
         if (storageProbeFile != nullptr) {
             sftp_close(storageProbeFile);
@@ -1795,6 +1835,7 @@ class SshSession::Impl final
     QHash<quint64, AwaitingVolumeAuthentication> awaitingVolumeAuthentications;
     QList<rfm::core::LinuxBlockDevice> pendingBlockDevices;
     rfm::ssh::RemoteLinuxVolumeCapabilityCache volumeCapabilityCache;
+    rfm::core::ServerCapabilities currentServerCapabilities;
     rfm::core::RemoteCopyExecutionCapabilities remoteCopyExecutionCapabilities;
     rfm::ssh::SshCommandPollScheduler remoteCopyCapabilityPollScheduler;
     rfm::ssh::SshCommandPollScheduler volumePollScheduler;
@@ -2100,10 +2141,10 @@ void SshSession::openSftp()
     }
 
     const int sftpProtocolVersion = sftp_server_version(m_impl->sftp);
-    const rfm::core::ServerCapabilities capabilities = rfm::core::detectedServerCapabilities(
+    m_impl->currentServerCapabilities = rfm::core::detectedServerCapabilities(
         announcedSftpExtensions(m_impl->sftp), QDateTime::currentDateTimeUtc(),
         sftpProtocolVersion < 0 ? std::nullopt : std::optional<int>{sftpProtocolVersion});
-    emit serverCapabilitiesDetected(m_impl->profile, capabilities);
+    emit serverCapabilitiesDetected(m_impl->profile, m_impl->currentServerCapabilities);
 
     char* const canonicalHome = sftp_canonicalize_path(m_impl->sftp, ".");
     if (canonicalHome == nullptr) {
@@ -2835,7 +2876,18 @@ void SshSession::startRemoteOperation(rfm::core::RemoteOperationRequest request)
         fail(tr("The remote operation executor received overlapping jobs."));
         return;
     }
-    m_impl->copyBackend = std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp);
+    rfm::core::RemoteCopyMethod copyMethod = rfm::core::RemoteCopyMethod::ClientMediatedSftp;
+    rfm::core::NativeServerCopyPrimitive nativePrimitive =
+        rfm::core::NativeServerCopyPrimitive::None;
+    if (request.kind == rfm::core::RemoteOperationKind::Copy) {
+        copyMethod = rfm::core::selectRemoteCopyMethod(m_impl->currentServerCapabilities,
+                                                       m_impl->remoteCopyExecutionCapabilities);
+        nativePrimitive = m_impl->remoteCopyExecutionCapabilities.nativePrimitive;
+        qDebug().noquote() << QStringLiteral("Remote copy method: %1")
+                                  .arg(remoteCopyMethodDescription(copyMethod, nativePrimitive));
+    }
+    m_impl->copyBackend = std::make_unique<SshServerSideCopyBackend>(m_impl->session, m_impl->sftp,
+                                                                     copyMethod, nativePrimitive);
     m_impl->activeCopyJob = std::make_unique<rfm::core::ServerSideCopyJob>(
         *m_impl->copyBackend, request.id, std::move(request.sources),
         std::move(request.destinationDirectory), request.kind);

@@ -492,7 +492,7 @@ class RemoteFileOperationsTest final : public QObject
     void movesSelectionAndReportsPartialFailure();
     void copiesOnServerOrReportsUnsupported();
     void serverSideCopyPollingPreservesSharedSessionBlockingMode();
-    void remoteCopyPathUsesSftpOnly();
+    void remoteCopyBackendRoutesNativeAndClientMediatedPaths();
     void remoteCopyStagingCleanupIsSftpBounded();
     void remoteCopyHandlesSymlinksConservatively();
     void copyStatusProtocolIsDeterministic();
@@ -570,10 +570,17 @@ void RemoteFileOperationsTest::quotesCopyCommandWithoutInjection()
     const QString copy = rfm::ssh::RemoteCopyCommand::build(
         QStringLiteral("./a'; touch /tmp/pwned; '"), QStringLiteral("./target/file"), false);
     QVERIFY(copy.contains(
-        QStringLiteral("cp -P -n -- './a'\\''; touch /tmp/pwned; '\\''' './target/file'")));
+        QStringLiteral("cp -P -p './a'\\''; touch /tmp/pwned; '\\''' './target/file'")));
     const QString recursiveCopy = rfm::ssh::RemoteCopyCommand::build(
         QStringLiteral("./folder"), QStringLiteral("/backup/folder"), true);
-    QVERIFY(recursiveCopy.contains(QStringLiteral("cp -P -R -n -- './folder' '/backup/folder'")));
+    QVERIFY(recursiveCopy.contains(QStringLiteral("cp -P -p -R './folder' '/backup/folder'")));
+    const QString unusualCopy = rfm::ssh::RemoteCopyCommand::build(
+        QStringLiteral("/srv/- source \"été\""), QStringLiteral("/backup/O'Brien;$(id)"), false);
+    QVERIFY(unusualCopy.contains(
+        QStringLiteral("cp -P -p '/srv/- source \"été\"' '/backup/O'\\''Brien;$(id)'")));
+    const QString leadingHyphenCopy = rfm::ssh::RemoteCopyCommand::build(
+        QStringLiteral("-source"), QStringLiteral("-destination"), false);
+    QVERIFY(leadingHyphenCopy.contains(QStringLiteral("cp -P -p './-source' './-destination'")));
     for (const QString& command : {copy, recursiveCopy}) {
         QVERIFY(command.contains(QStringLiteral("trap 'rfm_forward_term' TERM HUP INT")));
         QVERIFY(command.contains(QStringLiteral("kill -TERM \"$rfm_copy_pid\"")));
@@ -841,7 +848,7 @@ void RemoteFileOperationsTest::serverSideCopyPollingPreservesSharedSessionBlocki
     QVERIFY(implementation.contains("parseCopyStatus(m_standardOutput)"));
 }
 
-void RemoteFileOperationsTest::remoteCopyPathUsesSftpOnly()
+void RemoteFileOperationsTest::remoteCopyBackendRoutesNativeAndClientMediatedPaths()
 {
     QFile source(QStringLiteral(RFM_SOURCE_DIR "/src/ssh/SshSession.cpp"));
     QVERIFY(source.open(QIODevice::ReadOnly));
@@ -852,7 +859,26 @@ void RemoteFileOperationsTest::remoteCopyPathUsesSftpOnly()
     QVERIFY(end > start);
     const QByteArray copyPath = implementation.sliced(start, end - start);
 
+    const qsizetype nativeBranch = copyPath.indexOf("RemoteCopyMethod::NativeServerCopy");
+    const qsizetype nativeCommand = copyPath.indexOf("RemoteCopyCommand::build", nativeBranch);
+    const qsizetype nativeStart =
+        copyPath.indexOf("startCommand(command, CommandKind::Copy)", nativeCommand);
+    const qsizetype clientMediatedStart = copyPath.indexOf("closeChannel()", nativeStart);
+    QVERIFY(nativeBranch >= 0);
+    QVERIFY(nativeCommand > nativeBranch);
+    QVERIFY(nativeStart > nativeCommand);
+    QVERIFY(clientMediatedStart > nativeStart);
+    const QByteArray nativePath = copyPath.sliced(nativeBranch, clientMediatedStart - nativeBranch);
+    QVERIFY(!nativePath.contains("m_copyActive"));
+    QVERIFY(!nativePath.contains("sftp_read"));
+    QVERIFY(!nativePath.contains("sftp_write"));
+    QVERIFY(copyPath.indexOf("m_copyTasks.push_back", clientMediatedStart) > clientMediatedStart);
+    QVERIFY(copyPath.indexOf("m_copyActive = true", clientMediatedStart) > clientMediatedStart);
+    QVERIFY(implementation.contains("request.kind == rfm::core::RemoteOperationKind::Copy"));
+    QVERIFY(implementation.contains("selectRemoteCopyMethod(m_impl->currentServerCapabilities"));
+    QVERIFY(implementation.contains("Remote copy method: %1"));
     QVERIFY(implementation.contains("pollSftpCopy"));
+    QVERIFY(implementation.contains("m_copyActive ? pollSftpCopy() : pollCommand()"));
     QVERIFY(implementation.contains("sftp_open"));
     QVERIFY(implementation.contains("sftp_read"));
     QVERIFY(implementation.contains("sftp_write"));
@@ -861,9 +887,6 @@ void RemoteFileOperationsTest::remoteCopyPathUsesSftpOnly()
     QVERIFY(implementation.contains("m_copyBufferOffset"));
     QVERIFY(implementation.contains("written > remaining"));
     QVERIFY(implementation.contains("SSH_FILEXFER_TYPE_DIRECTORY"));
-    QVERIFY(!copyPath.contains("RemoteCopyCommand::build"));
-    QVERIFY(!copyPath.contains("ssh_channel_request_exec"));
-    QVERIFY(!copyPath.contains("cp "));
     QVERIFY(!copyPath.contains("rm "));
 }
 

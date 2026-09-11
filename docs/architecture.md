@@ -91,9 +91,34 @@ en charge sélectionne le fallback conservateur `ClientMediatedSftp`. Avec le ba
 libssh actuel, la stratégie disponible est donc `PosixCp` lorsqu'il a été vérifié, puis
 SFTP médié par le client. `copy-data` reste la priorité future dans le modèle.
 
-Le moteur de Remote Copy ne consomme pas encore le sélecteur et n'exécute pas encore
-`cp` : `ServerSideCopyJob` et son backend conservent exactement leur mécanisme actuel.
-Ce lot détecte et publie seulement les faits nécessaires au branchement ultérieur.
+Pour chaque `RemoteOperationKind::Copy`, `SshSession` consomme désormais ce sélecteur
+avec les deux snapshots runtime courants, puis configure `SshServerSideCopyBackend` :
+
+```text
+Remote Copy
+    ↓
+selectRemoteCopyMethod()
+    ├─ SftpCopyData
+    │      présent dans le modèle, mais non exécutable avec libssh 0.12.2
+    ├─ NativeServerCopy / PosixCp
+    │      cp côté serveur, sans transit des octets par RFM
+    └─ ClientMediatedSftp
+           sftp_read → client → sftp_write
+```
+
+Le chemin `PosixCp` réutilise le processus SSH coopératif existant, son protocole de
+statut et sa terminaison par signal. La commande emploie uniquement les options POSIX
+`-P`, `-p` et, pour un dossier, `-R`; ses arguments sont protégés par le quoting shell
+à apostrophes déjà centralisé dans `RemoteCopyCommand`. `-n` et `--`, non garantis par
+POSIX, ne sont pas nécessaires car la destination `staging/item` est réservée et vérifiée
+absente avant le lancement. `-P` préserve les liens symboliques sans les déréférencer ;
+le fallback SFTP reste plus restrictif et refuse les liens qu'il ne sait pas recréer.
+
+Dans les deux chemins, `ServerSideCopyJob` conserve le même contrôle de collision, le
+staging `.rfm-copy-<uuid>.partial/item`, la promotion atomique par rename et le cleanup.
+Un échec runtime de `cp` est terminal pour l'item et ne déclenche aucun fallback SFTP
+silencieux. La copie native ne publie pas de fausse progression en octets. Le Move
+conserve sa sélection et sa commande de staging historiques.
 
 ## Flux actuel
 
