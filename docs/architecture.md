@@ -18,8 +18,28 @@ extensions et relève la version du protocole avec l'API publique libssh, puis p
 le snapshot avec le profil de la connexion courante. L'état dérivé `copy-data` v1
 n'est `Supported` que pour une extension annoncée dont le nom vaut `copy-data` et la
 donnée vaut `1`; il reste `Unknown` avant détection et devient `Unsupported` après
-une détection sans cette paire exacte. Cette donnée runtime ne modifie pas encore la
-stratégie Remote Copy.
+une détection sans cette paire exacte. Ce snapshot décrit ce que le serveur annonce,
+pas ce que le backend RFM sait nécessairement exécuter.
+
+Le cœur représente séparément les méthodes réellement exécutables dans la session par
+`RemoteCopyExecutionCapabilities`. `sftpCopyDataAvailable` décrit l'aptitude du backend
+à invoquer l'extension, tandis que `nativeServerCopy` (`Unknown`, `Unsupported` ou
+`Supported`) et `nativePrimitive` décrivent le résultat d'une sonde runtime. La seule
+primitive native reconnue dans ce lot est `NativeServerCopyPrimitive::PosixCp`. Avec
+libssh 0.12.2, le serveur peut annoncer `copy-data` v1, mais aucune API publique ne
+permet à RFM de l'invoquer : le backend centralise donc
+`sftpCopyDataAvailable == false`.
+
+Après l'ouverture SFTP et la lecture initiale réussies, `SshSession` utilise son
+exécuteur asynchrone de commandes SSH pour lancer la sonde fixe et sans écriture
+`command -v cp >/dev/null 2>&1`. Un exit status 0 établit `PosixCp` comme `Supported` ;
+un exit status non nul prouve seulement que cette primitive est `Unsupported`. Un
+échec d'ouverture ou de lecture du canal, un timeout, une coupure de transport ou
+l'absence d'exit status exploitable laisse la capability `Unknown` et ne fait pas
+échouer à lui seul une connexion utilisable. Aucune déduction n'est faite depuis l'OS,
+le hostname, OpenSSH, les chemins ou les extensions SFTP. L'état est conservé seulement
+dans `SshSession` et revient à sa valeur inconnue dans `Impl::reset()` lors d'une
+déconnexion.
 
 `MainWindow` conserve le dernier snapshot en mémoire par identité de profil. Un profil
 enregistré utilise son identifiant stable ; une connexion temporaire utilise l'identité
@@ -46,32 +66,34 @@ Un snapshot relu au démarrage est toujours une information `Last known`, jamais
 preuve de la connexion courante. Toute future connexion exécute à nouveau la découverte
 réelle depuis le protocole SFTP et remplace ensuite le snapshot persistant. La découverte
 reste fondée sur les capabilities annoncées par SFTP, et non sur le système d'exploitation
-supposé du serveur. `copy-data` est une extension SFTP ; ni sa présence ni les snapshots
-persistés ne déterminent encore la stratégie Remote Copy dans cette branche.
+supposé du serveur. Les capabilities natives de copie ne sont jamais écrites dans
+`server-capabilities.json` et un snapshot persistant ne peut donc jamais autoriser une
+commande native.
 
 Le cœur expose aussi une sélection pure de méthode de copie distante :
 
 ```text
-Current SFTP capabilities
+ServerCapabilities
+        +
+RemoteCopyExecutionCapabilities
         ↓
-RemoteCopyMethod selection
+selectRemoteCopyMethod()
         ↓
 SftpCopyData
-        ou
+NativeServerCopy
 ClientMediatedSftp
 ```
 
-Dans ce lot, seule une capability SFTP courante dont `copy-data` v1 est `Supported`
-sélectionne `SftpCopyData`; toute autre valeur, y compris `Unknown`, choisit le fallback
-sûr `ClientMediatedSftp`. Cette décision ne s'appuie ni sur le système d'exploitation,
-ni sur OpenSSH, ni sur le hostname. Le moteur de copie ne consomme pas encore ce
-sélecteur. Lors du branchement futur, il devra consommer les capabilities détectées pour
-la session SSH actuelle après `sftp_init()`, jamais un snapshot persistant `Last known`.
+`SftpCopyData` exige à la fois un snapshot serveur courant et détecté annonçant la
+révision 1, et un backend capable de l'invoquer. À défaut, une primitive native vérifiée
+et identifiée sélectionne `NativeServerCopy`; tout état inconnu, incohérent ou non pris
+en charge sélectionne le fallback conservateur `ClientMediatedSftp`. Avec le backend
+libssh actuel, la stratégie disponible est donc `PosixCp` lorsqu'il a été vérifié, puis
+SFTP médié par le client. `copy-data` reste la priorité future dans le modèle.
 
-La cible future est, dans cet ordre : SFTP `copy-data`, `NativeServerCopy`, puis SFTP
-médié par le client. `NativeServerCopy` figure déjà dans le type pour stabiliser l'API,
-mais n'est ni détecté ni sélectionné tant qu'une détection et une exécution portables et
-sûres n'ont pas été implémentées.
+Le moteur de Remote Copy ne consomme pas encore le sélecteur et n'exécute pas encore
+`cp` : `ServerSideCopyJob` et son backend conservent exactement leur mécanisme actuel.
+Ce lot détecte et publie seulement les faits nécessaires au branchement ultérieur.
 
 ## Flux actuel
 

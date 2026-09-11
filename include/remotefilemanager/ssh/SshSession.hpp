@@ -2,6 +2,7 @@
 
 #include "remotefilemanager/core/ConnectionProfile.hpp"
 #include "remotefilemanager/core/OperationProgress.hpp"
+#include "remotefilemanager/core/RemoteCopyStrategy.hpp"
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
@@ -70,6 +71,8 @@ class SshSession final : public QObject
     void passwordAuthenticationRejected(QString message);
     void serverCapabilitiesDetected(rfm::core::ConnectionProfile profile,
                                     rfm::core::ServerCapabilities capabilities);
+    void remoteCopyExecutionCapabilitiesDetected(
+        rfm::core::RemoteCopyExecutionCapabilities capabilities);
     void connected(QString initialPath, QList<rfm::core::RemoteEntry> entries);
     void directoryListed(quint64 requestId, QString path, QList<rfm::core::RemoteEntry> entries);
     void directoryListingFailed(quint64 requestId, QString path, QString error);
@@ -110,6 +113,9 @@ class SshSession final : public QObject
     void authenticateAndOpen();
     void authenticateWithPassword(rfm::core::SecurePassword password);
     void openSftp();
+    void startRemoteCopyCapabilityProbe();
+    void processRemoteCopyCapabilityProbe();
+    void scheduleRemoteCopyCapabilityProbe(bool activityAvailable = true);
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();
