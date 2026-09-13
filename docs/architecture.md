@@ -180,6 +180,27 @@ le fallback SFTP reste plus restrictif et refuse les liens qu'il ne sait pas rec
 
 Dans les deux chemins, `ServerSideCopyJob` conserve le même contrôle de collision, le
 staging `.rfm-copy-<uuid>.partial/item`, la promotion atomique par rename et le cleanup.
+Le backend peut d'abord lancer un préflight coopératif, distinct du polling de copie. Pour
+`ClientMediatedSftp`, il parcourt les sources récursivement dans le worker, avec un `lstat`
+ou une entrée de répertoire par step, et exige l'attribut SFTP de taille de chaque fichier
+régulier. Il termine avant la réservation du staging et fournit alors un total global exact,
+y compris pour les dossiers, la multisélection et les fichiers vides. Les liens symboliques,
+types spéciaux et erreurs de listing restent refusés avec la même politique que la copie.
+
+Le polling sépare le résultat terminal d'une télémétrie d'octets optionnelle. Le job agrège
+les octets réellement signalés (`items terminés + item courant`) contre ce total global ; il
+ne synthétise ni taille ni progression. Les octets sont incrémentés uniquement après chaque
+`sftp_write` réussi, short writes compris. Pendant la copie, `ServerSideCopyJob` mesure le
+débit à partir des deltas de ces octets et d'une horloge monotone, avec une fenêtre minimale
+pour éviter un premier échantillon instable. Le débit est remis à zéro entre les items et à
+chaque état terminal, erreur ou annulation.
+
+Si le backend ne publie pas les octets, ou si le système de fichiers change au point de rendre
+le total incohérent, RFM préfère une progression indéterminée à une estimation mensongère.
+Un backend qui observe des octets sans connaître un total exact conserve cette progression
+indéterminée ; son débit réel peut néanmoins être publié. `PosixCp` et le Move ne font pas de
+préflight et ne publient ni progression factice en octets, ni débit. `SftpCopyData` peut
+réutiliser ce modèle de télémétrie, mais son backend reste non implémenté.
 Un échec runtime de `cp` est terminal pour l'item et ne déclenche aucun fallback SFTP
 silencieux. La copie native ne publie pas de fausse progression en octets. Le Move
 conserve sa sélection et sa commande de staging historiques.

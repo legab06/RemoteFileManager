@@ -1,5 +1,6 @@
 #include "remotefilemanager/ssh/SshSession.hpp"
 
+#include "RemoteCopyTelemetryCounter.hpp"
 #include "RemoteDelete.hpp"
 #include "SftpTransferBackend.hpp"
 #include "SshTransportHealth.hpp"
@@ -620,6 +621,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     {
         closeChannel();
         closeCopyHandles();
+        closePreflightDirectory();
     }
 
     rfm::core::RemoteProbeResult probe(const QString& path) override
@@ -644,6 +646,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     rfm::core::RemoteBackendResult startCopy(const QString& source, const QString& destination,
                                              bool recursive) override
     {
+        m_copyTelemetry.reset(std::nullopt, m_preflightByteProgressAvailable);
         if (source.isEmpty() || destination.isEmpty() || m_sftp == nullptr) {
             return {rfm::core::RemoteBackendError::InvalidPath, {}};
         }
@@ -676,6 +679,126 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         m_copyCancellationPending = false;
         m_copyTasks.push_back({source, destination});
         return {};
+    }
+
+    rfm::core::RemoteBackendResult
+    startCopyPreflight(const QList<rfm::core::RemoteSelection>& sources) override
+    {
+        cancelCopyPreflight();
+        m_preflightByteProgressAvailable = false;
+        if (m_copyMethod != rfm::core::RemoteCopyMethod::ClientMediatedSftp) {
+            return {};
+        }
+        if (m_sftp == nullptr) {
+            return {rfm::core::RemoteBackendError::Failure,
+                    QStringLiteral("The SFTP session is not available.")};
+        }
+        m_preflightTotalBytes = 0;
+        for (auto iterator = sources.crbegin(); iterator != sources.crend(); ++iterator) {
+            m_preflightTasks.push_back(
+                {rfm::core::RemotePath::normalize(iterator->path), iterator->directory});
+        }
+        m_preflightActive = true;
+        return {};
+    }
+
+    rfm::core::RemoteCopyPreflightPoll pollCopyPreflight() override
+    {
+        if (!m_preflightActive) {
+            return {rfm::core::RemoteBackendResult{}, std::nullopt};
+        }
+        if (m_preflightDirectory != nullptr) {
+            sftp_attributes child = sftp_readdir(m_sftp, m_preflightDirectory);
+            if (child != nullptr) {
+                const QString name = QString::fromUtf8(child->name);
+                sftp_attributes_free(child);
+                if (name == QStringLiteral(".") || name == QStringLiteral("..")) {
+                    return {};
+                }
+                if (!rfm::core::RemotePath::isValidName(name)) {
+                    return finishCopyPreflight(
+                        {rfm::core::RemoteBackendError::InvalidPath,
+                         QStringLiteral("The remote copy contains an invalid entry name.")});
+                }
+                const QString path = rfm::core::RemotePath::join(m_preflightDirectoryPath, name);
+                if (path.isEmpty()) {
+                    return finishCopyPreflight(
+                        {rfm::core::RemoteBackendError::InvalidPath,
+                         QStringLiteral("The remote copy contains an invalid entry name.")});
+                }
+                m_preflightTasks.push_back({path, true});
+                return {};
+            }
+            const bool complete = sftp_dir_eof(m_preflightDirectory) != 0;
+            const int error = sftp_get_error(m_sftp);
+            closePreflightDirectory();
+            if (!complete) {
+                return finishCopyPreflight(
+                    {backendError(error),
+                     QStringLiteral("Unable to finish listing the remote copy source.")});
+            }
+            return {};
+        }
+        if (m_preflightTasks.isEmpty()) {
+            m_preflightActive = false;
+            m_preflightByteProgressAvailable = true;
+            return {rfm::core::RemoteBackendResult{}, m_preflightTotalBytes};
+        }
+
+        const PreflightTask task = m_preflightTasks.takeLast();
+        const QByteArray encodedPath = task.path.toUtf8();
+        sftp_attributes attributes = sftp_lstat(m_sftp, encodedPath.constData());
+        if (attributes == nullptr) {
+            return finishCopyPreflight(
+                sftpOperationFailure(QStringLiteral("Unable to inspect the remote copy source.")));
+        }
+        if (attributes->type == SSH_FILEXFER_TYPE_SYMLINK) {
+            sftp_attributes_free(attributes);
+            return finishCopyPreflight(
+                {rfm::core::RemoteBackendError::Unsupported,
+                 QStringLiteral("Symbolic links are not supported by remote SFTP copy.")});
+        }
+        if (attributes->type == SSH_FILEXFER_TYPE_DIRECTORY) {
+            sftp_attributes_free(attributes);
+            if (!task.recursive) {
+                return finishCopyPreflight(
+                    {rfm::core::RemoteBackendError::Failure,
+                     QStringLiteral("The remote copy source is a directory.")});
+            }
+            m_preflightDirectory = sftp_opendir(m_sftp, encodedPath.constData());
+            if (m_preflightDirectory == nullptr) {
+                return finishCopyPreflight(
+                    sftpOperationFailure(QStringLiteral("Unable to list the remote copy source.")));
+            }
+            m_preflightDirectoryPath = task.path;
+            return {};
+        }
+        if (attributes->type != SSH_FILEXFER_TYPE_REGULAR) {
+            sftp_attributes_free(attributes);
+            return finishCopyPreflight(
+                {rfm::core::RemoteBackendError::Unsupported,
+                 QStringLiteral("The remote copy source is not a regular file or directory.")});
+        }
+        const bool hasSize = (attributes->flags & SSH_FILEXFER_ATTR_SIZE) != 0;
+        const quint64 size = attributes->size;
+        sftp_attributes_free(attributes);
+        if (!hasSize || size > std::numeric_limits<quint64>::max() - m_preflightTotalBytes) {
+            return finishCopyPreflight(
+                {rfm::core::RemoteBackendError::Failure,
+                 hasSize ? QStringLiteral("The total size of the remote copy is too large.")
+                         : QStringLiteral("Unable to determine the remote copy source size.")});
+        }
+        m_preflightTotalBytes += size;
+        return {};
+    }
+
+    void cancelCopyPreflight() override
+    {
+        closePreflightDirectory();
+        m_preflightTasks.clear();
+        m_preflightDirectoryPath.clear();
+        m_preflightActive = false;
+        m_preflightByteProgressAvailable = false;
     }
 
     rfm::core::RemoteBackendResult reserveStaging(const QString& path) override
@@ -712,6 +835,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
     rfm::core::RemoteBackendResult startMoveStagingCopy(const QString& source,
                                                         const QString& destination) override
     {
+        m_copyTelemetry.reset();
         const QString command = rfm::ssh::RemoteCopyCommand::buildMoveStaging(source, destination);
         if (command.isEmpty()) {
             return {rfm::core::RemoteBackendError::InvalidPath, {}};
@@ -796,9 +920,17 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         return {};
     }
 
-    std::optional<rfm::core::RemoteBackendResult> pollCopy() override
+    rfm::core::RemoteCopyPoll pollCopy() override
     {
-        return m_copyActive ? pollSftpCopy() : pollCommand();
+        if (!m_copyActive) {
+            return {pollCommand(), {}};
+        }
+        std::optional<rfm::core::RemoteBackendResult> result = pollSftpCopy();
+        const rfm::core::RemoteCopyTelemetry telemetry = m_copyTelemetry.telemetry();
+        if (result.has_value()) {
+            m_copyTelemetry.reset();
+        }
+        return {std::move(result), telemetry};
     }
 
     std::optional<rfm::core::RemoteBackendResult> pollRemove() override
@@ -819,7 +951,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
                 const ssize_t written = sftp_write(m_copyDestinationHandle,
                                                    m_copyBuffer.constData() + m_copyBufferOffset,
                                                    static_cast<size_t>(remaining));
-                if (written <= 0 || written > remaining) {
+                if (!m_copyTelemetry.recordWrite(static_cast<qint64>(written), remaining)) {
                     return finishSftpCopy(sftpOperationFailure(
                         QStringLiteral("Unable to write the remote copy destination.")));
                 }
@@ -929,6 +1061,9 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         }
 
         const unsigned int mode = attributes->permissions & 0777;
+        if (!m_copyRecursive && (attributes->flags & SSH_FILEXFER_ATTR_SIZE) != 0) {
+            m_copyTelemetry.reset(attributes->size);
+        }
         sftp_attributes_free(attributes);
         m_copySourceHandle = sftp_open(m_sftp, encodedSource.constData(), O_RDONLY, 0);
         if (m_copySourceHandle == nullptr) {
@@ -1078,6 +1213,25 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
 
     void closeCopyHandles() { static_cast<void>(closeCopyHandlesResult()); }
 
+    void closePreflightDirectory()
+    {
+        if (m_preflightDirectory != nullptr) {
+            static_cast<void>(sftp_closedir(m_preflightDirectory));
+            m_preflightDirectory = nullptr;
+        }
+    }
+
+    rfm::core::RemoteCopyPreflightPoll
+    finishCopyPreflight(const rfm::core::RemoteBackendResult& result)
+    {
+        closePreflightDirectory();
+        m_preflightTasks.clear();
+        m_preflightDirectoryPath.clear();
+        m_preflightActive = false;
+        m_preflightByteProgressAvailable = false;
+        return {result, std::nullopt};
+    }
+
     std::optional<rfm::core::RemoteBackendResult>
     finishSftpCopy(const rfm::core::RemoteBackendResult& result)
     {
@@ -1184,6 +1338,7 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
             m_copyTasks.clear();
             m_copyActive = false;
             m_copyCancellationPending = true;
+            m_copyTelemetry.reset();
             return rfm::core::RemoteBackendResult{};
         }
         if (m_copyCancellationPending) {
@@ -1263,6 +1418,11 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         QString destination;
     };
 
+    struct PreflightTask {
+        QString path;
+        bool recursive{false};
+    };
+
     struct RemoveTask {
         QString path;
         bool removeDirectory{false};
@@ -1305,14 +1465,21 @@ class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
         rfm::core::NativeServerCopyPrimitive::None};
     ssh_channel m_channel{nullptr};
     QList<CopyTask> m_copyTasks;
+    QList<PreflightTask> m_preflightTasks;
     QList<RemoveTask> m_removeTasks;
     QString m_removeRoot;
+    QString m_preflightDirectoryPath;
     QByteArray m_copyBuffer;
     qsizetype m_copyBufferOffset{0};
+    rfm::ssh::detail::RemoteCopyTelemetryCounter m_copyTelemetry;
     sftp_file m_copySourceHandle{nullptr};
     sftp_file m_copyDestinationHandle{nullptr};
+    sftp_dir m_preflightDirectory{nullptr};
+    quint64 m_preflightTotalBytes{0};
     bool m_copyRecursive{false};
     bool m_copyActive{false};
+    bool m_preflightActive{false};
+    bool m_preflightByteProgressAvailable{false};
     bool m_copyCancellationPending{false};
     bool m_removeActive{false};
     QByteArray m_errorOutput;

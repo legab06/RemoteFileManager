@@ -4,6 +4,7 @@
 
 #include <QUuid>
 
+#include <limits>
 #include <utility>
 
 namespace rfm::core
@@ -11,7 +12,8 @@ namespace rfm::core
 
 ServerSideCopyJob::ServerSideCopyJob(ServerSideCopyBackend& backend, quint64 id,
                                      QList<RemoteSelection> sources, QString destinationDirectory,
-                                     RemoteOperationKind operationKind)
+                                     RemoteOperationKind operationKind,
+                                     MonotonicClock monotonicClock)
     : m_backend(backend), m_sources(std::move(sources)),
       m_destinationDirectory(RemotePath::normalize(destinationDirectory)),
       m_progress(beginRemoteOperation(id,
@@ -19,10 +21,17 @@ ServerSideCopyJob::ServerSideCopyJob(ServerSideCopyBackend& backend, quint64 id,
                                           ? OperationKind::RemoteMove
                                           : OperationKind::RemoteCopy,
                                       m_sources, m_destinationDirectory)),
-      m_result{id, operationKind, {}}, m_operationKind(operationKind)
+      m_result{id, operationKind, {}}, m_operationKind(operationKind),
+      m_monotonicClock(std::move(monotonicClock))
 {
+    if (!m_monotonicClock) {
+        m_speedTimer.start();
+    }
     m_progress.state = OperationState::Preparing;
     m_progress.cancellationSupported = operationKind == RemoteOperationKind::Copy;
+    if (operationKind == RemoteOperationKind::Move) {
+        m_phase = Phase::Prepare;
+    }
 }
 
 QString ServerSideCopyJob::describeError(const RemoteBackendResult& result) const
@@ -100,6 +109,7 @@ void ServerSideCopyJob::failTransport(QString error)
     }
 
     m_copyActive = false;
+    resetCopySpeed();
     m_progress.currentItem.clear();
     m_progress.cancellationSupported = false;
     m_progress.state = OperationState::Failed;
@@ -124,6 +134,9 @@ void ServerSideCopyJob::prepareItem()
     m_pendingResult = {};
     m_cleanupContinuation = CleanupContinuation::None;
     m_stagingOwned = false;
+    m_currentItemTransferredBytes = 0;
+    m_currentItemByteProgressAvailable = false;
+    applyCopyTelemetry({});
     const QString source = RemotePath::normalize(selection.path);
     const QString destination =
         RemotePath::join(m_destinationDirectory, RemotePath::fileName(source));
@@ -164,12 +177,191 @@ void ServerSideCopyJob::prepareItem()
         m_operationKind == RemoteOperationKind::Move ? Phase::RenameItem : Phase::PrepareStaging;
 }
 
+void ServerSideCopyJob::applyCopyTelemetry(const RemoteCopyTelemetry& telemetry)
+{
+    if (telemetry.byteProgressAvailable) {
+        m_currentItemByteProgressAvailable = true;
+        if (telemetry.transferredBytes < m_currentItemTransferredBytes) {
+            disableByteProgress();
+            return;
+        }
+        m_currentItemTransferredBytes = telemetry.transferredBytes;
+    }
+    if (!m_preflightTotalBytes.has_value()) {
+        m_progress.byteProgressAvailable = false;
+        m_progress.totalBytes = 0;
+        if (!m_currentItemByteProgressAvailable ||
+            m_currentItemTransferredBytes >
+                std::numeric_limits<quint64>::max() - m_completedTransferredBytes) {
+            m_progress.transferredBytes = 0;
+            resetCopySpeed();
+            return;
+        }
+        m_progress.transferredBytes = m_completedTransferredBytes + m_currentItemTransferredBytes;
+        return;
+    }
+    if (m_currentItemByteProgressAvailable &&
+        m_currentItemTransferredBytes > *m_preflightTotalBytes - m_completedTransferredBytes) {
+        m_currentItemTransferredBytes = 0;
+        m_currentItemByteProgressAvailable = false;
+        disableByteProgress();
+        m_preflightTotalBytes.reset();
+        return;
+    }
+    if (!m_currentItemByteProgressAvailable) {
+        if (m_completedTransferredBytes > 0) {
+            m_progress.byteProgressAvailable = true;
+            m_progress.transferredBytes = m_completedTransferredBytes;
+            m_progress.totalBytes = *m_preflightTotalBytes;
+            m_progress.bytesPerSecond = 0;
+            return;
+        }
+        disableByteProgress();
+        return;
+    }
+    m_progress.byteProgressAvailable = true;
+    m_progress.transferredBytes = m_completedTransferredBytes + m_currentItemTransferredBytes;
+    m_progress.totalBytes = *m_preflightTotalBytes;
+}
+
+void ServerSideCopyJob::completeCurrentItemByteProgress(const RemoteBackendResult& result)
+{
+    if (!result.succeeded()) {
+        return;
+    }
+    if (!m_currentItemByteProgressAvailable ||
+        m_currentItemTransferredBytes >
+            std::numeric_limits<quint64>::max() - m_completedTransferredBytes) {
+        disableByteProgress();
+        return;
+    }
+    if (!m_preflightTotalBytes.has_value()) {
+        m_completedTransferredBytes += m_currentItemTransferredBytes;
+        m_currentItemTransferredBytes = 0;
+        m_currentItemByteProgressAvailable = false;
+        m_progress.byteProgressAvailable = false;
+        m_progress.transferredBytes = m_completedTransferredBytes;
+        m_progress.totalBytes = 0;
+        return;
+    }
+    if (m_currentItemTransferredBytes > *m_preflightTotalBytes - m_completedTransferredBytes) {
+        disableByteProgress();
+        m_preflightTotalBytes.reset();
+        return;
+    }
+    m_completedTransferredBytes += m_currentItemTransferredBytes;
+    if (m_sourceIndex + 1 == m_sources.size() &&
+        m_completedTransferredBytes != *m_preflightTotalBytes) {
+        disableByteProgress();
+        m_preflightTotalBytes.reset();
+        return;
+    }
+    const bool completedZeroByteCopy =
+        m_sourceIndex + 1 == m_sources.size() && *m_preflightTotalBytes == 0;
+    m_currentItemTransferredBytes = 0;
+    m_currentItemByteProgressAvailable = false;
+    if (completedZeroByteCopy) {
+        m_progress.byteProgressAvailable = true;
+        m_progress.transferredBytes = 0;
+        m_progress.totalBytes = 0;
+        m_progress.bytesPerSecond = 0;
+        return;
+    }
+    applyCopyTelemetry({});
+}
+
+void ServerSideCopyJob::disableByteProgress()
+{
+    m_progress.byteProgressAvailable = false;
+    m_progress.transferredBytes = 0;
+    m_progress.totalBytes = 0;
+    resetCopySpeed();
+}
+
+qint64 ServerSideCopyJob::monotonicMilliseconds() const
+{
+    return m_monotonicClock ? m_monotonicClock() : m_speedTimer.elapsed();
+}
+
+void ServerSideCopyJob::startCopySpeedMeasurement()
+{
+    m_speedSampleBytes = m_preflightTotalBytes.has_value() ? m_progress.transferredBytes
+                                                           : m_currentItemTransferredBytes;
+    m_speedSampleMilliseconds = monotonicMilliseconds();
+    m_speedMeasurementActive = true;
+    m_progress.bytesPerSecond = 0;
+}
+
+void ServerSideCopyJob::updateCopySpeed()
+{
+    constexpr qint64 minimumSampleMilliseconds = 250;
+    constexpr qint64 idleSampleMilliseconds = 1000;
+    if (!m_speedMeasurementActive || !m_currentItemByteProgressAvailable) {
+        return;
+    }
+    const qint64 nowMilliseconds = monotonicMilliseconds();
+    const qint64 elapsedMilliseconds = nowMilliseconds - m_speedSampleMilliseconds;
+    if (elapsedMilliseconds < minimumSampleMilliseconds) {
+        return;
+    }
+    const quint64 transferredBytes = m_preflightTotalBytes.has_value()
+                                         ? m_progress.transferredBytes
+                                         : m_currentItemTransferredBytes;
+    if (transferredBytes < m_speedSampleBytes) {
+        startCopySpeedMeasurement();
+        return;
+    }
+    const quint64 deltaBytes = transferredBytes - m_speedSampleBytes;
+    if (deltaBytes == 0) {
+        if (elapsedMilliseconds >= idleSampleMilliseconds) {
+            m_progress.bytesPerSecond = 0;
+            m_speedSampleMilliseconds = nowMilliseconds;
+        }
+        return;
+    }
+    const long double rate = static_cast<long double>(deltaBytes) * 1000.0L /
+                             static_cast<long double>(elapsedMilliseconds);
+    m_progress.bytesPerSecond =
+        rate >= static_cast<long double>(std::numeric_limits<quint64>::max())
+            ? std::numeric_limits<quint64>::max()
+            : static_cast<quint64>(rate);
+    m_speedSampleBytes = transferredBytes;
+    m_speedSampleMilliseconds = nowMilliseconds;
+}
+
+void ServerSideCopyJob::resetCopySpeed()
+{
+    m_speedMeasurementActive = false;
+    m_speedSampleBytes = 0;
+    m_speedSampleMilliseconds = 0;
+    m_progress.bytesPerSecond = 0;
+}
+
+void ServerSideCopyJob::finishPreflight(const RemoteBackendResult& result)
+{
+    m_preflightActive = false;
+    if (result.succeeded()) {
+        m_phase = Phase::Prepare;
+        prepareItem();
+        return;
+    }
+    const QString error = describeError(result);
+    for (const RemoteSelection& selection : std::as_const(m_sources)) {
+        const QString source = RemotePath::normalize(selection.path);
+        m_result.items.push_back(
+            {source, RemotePath::join(m_destinationDirectory, RemotePath::fileName(source)), false,
+             error});
+    }
+    finish();
+}
+
 void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
 {
     RemoteItemResult& item = m_result.items.last();
     item.success = result.succeeded();
     item.error = describeError(result);
     if (item.success) {
+        completeCurrentItemByteProgress(result);
         ++m_progress.completedItems;
     }
     m_copyActive = false;
@@ -296,6 +488,7 @@ void ServerSideCopyJob::finishCleanup(const RemoteBackendResult& cleanupResult)
 
 void ServerSideCopyJob::finish()
 {
+    resetCopySpeed();
     m_progress.currentItem.clear();
     m_progress.cancellationSupported = false;
     m_progress.state = m_result.allSucceeded() ? OperationState::Completed : OperationState::Failed;
@@ -313,6 +506,26 @@ void ServerSideCopyJob::finish()
 void ServerSideCopyJob::step()
 {
     if (isFinished()) {
+        return;
+    }
+    if (m_phase == Phase::Preflight) {
+        m_progress.state = OperationState::Preparing;
+        if (!m_preflightActive) {
+            const RemoteBackendResult started = m_backend.startCopyPreflight(m_sources);
+            if (!started.succeeded()) {
+                finishPreflight(started);
+                return;
+            }
+            m_preflightActive = true;
+        }
+        const RemoteCopyPreflightPoll polled = m_backend.pollCopyPreflight();
+        if (!polled.result.has_value()) {
+            return;
+        }
+        if (polled.result->succeeded()) {
+            m_preflightTotalBytes = polled.totalBytes;
+        }
+        finishPreflight(*polled.result);
         return;
     }
     if (m_phase == Phase::Prepare) {
@@ -365,19 +578,27 @@ void ServerSideCopyJob::step()
             return;
         }
         m_copyActive = true;
+        if (m_operationKind == RemoteOperationKind::Copy) {
+            startCopySpeedMeasurement();
+        }
         m_phase = Phase::PollItem;
         return;
     }
     if (m_phase == Phase::PollItem) {
-        const std::optional<RemoteBackendResult> polled = m_backend.pollCopy();
-        if (polled.has_value()) {
-            if (polled->succeeded()) {
+        const RemoteCopyPoll polled = m_backend.pollCopy();
+        applyCopyTelemetry(polled.telemetry);
+        if (m_operationKind == RemoteOperationKind::Copy) {
+            updateCopySpeed();
+        }
+        if (polled.result.has_value()) {
+            resetCopySpeed();
+            if (polled.result->succeeded()) {
                 m_progress.state = OperationState::Finalizing;
                 m_progress.cancellationSupported = false;
                 m_copyActive = false;
                 m_phase = Phase::PromoteItem;
             } else {
-                beginCleanup(CleanupContinuation::FinishFailure, *polled);
+                beginCleanup(CleanupContinuation::FinishFailure, *polled.result);
             }
         }
         return;
@@ -510,6 +731,17 @@ bool ServerSideCopyJob::requestCancel()
         return false;
     }
     m_progress.state = OperationState::Cancelling;
+    resetCopySpeed();
+    if (m_phase == Phase::Preflight) {
+        m_backend.cancelCopyPreflight();
+        m_preflightActive = false;
+        appendCancelledItems();
+        m_progress.currentItem.clear();
+        m_progress.state = OperationState::Cancelled;
+        m_progress.error = QStringLiteral("Remote copy cancelled.");
+        m_phase = Phase::Finished;
+        return true;
+    }
     if (m_copyActive) {
         m_phase = Phase::RequestCancellation;
         return true;

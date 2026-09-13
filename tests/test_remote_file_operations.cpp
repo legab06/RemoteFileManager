@@ -167,8 +167,34 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
                 .arg(source, destination,
                      recursive ? QStringLiteral("recursive") : QStringLiteral("file")));
         active = true;
+        pollCalls = 0;
         activeCopyDestination = destination;
         return {};
+    }
+
+    rfm::core::RemoteBackendResult
+    startCopyPreflight(const QList<rfm::core::RemoteSelection>& sources) override
+    {
+        preflightSources = sources;
+        ++preflightStartCalls;
+        preflightActive = preflightStartResult.succeeded();
+        return preflightStartResult;
+    }
+
+    rfm::core::RemoteCopyPreflightPoll pollCopyPreflight() override
+    {
+        ++preflightPollCalls;
+        if (preflightCompleteAfterPolls > 0 && preflightPollCalls >= preflightCompleteAfterPolls) {
+            preflightActive = false;
+            return {preflightCompletionResult, preflightTotalBytes};
+        }
+        return {};
+    }
+
+    void cancelCopyPreflight() override
+    {
+        ++preflightCancellationCalls;
+        preflightActive = false;
     }
 
     rfm::core::RemoteBackendResult reserveStaging(const QString& path) override
@@ -202,17 +228,19 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
         return moveCopyStartResult;
     }
 
-    std::optional<rfm::core::RemoteBackendResult> pollCopy() override
+    rfm::core::RemoteCopyPoll pollCopy() override
     {
         ++pollCalls;
+        const rfm::core::RemoteCopyTelemetry telemetry =
+            copyTelemetryResponses.isEmpty() ? copyTelemetry : copyTelemetryResponses.takeFirst();
         if (completeAfterPolls > 0 && pollCalls >= completeAfterPolls) {
             active = false;
             if (copyCompletionResult.succeeded()) {
                 existingPaths.insert(activeCopyDestination);
             }
-            return copyCompletionResult;
+            return {copyCompletionResult, telemetry};
         }
-        return std::nullopt;
+        return {{}, telemetry};
     }
 
     rfm::core::RemoteBackendResult startRemove(const QString& path, bool recursive,
@@ -292,18 +320,24 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     QStringList stagedCopies;
     QStringList removed;
     QStringList emptyDirectoryRemovals;
+    QList<rfm::core::RemoteSelection> preflightSources;
     QString activeRemovePath;
     QString activeCopyDestination;
     QSet<QString> existingPaths;
     QList<rfm::core::RemoteProbeResult> probeResponses;
     int pollCalls{0};
+    int preflightStartCalls{0};
+    int preflightPollCalls{0};
+    int preflightCancellationCalls{0};
     int cancellationRequestCalls{0};
     int cancellationPollCalls{0};
     int cleanupCalls{0};
     int completeAfterPolls{0};
+    int preflightCompleteAfterPolls{1};
     int removePollCalls{0};
     int removeCompleteAfterPolls{1};
     bool active{false};
+    bool preflightActive{false};
     bool sourceRemoved{false};
     bool stagingExists{false};
     bool stagingContainsUnexpectedEntry{false};
@@ -312,7 +346,12 @@ class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
     rfm::core::RemoteBackendResult reserveResult;
     rfm::core::RemoteBackendResult emptyDirectoryRemoveResult;
     rfm::core::RemoteBackendResult moveCopyStartResult;
+    rfm::core::RemoteBackendResult preflightStartResult;
+    rfm::core::RemoteBackendResult preflightCompletionResult;
+    std::optional<quint64> preflightTotalBytes;
     rfm::core::RemoteBackendResult copyCompletionResult;
+    rfm::core::RemoteCopyTelemetry copyTelemetry;
+    QList<rfm::core::RemoteCopyTelemetry> copyTelemetryResponses;
     rfm::core::RemoteBackendResult cleanupStartResult;
     rfm::core::RemoteBackendResult cleanupCompletionResult;
     rfm::core::RemoteBackendResult removeStartResult;
@@ -418,9 +457,9 @@ class LocalSymlinkStagingBackend final : public rfm::core::ServerSideCopyBackend
         return {};
     }
 
-    std::optional<rfm::core::RemoteBackendResult> pollCopy() override
+    rfm::core::RemoteCopyPoll pollCopy() override
     {
-        return std::exchange(copyResult, std::nullopt);
+        return {std::exchange(copyResult, std::nullopt), {}};
     }
 
     rfm::core::RemoteBackendResult startRemove(const QString& path, bool recursive,
@@ -504,6 +543,16 @@ class RemoteFileOperationsTest final : public QObject
     void transportFailureBeforeFirstSuccess();
     void serverSideCopyRunsCooperatively_data();
     void serverSideCopyRunsCooperatively();
+    void serverSideCopyPreflightStaysPreparingAndCanCancel();
+    void serverSideCopyPreflightFailureStopsBeforeStaging();
+    void serverSideCopyConsumesAvailableByteTelemetry();
+    void serverSideCopyCalculatesSpeedFromByteDeltas();
+    void serverSideCopyCalculatesSpeedWithoutByteProgress();
+    void serverSideCopyResetsSpeedAfterFailureAndCancellation();
+    void serverSideCopyKeepsMultiSelectionByteProgressIndeterminate();
+    void serverSideCopyAggregatesMultiSelectionByteProgress();
+    void serverSideCopyKeepsZeroBytePreflightDeterminate();
+    void serverSideCopyDisablesByteProgressWhenTotalsChange();
     void serverSideCopyCancellationWaitsForTermination();
     void serverSideCopyCancellationRetriesAndReportsFailure();
     void serverSideCopyCancellationKeepsShutdownResponsive();
@@ -878,14 +927,16 @@ void RemoteFileOperationsTest::remoteCopyBackendRoutesNativeAndClientMediatedPat
     QVERIFY(implementation.contains("selectRemoteCopyMethod(m_impl->currentServerCapabilities"));
     QVERIFY(implementation.contains("Remote copy method: %1"));
     QVERIFY(implementation.contains("pollSftpCopy"));
-    QVERIFY(implementation.contains("m_copyActive ? pollSftpCopy() : pollCommand()"));
+    QVERIFY(implementation.contains("return {pollCommand(), {}};"));
+    QVERIFY(implementation.contains("m_copyTelemetry.recordWrite"));
+    QVERIFY(implementation.contains(
+        "!m_copyRecursive && (attributes->flags & SSH_FILEXFER_ATTR_SIZE)"));
     QVERIFY(implementation.contains("sftp_open"));
     QVERIFY(implementation.contains("sftp_read"));
     QVERIFY(implementation.contains("sftp_write"));
     QVERIFY(implementation.contains("sftp_mkdir"));
     QVERIFY(implementation.contains("65'536"));
     QVERIFY(implementation.contains("m_copyBufferOffset"));
-    QVERIFY(implementation.contains("written > remaining"));
     QVERIFY(implementation.contains("SSH_FILEXFER_TYPE_DIRECTORY"));
     QVERIFY(!copyPath.contains("rm "));
 }
@@ -1153,10 +1204,17 @@ void RemoteFileOperationsTest::serverSideCopyRunsCooperatively()
                       directory ? QStringLiteral("recursive") : QStringLiteral("file")));
     job.step(); // cp still running.
     QVERIFY(!job.isFinished());
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
     QVERIFY(backend.renamed.isEmpty());
     QVERIFY(!backend.existingPaths.contains(destination));
     job.step(); // cp succeeded, but promotion has not run yet.
     QCOMPARE(job.progress().state, rfm::core::OperationState::Finalizing);
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
     QVERIFY(!backend.existingPaths.contains(destination));
     job.step(); // Re-check and promote staging/item.
     QVERIFY(backend.existingPaths.contains(destination));
@@ -1174,9 +1232,309 @@ void RemoteFileOperationsTest::serverSideCopyRunsCooperatively()
     QVERIFY(backend.removed.isEmpty());
 }
 
+void RemoteFileOperationsTest::serverSideCopyConsumesAvailableByteTelemetry()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 2;
+    backend.preflightTotalBytes = 16'384;
+    backend.copyTelemetry = {4096, 16384, true};
+    rfm::core::ServerSideCopyJob job(backend, 103, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+
+    job.step(); // Prepare.
+    job.step(); // Reserve staging.
+    job.step(); // Start copy.
+    job.step(); // Copy remains active and publishes telemetry.
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Running);
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{4096});
+    QCOMPARE(job.progress().totalBytes, quint64{16384});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
+
+    backend.copyTelemetry = {16384, 16384, true};
+    job.step(); // Terminal success remains separate from its final telemetry.
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Finalizing);
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{16384});
+    QCOMPARE(job.progress().totalBytes, quint64{16384});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
+}
+
+void RemoteFileOperationsTest::serverSideCopyCalculatesSpeedFromByteDeltas()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 5;
+    backend.preflightTotalBytes = 4000;
+    backend.copyTelemetryResponses = {
+        {1000, 0, true}, {2200, 0, true}, {2400, 0, true}, {3400, 0, true}, {4000, 0, true},
+    };
+    qint64 elapsedMilliseconds = 0;
+    rfm::core::ServerSideCopyJob job(backend, 110, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"),
+                                     rfm::core::RemoteOperationKind::Copy,
+                                     [&elapsedMilliseconds] { return elapsedMilliseconds; });
+
+    job.step(); // Prepare.
+    job.step(); // Reserve staging.
+    job.step(); // Start copy and the monotonic measurement.
+    elapsedMilliseconds = 100;
+    job.step(); // The first short sample must not produce a speed.
+
+    QCOMPARE(job.progress().transferredBytes, quint64{1000});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
+
+    elapsedMilliseconds = 300;
+    job.step();
+    QCOMPARE(job.progress().transferredBytes, quint64{2200});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{7333});
+
+    elapsedMilliseconds = 400;
+    job.step();
+    QCOMPARE(job.progress().transferredBytes, quint64{2400});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{7333});
+
+    elapsedMilliseconds = 600;
+    job.step();
+    QCOMPARE(job.progress().transferredBytes, quint64{3400});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{4000});
+
+    elapsedMilliseconds = 900;
+    job.step(); // Terminal copy result enters Finalizing.
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Finalizing);
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
+
+    FakeCopyBackend nextBackend;
+    nextBackend.preflightTotalBytes = 1;
+    rfm::core::ServerSideCopyJob nextJob(
+        nextBackend, 111, {{QStringLiteral("/source/next"), false}}, QStringLiteral("/destination"),
+        rfm::core::RemoteOperationKind::Copy,
+        [&elapsedMilliseconds] { return elapsedMilliseconds; });
+    nextJob.step();
+    QCOMPARE(nextJob.progress().bytesPerSecond, quint64{0});
+}
+
+void RemoteFileOperationsTest::serverSideCopyCalculatesSpeedWithoutByteProgress()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 3;
+    backend.copyTelemetryResponses = {{100, 0, true}, {250, 0, true}, {400, 0, true}};
+    qint64 elapsedMilliseconds = 0;
+    rfm::core::ServerSideCopyJob job(backend, 114, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"),
+                                     rfm::core::RemoteOperationKind::Copy,
+                                     [&elapsedMilliseconds] { return elapsedMilliseconds; });
+
+    job.step();
+    job.step();
+    job.step();
+    elapsedMilliseconds = 300;
+    job.step();
+
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{100});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{333});
+
+    elapsedMilliseconds = 600;
+    job.step();
+    QCOMPARE(job.progress().transferredBytes, quint64{250});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{500});
+}
+
+void RemoteFileOperationsTest::serverSideCopyResetsSpeedAfterFailureAndCancellation()
+{
+    FakeCopyBackend failingBackend;
+    failingBackend.completeAfterPolls = 3;
+    failingBackend.preflightTotalBytes = 3000;
+    failingBackend.copyTelemetryResponses = {{1000, 0, true}, {2000, 0, true}, {2500, 0, true}};
+    failingBackend.copyCompletionResult = {rfm::core::RemoteBackendError::Failure,
+                                           QStringLiteral("No space left on device")};
+    qint64 elapsedMilliseconds = 0;
+    rfm::core::ServerSideCopyJob failing(
+        failingBackend, 112, {{QStringLiteral("/source/file"), false}},
+        QStringLiteral("/destination"), rfm::core::RemoteOperationKind::Copy,
+        [&elapsedMilliseconds] { return elapsedMilliseconds; });
+
+    failing.step();
+    failing.step();
+    failing.step();
+    elapsedMilliseconds = 300;
+    failing.step();
+    elapsedMilliseconds = 600;
+    failing.step();
+    QVERIFY(failing.progress().bytesPerSecond > 0);
+    elapsedMilliseconds = 900;
+    failing.step();
+    QCOMPARE(failing.progress().bytesPerSecond, quint64{0});
+
+    FakeCopyBackend cancellingBackend;
+    cancellingBackend.preflightTotalBytes = 1000;
+    cancellingBackend.copyTelemetry = {1000, 0, true};
+    cancellingBackend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{}};
+    cancellingBackend.cancellationPollResponses = {rfm::core::RemoteBackendResult{}};
+    elapsedMilliseconds = 0;
+    rfm::core::ServerSideCopyJob cancelling(
+        cancellingBackend, 113, {{QStringLiteral("/source/file"), false}},
+        QStringLiteral("/destination"), rfm::core::RemoteOperationKind::Copy,
+        [&elapsedMilliseconds] { return elapsedMilliseconds; });
+
+    cancelling.step();
+    cancelling.step();
+    cancelling.step();
+    elapsedMilliseconds = 300;
+    cancelling.step();
+    QVERIFY(cancelling.progress().bytesPerSecond > 0);
+    QVERIFY(cancelling.requestCancel());
+    QCOMPARE(cancelling.progress().bytesPerSecond, quint64{0});
+}
+
+void RemoteFileOperationsTest::serverSideCopyKeepsMultiSelectionByteProgressIndeterminate()
+{
+    FakeCopyBackend backend;
+    backend.preflightTotalBytes = 8192;
+    rfm::core::ServerSideCopyJob job(
+        backend, 104,
+        {{QStringLiteral("/source/first"), false}, {QStringLiteral("/source/second"), false}},
+        QStringLiteral("/destination"));
+
+    job.step(); // Prepare.
+    job.step(); // Reserve staging.
+    job.step(); // Start copy.
+    job.step(); // The backend has no byte telemetry despite a known preflight total.
+
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
+    QCOMPARE(job.progress().completedItems, quint64{0});
+    QCOMPARE(job.progress().totalItems, quint64{2});
+}
+
+void RemoteFileOperationsTest::serverSideCopyPreflightStaysPreparingAndCanCancel()
+{
+    FakeCopyBackend backend;
+    backend.preflightCompleteAfterPolls = 2;
+    backend.preflightTotalBytes = 128;
+    rfm::core::ServerSideCopyJob job(backend, 105, {{QStringLiteral("/source/tree"), true}},
+                                     QStringLiteral("/destination"));
+
+    job.step();
+
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Preparing);
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(backend.preflightStartCalls, 1);
+    QCOMPARE(backend.preflightPollCalls, 1);
+    QVERIFY(backend.started.isEmpty());
+
+    QVERIFY(job.requestCancel());
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelled);
+    QCOMPARE(backend.preflightCancellationCalls, 1);
+    QVERIFY(backend.reserved.isEmpty());
+}
+
+void RemoteFileOperationsTest::serverSideCopyPreflightFailureStopsBeforeStaging()
+{
+    FakeCopyBackend backend;
+    backend.preflightCompletionResult = {rfm::core::RemoteBackendError::PermissionDenied,
+                                         QStringLiteral("Unable to list the remote copy source.")};
+    rfm::core::ServerSideCopyJob job(backend, 106, {{QStringLiteral("/source/tree"), true}},
+                                     QStringLiteral("/destination"));
+
+    job.step();
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().error.contains(QStringLiteral("Unable to list")));
+    QVERIFY(backend.reserved.isEmpty());
+    QVERIFY(backend.started.isEmpty());
+}
+
+void RemoteFileOperationsTest::serverSideCopyAggregatesMultiSelectionByteProgress()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.preflightTotalBytes = 600;
+    backend.copyTelemetryResponses = {{100, 0, true}, {500, 0, true}, {0, 0, true}};
+    const QList<rfm::core::RemoteSelection> sources = {
+        {QStringLiteral("/source/first"), false},
+        {QStringLiteral("/source/tree"), true},
+        {QStringLiteral("/source/empty"), false},
+    };
+    rfm::core::ServerSideCopyJob job(backend, 107, sources, QStringLiteral("/destination"));
+
+    for (int step = 0; step < 20 && job.progress().completedItems == 0; ++step) {
+        job.step();
+    }
+
+    QCOMPARE(job.progress().completedItems, quint64{1});
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{100});
+    QCOMPARE(job.progress().totalBytes, quint64{600});
+    QCOMPARE(backend.preflightSources.size(), sources.size());
+    for (qsizetype index = 0; index < sources.size(); ++index) {
+        QCOMPARE(backend.preflightSources.at(index).path, sources.at(index).path);
+        QCOMPARE(backend.preflightSources.at(index).directory, sources.at(index).directory);
+    }
+
+    for (int step = 0; step < 30 && !job.isFinished(); ++step) {
+        job.step();
+    }
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{600});
+    QCOMPARE(job.progress().totalBytes, quint64{600});
+}
+
+void RemoteFileOperationsTest::serverSideCopyDisablesByteProgressWhenTotalsChange()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.preflightTotalBytes = 100;
+    backend.copyTelemetry = {120, 0, true};
+    rfm::core::ServerSideCopyJob job(backend, 108, {{QStringLiteral("/source/file"), false}},
+                                     QStringLiteral("/destination"));
+
+    for (int step = 0; step < 20 && !job.isFinished(); ++step) {
+        job.step();
+    }
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+}
+
+void RemoteFileOperationsTest::serverSideCopyKeepsZeroBytePreflightDeterminate()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.preflightTotalBytes = 0;
+    backend.copyTelemetry = {0, 0, true};
+    rfm::core::ServerSideCopyJob job(backend, 109, {{QStringLiteral("/source/empty"), false}},
+                                     QStringLiteral("/destination"));
+
+    for (int step = 0; step < 20 && !job.isFinished(); ++step) {
+        job.step();
+    }
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+}
+
 void RemoteFileOperationsTest::serverSideCopyCancellationWaitsForTermination()
 {
     FakeCopyBackend backend;
+    backend.preflightTotalBytes = 4096;
+    backend.copyTelemetry = {1024, 4096, true};
     backend.cancellationRequestResponses = {rfm::core::RemoteBackendResult{}};
     backend.cancellationPollResponses = {std::nullopt, rfm::core::RemoteBackendResult{}};
     rfm::core::ServerSideCopyJob job(backend, 73, {{QStringLiteral("/source/link"), false}},
@@ -1184,7 +1542,12 @@ void RemoteFileOperationsTest::serverSideCopyCancellationWaitsForTermination()
     job.step(); // prepare
     job.step(); // reserve staging
     job.step(); // start cp
+    job.step(); // publish partial byte progress
     const QString staging = backend.reserved.constFirst();
+
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{1024});
+    QCOMPARE(job.progress().totalBytes, quint64{4096});
 
     QVERIFY(job.requestCancel());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelling);
@@ -1221,6 +1584,10 @@ void RemoteFileOperationsTest::serverSideCopyCancellationWaitsForTermination()
     job.step(); // Cleanup becomes terminal.
     QVERIFY(job.isFinished());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Cancelled);
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{1024});
+    QCOMPARE(job.progress().totalBytes, quint64{4096});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
     QCOMPARE(job.result().items.size(), 1);
     QVERIFY(job.result().items.at(0).error.contains(QStringLiteral("cancelled")));
     QVERIFY(!backend.stagingExists);
@@ -1347,6 +1714,8 @@ void RemoteFileOperationsTest::serverSideCopyFailureCleansStaging()
 {
     FakeCopyBackend backend;
     backend.completeAfterPolls = 1;
+    backend.preflightTotalBytes = 8192;
+    backend.copyTelemetry = {3072, 8192, true};
     backend.copyCompletionResult = {rfm::core::RemoteBackendError::Failure,
                                     QStringLiteral("No space left on device")};
     rfm::core::ServerSideCopyJob job(backend, 90, {{QStringLiteral("/source/file"), false}},
@@ -1357,6 +1726,10 @@ void RemoteFileOperationsTest::serverSideCopyFailureCleansStaging()
     }
 
     QCOMPARE(job.progress().state, rfm::core::OperationState::Failed);
+    QVERIFY(job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{3072});
+    QCOMPARE(job.progress().totalBytes, quint64{8192});
+    QCOMPARE(job.progress().bytesPerSecond, quint64{0});
     QVERIFY(job.progress().error.contains(QStringLiteral("No space left on device")));
     QVERIFY(!backend.existingPaths.contains(QStringLiteral("/destination/file")));
     QVERIFY(!backend.stagingExists);
@@ -1568,6 +1941,7 @@ void RemoteFileOperationsTest::movesOnSameFileSystemWithRename()
 
     QVERIFY(job.isFinished());
     QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QCOMPARE(backend.preflightStartCalls, 0);
     QCOMPARE(job.result().kind, rfm::core::RemoteOperationKind::Move);
     QCOMPARE(backend.renamed, QStringList({QStringLiteral("/source/file:/destination/file")}));
     QVERIFY(backend.started.isEmpty());
@@ -1588,6 +1962,9 @@ void RemoteFileOperationsTest::fallsBackToCopyThenDeleteAcrossFileSystems()
     }
 
     QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
     QCOMPARE(backend.reserved.size(), 1);
     const QString temporaryPath = backend.reserved.constFirst();
     QVERIFY(temporaryPath.startsWith(QStringLiteral("/destination/.rfm-move-")));
