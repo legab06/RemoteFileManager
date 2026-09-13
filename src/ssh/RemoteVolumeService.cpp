@@ -25,6 +25,7 @@ QString RemoteLinuxVolumeService::capabilityProbeCommand()
 {
     // This is a fixed command. No UI or server metadata is interpolated.
     return QStringLiteral(
+        "printf '%s\\n' RFM_POSIX_STORAGE_V1; "
         "for rfm_tool in lsblk udisksctl mount umount; do "
         "command -v \"$rfm_tool\" >/dev/null 2>&1 && printf '%s\\n' \"$rfm_tool\"; done");
 }
@@ -38,6 +39,9 @@ RemoteLinuxVolumeService::parseCapabilities(const QByteArray& standardOutput)
         if (!tool.isEmpty()) {
             tools.insert(tool);
         }
+    }
+    if (!tools.contains(QByteArrayLiteral("RFM_POSIX_STORAGE_V1"))) {
+        return {true, false, false, false, false};
     }
     return {true, tools.contains(QByteArrayLiteral("lsblk")),
             tools.contains(QByteArrayLiteral("udisksctl")),

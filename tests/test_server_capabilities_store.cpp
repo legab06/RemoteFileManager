@@ -40,6 +40,7 @@ class ServerCapabilitiesStoreTest final : public QObject
     void reportsMalformedJsonAndUnsupportedVersions();
     void skipsInvalidEntriesAndPreservesUnknownExtensions();
     void rejectsSerializedContentsThatExceedMaximumFileSize();
+    void persistsStorageCapabilitiesAndAcceptsOlderSnapshots();
 };
 
 void ServerCapabilitiesStoreTest::missingFileIsAnEmptyStore()
@@ -118,6 +119,40 @@ void ServerCapabilitiesStoreTest::rejectsTemporaryProfiles()
                           &error));
     QVERIFY(!error.isEmpty());
     QVERIFY(!QFile::exists(store.filePath()));
+}
+
+void ServerCapabilitiesStoreTest::persistsStorageCapabilitiesAndAcceptsOlderSnapshots()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const rfm::core::ServerCapabilitiesStore store(temporary.path());
+    auto current = snapshot(QStringLiteral("profile-a"), QStringLiteral("a.example.test"), {});
+    current.capabilities.storage.detectionState = rfm::core::CapabilityDetectionState::Detected;
+    current.capabilities.storage.windowsPowerShell = rfm::core::CapabilitySupport::Supported;
+    current.capabilities.storage.windowsGetVolume = rfm::core::CapabilitySupport::Supported;
+    current.capabilities.storage.windowsGetDisk = rfm::core::CapabilitySupport::Unsupported;
+    current.capabilities.storage.provider =
+        rfm::core::selectRemoteStorageProvider(current.capabilities.storage);
+    QString error;
+    QVERIFY2(store.save({current}, &error), qPrintable(error));
+    const auto currentLoaded = store.load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(currentLoaded.constFirst().capabilities.storage.detectionState,
+             rfm::core::CapabilityDetectionState::Detected);
+    QCOMPARE(currentLoaded.constFirst().capabilities.storage.provider,
+             rfm::core::RemoteStorageProvider::WindowsPowerShell);
+    QCOMPARE(currentLoaded.constFirst().capabilities.storage.windowsGetDisk,
+             rfm::core::CapabilitySupport::Unsupported);
+
+    writeFile(store.filePath(),
+              QByteArrayLiteral("{\"version\":1,\"snapshots\":[{\"profileId\":\"profile-b\","
+                                "\"host\":\"b.example.test\",\"username\":\"test-user\","
+                                "\"port\":22,\"detectedAt\":\"2026-01-01T00:00:00.000Z\","
+                                "\"extensions\":[]}]}"));
+    const auto olderLoaded = store.load(&error);
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(olderLoaded.constFirst().capabilities.storage.detectionState,
+             rfm::core::CapabilityDetectionState::NotDetected);
 }
 
 void ServerCapabilitiesStoreTest::reportsMalformedJsonAndUnsupportedVersions()

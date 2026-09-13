@@ -18,13 +18,80 @@ extensions et relève la version du protocole avec l'API publique libssh, puis p
 le snapshot avec le profil de la connexion courante. L'état dérivé `copy-data` v1
 n'est `Supported` que pour une extension annoncée dont le nom vaut `copy-data` et la
 donnée vaut `1`; il reste `Unknown` avant détection et devient `Unsupported` après
-une détection sans cette paire exacte. Cette donnée runtime ne modifie pas encore la
-stratégie Remote Copy.
+une détection sans cette paire exacte. Ce snapshot décrit ce que le serveur annonce,
+pas ce que le backend RFM sait nécessairement exécuter.
+
+Le cœur représente séparément les méthodes réellement exécutables dans la session par
+`RemoteCopyExecutionCapabilities`. `sftpCopyDataAvailable` décrit l'aptitude du backend
+à invoquer l'extension, tandis que `nativeServerCopy` (`Unknown`, `Unsupported` ou
+`Supported`) et `nativePrimitive` décrivent le résultat d'une sonde runtime. La seule
+primitive native reconnue dans ce lot est `NativeServerCopyPrimitive::PosixCp`. Avec
+libssh 0.12.2, le serveur peut annoncer `copy-data` v1, mais aucune API publique ne
+permet à RFM de l'invoquer : le backend centralise donc
+`sftpCopyDataAvailable == false`.
+
+Les capacités de stockage forment une troisième famille, `RemoteStorageCapabilities` :
+
+```text
+Server capabilities
+├─ SFTP protocol capabilities
+├─ Remote Copy execution capabilities
+└─ Storage capabilities
+   ├─ Linux provider
+   └─ Windows PowerShell provider
+```
+
+Elles sont établies pour la session courante par des probes, jamais par le hostname,
+l'utilisateur, la version d'OpenSSH ou la forme d'un chemin. La machine d'état exécute
+successivement la sonde POSIX, la sonde Windows PowerShell, puis la vérification SFTP de
+`/proc/self/mountinfo`. Chaque échec non fatal fait avancer l'étape suivante; après la
+vérification mountinfo, l'état devient toujours `Detected` tant que la connexion reste
+valide. Les probes de commandes disposent d'un timeout dédié de dix secondes afin qu'un
+interpréteur non compatible ne retienne pas indéfiniment la détection.
+
+La sonde POSIX fixe écrit d'abord `RFM_POSIX_STORAGE_V1`, puis recherche `lsblk`,
+`udisksctl`, `mount` et `umount`; sans ce marqueur, aucun résultat ne prouve un
+environnement Linux. La sonde Windows fixe lance `powershell.exe -NoProfile
+-NonInteractive`, exige `RFM_WINDOWS_STORAGE_V1`, puis vérifie réellement `Get-Volume`
+et `Get-Disk`; elle n'écrit ni ne modifie rien sur le serveur. Pour mountinfo, une
+ouverture et une lecture réussies établissent `Supported`; `SSH_FX_NO_SUCH_FILE` ou
+`SSH_FX_NO_SUCH_PATH` établissent `Unsupported`; une permission refusée reste `Unknown`.
+Une perte de transport et une lecture cassée après ouverture restent de vraies erreurs.
+
+Le provider Linux est sélectionné lorsque mountinfo ou `lsblk` a été démontré. Le
+provider Windows PowerShell exige PowerShell et `Get-Volume`. Si les deux sont
+démontrés, Linux est choisi selon une politique déterministe documentée; si aucun ne
+l'est, le provider vaut `None`, ce qui signifie « découverte non prise en charge » et
+non une erreur de connexion. Ainsi, une session Windows où `lsblk` et mountinfo sont
+absents ne lance pas le scanner Linux et n'affiche pas d'erreur rouge; navigation et
+opérations SFTP restent utilisables. Les scans initiaux et périodiques par
+`RemoteStorageScanner` ne sont lancés que si le provider courant est Linux et que
+mountinfo est `Supported`; l'absence de `lsblk` ne déclenche plus ce scanner à elle seule.
+
+La détection d'un provider et son implémentation dans RFM sont deux notions distinctes.
+Le provider Windows PowerShell peut être détecté et ses cmdlets affichées comme supportées,
+mais la conversion de `Get-Volume`/`Get-Disk` en `StorageVolume` n'est pas encore
+implémentée. L'UI affiche donc `Provider detection: Completed` et `Volume listing: Not
+implemented` dans ce cas, sans erreur applicative.
+
+Après l'ouverture SFTP et la lecture initiale réussies, `SshSession` utilise son
+exécuteur asynchrone de commandes SSH pour lancer la sonde fixe et sans écriture
+`command -v cp >/dev/null 2>&1`. Un exit status 0 établit `PosixCp` comme `Supported` ;
+un exit status non nul prouve seulement que cette primitive est `Unsupported`. Un
+échec d'ouverture ou de lecture du canal, un timeout, une coupure de transport ou
+l'absence d'exit status exploitable laisse la capability `Unknown` et ne fait pas
+échouer à lui seul une connexion utilisable. Aucune déduction n'est faite depuis l'OS,
+le hostname, OpenSSH, les chemins ou les extensions SFTP. L'état est conservé seulement
+dans `SshSession` et revient à sa valeur inconnue dans `Impl::reset()` lors d'une
+déconnexion.
 
 `MainWindow` conserve le dernier snapshot en mémoire par identité de profil. Un profil
 enregistré utilise son identifiant stable ; une connexion temporaire utilise l'identité
 utilisateur/hôte/port, puis son snapshot est réassocié à l'identifiant créé si le profil
-est enregistré après connexion. Les Properties d'un serveur transmettent uniquement le
+est enregistré après connexion. La fin du lifecycle Storage est publiée séparément et
+fusionnée dans le profil actif après cette éventuelle réassociation; elle ne réutilise
+donc pas l'identité temporaire capturée au début de la connexion. Les Properties d'un
+serveur transmettent uniquement le
 snapshot correspondant à `ServerProfileDialog`. Son onglet `Capabilities` en lecture
 seule distingue explicitement `Not detected`, `Last known` et `Currently detected`. Une
 déconnexion conserve le snapshot courant, mais celui-ci est alors présenté comme dernier
@@ -33,45 +100,89 @@ résultat connu.
 Les snapshots des seuls profils enregistrés sont persistés séparément des profils dans
 `server-capabilities.json`. Le format JSON versionné v1 contient l'identifiant du profil,
 une identité serveur non sensible (hôte, utilisateur et port), l'horodatage de détection,
-la version SFTP optionnelle et la liste nom/donnée des extensions. Il ne contient aucun
-paramètre d'authentification. `copy-data` est recalculé depuis cette liste afin d'éviter
-deux sources de vérité. Le fichier est écrit atomiquement par `QSaveFile`; les fichiers
-absents sont acceptés, les versions inconnues ou documents malformés sont signalés, et
-les entrées partielles sont ignorées. Au chargement, les entrées orphelines ou dont
-l'identité serveur ne correspond plus au profil sont ignorées. Une modification des
-paramètres de connexion invalide le snapshot avant l'enregistrement du profil et une
-suppression de profil supprime également son snapshot.
+la version SFTP optionnelle, la liste nom/donnée des extensions et, lorsqu'elles ont été
+détectées, les capabilities de stockage optionnelles. Il ne contient aucun paramètre
+d'authentification. `copy-data` est recalculé depuis cette liste et le provider de stockage
+est recalculé depuis ses preuves afin d'éviter deux sources de vérité. Les anciens
+snapshots v1 sans objet `storage` restent lisibles et présentent ce sous-ensemble comme
+non détecté. Le fichier est écrit atomiquement par `QSaveFile`; les fichiers absents sont
+acceptés, les versions inconnues ou documents malformés sont signalés, et les entrées
+partielles sont ignorées. Au chargement, les entrées orphelines ou dont l'identité serveur
+ne correspond plus au profil sont ignorées. Une modification des paramètres de connexion
+invalide le snapshot avant l'enregistrement du profil et une suppression de profil supprime
+également son snapshot.
 
 Un snapshot relu au démarrage est toujours une information `Last known`, jamais une
 preuve de la connexion courante. Toute future connexion exécute à nouveau la découverte
 réelle depuis le protocole SFTP et remplace ensuite le snapshot persistant. La découverte
 reste fondée sur les capabilities annoncées par SFTP, et non sur le système d'exploitation
-supposé du serveur. `copy-data` est une extension SFTP ; ni sa présence ni les snapshots
-persistés ne déterminent encore la stratégie Remote Copy dans cette branche.
+supposé du serveur. Les capabilities natives de copie ne sont jamais écrites dans
+`server-capabilities.json` et un snapshot persistant ne peut donc jamais autoriser une
+commande native.
+
+Les snapshots de stockage ont également une valeur d'affichage seulement : une nouvelle
+session oublie ses résultats runtime au reset et exécute à nouveau ses probes avant de
+sélectionner un provider ou de lancer une commande de découverte.
 
 Le cœur expose aussi une sélection pure de méthode de copie distante :
 
 ```text
-Current SFTP capabilities
+ServerCapabilities
+        +
+RemoteCopyExecutionCapabilities
         ↓
-RemoteCopyMethod selection
+selectRemoteCopyMethod()
         ↓
 SftpCopyData
-        ou
+NativeServerCopy
 ClientMediatedSftp
 ```
 
-Dans ce lot, seule une capability SFTP courante dont `copy-data` v1 est `Supported`
-sélectionne `SftpCopyData`; toute autre valeur, y compris `Unknown`, choisit le fallback
-sûr `ClientMediatedSftp`. Cette décision ne s'appuie ni sur le système d'exploitation,
-ni sur OpenSSH, ni sur le hostname. Le moteur de copie ne consomme pas encore ce
-sélecteur. Lors du branchement futur, il devra consommer les capabilities détectées pour
-la session SSH actuelle après `sftp_init()`, jamais un snapshot persistant `Last known`.
+`SftpCopyData` exige à la fois un snapshot serveur courant et détecté annonçant la
+révision 1, et un backend capable de l'invoquer. À défaut, une primitive native vérifiée
+et identifiée sélectionne `NativeServerCopy`; tout état inconnu, incohérent ou non pris
+en charge sélectionne le fallback conservateur `ClientMediatedSftp`. Avec le backend
+libssh actuel, la stratégie disponible est donc `PosixCp` lorsqu'il a été vérifié, puis
+SFTP médié par le client. `copy-data` reste la priorité future dans le modèle.
 
-La cible future est, dans cet ordre : SFTP `copy-data`, `NativeServerCopy`, puis SFTP
-médié par le client. `NativeServerCopy` figure déjà dans le type pour stabiliser l'API,
-mais n'est ni détecté ni sélectionné tant qu'une détection et une exécution portables et
-sûres n'ont pas été implémentées.
+La page Properties sépare ces notions : `SFTP copy-data — Server support` provient du
+snapshot annoncé par le serveur, tandis que `SFTP copy-data — RFM backend support` et
+`Native server copy — POSIX cp` proviennent de `RemoteCopyExecutionCapabilities` de la
+session courante. `Effective method` est uniquement affichée lorsqu'une session courante
+fournit ces capacités runtime et reprend directement le résultat de
+`selectRemoteCopyMethod()` (`SFTP copy-data`, `Native server copy (POSIX cp)` ou
+`Client-mediated SFTP`). Un snapshot `Last known` peut donc continuer à montrer le
+support serveur `copy-data`, mais ne prétend jamais connaître la méthode effective d'une
+session absente.
+
+Pour chaque `RemoteOperationKind::Copy`, `SshSession` consomme désormais ce sélecteur
+avec les deux snapshots runtime courants, puis configure `SshServerSideCopyBackend` :
+
+```text
+Remote Copy
+    ↓
+selectRemoteCopyMethod()
+    ├─ SftpCopyData
+    │      présent dans le modèle, mais non exécutable avec libssh 0.12.2
+    ├─ NativeServerCopy / PosixCp
+    │      cp côté serveur, sans transit des octets par RFM
+    └─ ClientMediatedSftp
+           sftp_read → client → sftp_write
+```
+
+Le chemin `PosixCp` réutilise le processus SSH coopératif existant, son protocole de
+statut et sa terminaison par signal. La commande emploie uniquement les options POSIX
+`-P`, `-p` et, pour un dossier, `-R`; ses arguments sont protégés par le quoting shell
+à apostrophes déjà centralisé dans `RemoteCopyCommand`. `-n` et `--`, non garantis par
+POSIX, ne sont pas nécessaires car la destination `staging/item` est réservée et vérifiée
+absente avant le lancement. `-P` préserve les liens symboliques sans les déréférencer ;
+le fallback SFTP reste plus restrictif et refuse les liens qu'il ne sait pas recréer.
+
+Dans les deux chemins, `ServerSideCopyJob` conserve le même contrôle de collision, le
+staging `.rfm-copy-<uuid>.partial/item`, la promotion atomique par rename et le cleanup.
+Un échec runtime de `cp` est terminal pour l'item et ne déclenche aucun fallback SFTP
+silencieux. La copie native ne publie pas de fausse progression en octets. Le Move
+conserve sa sélection et sa commande de staging historiques.
 
 ## Flux actuel
 

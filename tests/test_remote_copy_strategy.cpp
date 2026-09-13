@@ -3,87 +3,128 @@
 #include <QDateTime>
 #include <QTest>
 
+namespace
+{
+
+rfm::core::ServerCapabilities copyDataServer()
+{
+    return rfm::core::detectedServerCapabilities(
+        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc());
+}
+
+rfm::core::RemoteCopyExecutionCapabilities
+executionCapabilities(bool copyDataAvailable, rfm::core::CapabilitySupport nativeSupport,
+                      rfm::core::NativeServerCopyPrimitive primitive)
+{
+    return {copyDataAvailable, nativeSupport, primitive};
+}
+
+} // namespace
+
 class RemoteCopyStrategyTest final : public QObject
 {
     Q_OBJECT
 
   private slots:
-    void fallsBackForUndetectedCapabilities();
-    void fallsBackWhenCopyDataIsAbsent();
-    void selectsSftpCopyDataForCopyDataRevisionOne();
-    void fallsBackForOtherCopyDataRevisions();
-    void fallsBackForExplicitlyUnknownCapability();
-    void ignoresUnrelatedSftpExtensions();
+    void selectsSftpCopyDataOnlyWhenServerAndBackendSupportIt();
+    void selectsNativeCopyWhenCopyDataCannotBeExecuted();
+    void fallsBackWhenCopyDataAndNativeCopyAreUnavailable();
+    void selectsNativeCopyWithoutCopyData();
+    void fallsBackForUnknownCapabilities();
+    void fallsBackForUnsupportedNativeCopy();
+    void fallsBackForUnknownNativeCopy();
+    void undetectedServerCannotEnableCopyData();
+    void requiresAnIdentifiedNativePrimitive();
     void requiresNoHostOrOperatingSystemMetadata();
 };
 
-void RemoteCopyStrategyTest::fallsBackForUndetectedCapabilities()
+void RemoteCopyStrategyTest::selectsSftpCopyDataOnlyWhenServerAndBackendSupportIt()
 {
-    QCOMPARE(rfm::core::selectRemoteCopyMethod({}),
-             rfm::core::RemoteCopyMethod::ClientMediatedSftp);
-
-    rfm::core::ServerCapabilities incompleteCapabilities;
-    incompleteCapabilities.copyDataVersion1 = rfm::core::CapabilitySupport::Supported;
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(incompleteCapabilities),
-             rfm::core::RemoteCopyMethod::ClientMediatedSftp);
+    QCOMPARE(
+        rfm::core::selectRemoteCopyMethod(
+            copyDataServer(), executionCapabilities(true, rfm::core::CapabilitySupport::Supported,
+                                                    rfm::core::NativeServerCopyPrimitive::PosixCp)),
+        rfm::core::RemoteCopyMethod::SftpCopyData);
 }
 
-void RemoteCopyStrategyTest::fallsBackWhenCopyDataIsAbsent()
+void RemoteCopyStrategyTest::selectsNativeCopyWhenCopyDataCannotBeExecuted()
 {
-    const auto capabilities = rfm::core::detectedServerCapabilities(
-        {{QStringLiteral("fsync@openssh.com"), QStringLiteral("1")}},
-        QDateTime::currentDateTimeUtc());
-
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(capabilities),
-             rfm::core::RemoteCopyMethod::ClientMediatedSftp);
+    QCOMPARE(
+        rfm::core::selectRemoteCopyMethod(
+            copyDataServer(), executionCapabilities(false, rfm::core::CapabilitySupport::Supported,
+                                                    rfm::core::NativeServerCopyPrimitive::PosixCp)),
+        rfm::core::RemoteCopyMethod::NativeServerCopy);
 }
 
-void RemoteCopyStrategyTest::selectsSftpCopyDataForCopyDataRevisionOne()
+void RemoteCopyStrategyTest::fallsBackWhenCopyDataAndNativeCopyAreUnavailable()
 {
-    const auto capabilities = rfm::core::detectedServerCapabilities(
-        {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc());
-
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(capabilities),
-             rfm::core::RemoteCopyMethod::SftpCopyData);
-}
-
-void RemoteCopyStrategyTest::fallsBackForOtherCopyDataRevisions()
-{
-    const auto capabilities = rfm::core::detectedServerCapabilities(
-        {{QStringLiteral("copy-data"), QStringLiteral("2")}}, QDateTime::currentDateTimeUtc());
-
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(capabilities),
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(
+                 copyDataServer(),
+                 executionCapabilities(false, rfm::core::CapabilitySupport::Unsupported,
+                                       rfm::core::NativeServerCopyPrimitive::None)),
              rfm::core::RemoteCopyMethod::ClientMediatedSftp);
 }
 
-void RemoteCopyStrategyTest::fallsBackForExplicitlyUnknownCapability()
+void RemoteCopyStrategyTest::selectsNativeCopyWithoutCopyData()
 {
-    rfm::core::ServerCapabilities capabilities;
-    capabilities.detectionState = rfm::core::CapabilityDetectionState::Detected;
-    capabilities.copyDataVersion1 = rfm::core::CapabilitySupport::Unknown;
+    const auto server = rfm::core::detectedServerCapabilities({}, QDateTime::currentDateTimeUtc());
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(
+                 server, executionCapabilities(false, rfm::core::CapabilitySupport::Supported,
+                                               rfm::core::NativeServerCopyPrimitive::PosixCp)),
+             rfm::core::RemoteCopyMethod::NativeServerCopy);
+}
 
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(capabilities),
+void RemoteCopyStrategyTest::fallsBackForUnknownCapabilities()
+{
+    rfm::core::ServerCapabilities server;
+    server.detectionState = rfm::core::CapabilityDetectionState::Detected;
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(server, {}),
              rfm::core::RemoteCopyMethod::ClientMediatedSftp);
 }
 
-void RemoteCopyStrategyTest::ignoresUnrelatedSftpExtensions()
+void RemoteCopyStrategyTest::fallsBackForUnsupportedNativeCopy()
 {
-    const auto capabilities = rfm::core::detectedServerCapabilities(
-        {{QStringLiteral("fsync@openssh.com"), QStringLiteral("2")},
-         {QStringLiteral("vendor-copy@server.example"), QStringLiteral("1")}},
-        QDateTime::currentDateTimeUtc());
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(
+                 {}, executionCapabilities(false, rfm::core::CapabilitySupport::Unsupported,
+                                           rfm::core::NativeServerCopyPrimitive::None)),
+             rfm::core::RemoteCopyMethod::ClientMediatedSftp);
+}
 
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(capabilities),
+void RemoteCopyStrategyTest::fallsBackForUnknownNativeCopy()
+{
+    QCOMPARE(
+        rfm::core::selectRemoteCopyMethod(
+            copyDataServer(), executionCapabilities(false, rfm::core::CapabilitySupport::Unknown,
+                                                    rfm::core::NativeServerCopyPrimitive::None)),
+        rfm::core::RemoteCopyMethod::ClientMediatedSftp);
+}
+
+void RemoteCopyStrategyTest::undetectedServerCannotEnableCopyData()
+{
+    rfm::core::ServerCapabilities server;
+    server.copyDataVersion1 = rfm::core::CapabilitySupport::Supported;
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(
+                 server, executionCapabilities(true, rfm::core::CapabilitySupport::Unknown,
+                                               rfm::core::NativeServerCopyPrimitive::None)),
+             rfm::core::RemoteCopyMethod::ClientMediatedSftp);
+}
+
+void RemoteCopyStrategyTest::requiresAnIdentifiedNativePrimitive()
+{
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(
+                 {}, executionCapabilities(false, rfm::core::CapabilitySupport::Supported,
+                                           rfm::core::NativeServerCopyPrimitive::None)),
              rfm::core::RemoteCopyMethod::ClientMediatedSftp);
 }
 
 void RemoteCopyStrategyTest::requiresNoHostOrOperatingSystemMetadata()
 {
-    const auto capabilities = rfm::core::detectedServerCapabilities(
+    const auto server = rfm::core::detectedServerCapabilities(
         {{QStringLiteral("copy-data"), QStringLiteral("1")}}, QDateTime::currentDateTimeUtc(), 3);
-
-    QCOMPARE(rfm::core::selectRemoteCopyMethod(capabilities),
-             rfm::core::RemoteCopyMethod::SftpCopyData);
+    QCOMPARE(rfm::core::selectRemoteCopyMethod(
+                 server, executionCapabilities(false, rfm::core::CapabilitySupport::Supported,
+                                               rfm::core::NativeServerCopyPrimitive::PosixCp)),
+             rfm::core::RemoteCopyMethod::NativeServerCopy);
 }
 
 QTEST_APPLESS_MAIN(RemoteCopyStrategyTest)

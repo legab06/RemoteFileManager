@@ -81,6 +81,17 @@ bool validEscapes(const QByteArray& field)
     return true;
 }
 
+bool validMountInfoToken(const QByteArray& field)
+{
+    if (field.isEmpty() || !validEscapes(field)) {
+        return false;
+    }
+    return std::ranges::all_of(field, [](char character) {
+        const auto value = static_cast<unsigned char>(character);
+        return value > 0x20 && value != 0x7f;
+    });
+}
+
 bool validMountOptions(const QByteArray& field)
 {
     if (field != QByteArrayLiteral("ro") && field != QByteArrayLiteral("rw") &&
@@ -184,10 +195,10 @@ RemoteMountPointState linuxMountPointState(const QByteArray& mountInfo, const QS
             return RemoteMountPointState::Unknown;
         }
         const QList<QByteArray> device = fields.at(2).split(':');
-        const std::optional<QString> root = decodeMountInfoField(fields.at(3));
         const std::optional<QString> mountPoint = decodeMountInfoField(fields.at(4));
         if (device.size() != 2 || !validUnsignedInteger(device.at(0)) ||
-            !validUnsignedInteger(device.at(1)) || !root.has_value() || !mountPoint.has_value()) {
+            !validUnsignedInteger(device.at(1)) || !validMountInfoToken(fields.at(3)) ||
+            !mountPoint.has_value()) {
             return RemoteMountPointState::Unknown;
         }
         if (!validMountOptions(fields.at(5)) ||

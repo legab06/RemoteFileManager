@@ -13,6 +13,19 @@ target_link_libraries(rfm_remote_copy_strategy_tests PRIVATE Qt6::Test RemoteFil
 rfm_set_project_warnings(rfm_remote_copy_strategy_tests)
 add_test(NAME unit.remote_copy_strategy COMMAND rfm_remote_copy_strategy_tests)
 
+qt_add_executable(
+    rfm_remote_copy_capability_probe_tests
+    test_remote_copy_capability_probe.cpp
+)
+target_link_libraries(rfm_remote_copy_capability_probe_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_remote_copy_capability_probe_tests)
+add_test(NAME unit.remote_copy_capability_probe COMMAND rfm_remote_copy_capability_probe_tests)
+
+qt_add_executable(rfm_remote_storage_capability_probe_tests test_remote_storage_capability_probe.cpp)
+target_link_libraries(rfm_remote_storage_capability_probe_tests PRIVATE Qt6::Test RemoteFileManager::Core)
+rfm_set_project_warnings(rfm_remote_storage_capability_probe_tests)
+add_test(NAME unit.remote_storage_capability_probe COMMAND rfm_remote_storage_capability_probe_tests)
+
 qt_add_executable(rfm_server_capabilities_store_tests test_server_capabilities_store.cpp)
 target_link_libraries(rfm_server_capabilities_store_tests PRIVATE Qt6::Test RemoteFileManager::Core)
 rfm_set_project_warnings(rfm_server_capabilities_store_tests)

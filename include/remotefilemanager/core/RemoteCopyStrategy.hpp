@@ -12,7 +12,20 @@ enum class RemoteCopyMethod {
     ClientMediatedSftp
 };
 
-// Selects only methods supported by the verified SFTP capabilities provided.
-[[nodiscard]] RemoteCopyMethod selectRemoteCopyMethod(const ServerCapabilities& capabilities);
+enum class NativeServerCopyPrimitive { None, PosixCp };
+
+struct RemoteCopyExecutionCapabilities {
+    bool sftpCopyDataAvailable{false};
+    CapabilitySupport nativeServerCopy{CapabilitySupport::Unknown};
+    NativeServerCopyPrimitive nativePrimitive{NativeServerCopyPrimitive::None};
+};
+
+// Selects only methods supported by both the current server and the executing backend/session.
+[[nodiscard]] RemoteCopyMethod
+selectRemoteCopyMethod(const ServerCapabilities& serverCapabilities,
+                       const RemoteCopyExecutionCapabilities& executionCapabilities);
 
 } // namespace rfm::core
+
+Q_DECLARE_METATYPE(rfm::core::NativeServerCopyPrimitive)
+Q_DECLARE_METATYPE(rfm::core::RemoteCopyExecutionCapabilities)
