@@ -4,6 +4,7 @@
 #include "remotefilemanager/core/RemotePath.hpp"
 #include "remotefilemanager/core/ServerSideCopyJob.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
+#include "remotefilemanager/ssh/RemoteDeleteSafetyProbe.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
 #include "../src/ssh/RemoteDelete.hpp"
@@ -580,9 +581,12 @@ class RemoteFileOperationsTest final : public QObject
     void doesNotFallbackForAnUnqualifiedRenameFailure();
     void classifiesRemoteFilesystemIdsConservatively();
     void removesFileAndRecursiveTreeWithGuards();
+    void allowsRegularFilesWithoutMountProof();
     void refusesSelectedAndNestedRemoteMountPoints();
     void preflightsAllRemoteSourcesBeforeRemoval();
     void detectsBindMountAndMalformedMountInfo();
+    void classifiesPortableRemoteDeleteSafetyEvidence();
+    void parsesWindowsRemoteDeleteSafetyProbeOutput();
     void acceptsFileSystemSpecificMountRoots();
     void doesNotTraverseRemoteSymlinksAndRemovesOrdinaryTrees();
     void emitsWorkerOperationErrors();
@@ -2367,6 +2371,27 @@ void RemoteFileOperationsTest::removesFileAndRecursiveTreeWithGuards()
     QVERIFY(!partial.items.at(1).success);
 }
 
+void RemoteFileOperationsTest::allowsRegularFilesWithoutMountProof()
+{
+    FakeRemoteBackend backend;
+    backend.nodes.insert(QStringLiteral("/safe-file.bin"), false);
+    backend.nodes.insert(QStringLiteral("/C:/Users/Administrateur/test.bin"), false);
+    QStringList probed;
+    const auto result = rfm::ssh::detail::removeRemoteEntriesSafely(
+        backend, 111,
+        {{QStringLiteral("/safe-file.bin"), false},
+         {QStringLiteral("/C:/Users/Administrateur/test.bin"), false}},
+        true, [&probed](const QString& path) {
+            probed.push_back(path);
+            return rfm::core::RemoteMountPointState::Unknown;
+        });
+
+    QVERIFY(result.allSucceeded());
+    QVERIFY(probed.isEmpty());
+    QVERIFY(!backend.nodes.contains(QStringLiteral("/safe-file.bin")));
+    QVERIFY(!backend.nodes.contains(QStringLiteral("/C:/Users/Administrateur/test.bin")));
+}
+
 void RemoteFileOperationsTest::refusesSelectedAndNestedRemoteMountPoints()
 {
     FakeRemoteBackend selectedBackend;
@@ -2469,6 +2494,73 @@ void RemoteFileOperationsTest::detectsBindMountAndMalformedMountInfo()
         });
     QVERIFY(!result.allSucceeded());
     QVERIFY(backend.nodes.contains(QStringLiteral("/tree")));
+}
+
+void RemoteFileOperationsTest::classifiesPortableRemoteDeleteSafetyEvidence()
+{
+    const rfm::ssh::RemoteDeleteSftpEvidence safe{
+        QStringLiteral("/C:/Users/Administrateur"),
+        QStringLiteral("/C:/Users/Administrateur/rfm-destination"),
+        QStringLiteral("/C:/Users/Administrateur/rfm-destination"), quint64{42}, quint64{42}};
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(safe),
+             rfm::core::RemoteMountPointState::NotMountPoint);
+
+    auto differentFileSystem = safe;
+    differentFileSystem.childFileSystem = 43;
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(differentFileSystem),
+             rfm::core::RemoteMountPointState::MountPoint);
+
+    auto redirectedChild = safe;
+    redirectedChild.canonicalChild = QStringLiteral("/D:/other-volume/rfm-destination");
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(redirectedChild),
+             rfm::core::RemoteMountPointState::MountPoint);
+
+    auto missingCanonicalization = safe;
+    missingCanonicalization.canonicalChild.reset();
+    QCOMPARE(
+        rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(missingCanonicalization),
+        rfm::core::RemoteMountPointState::Unknown);
+
+    auto missingFileSystem = safe;
+    missingFileSystem.parentFileSystem.reset();
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(missingFileSystem),
+             rfm::core::RemoteMountPointState::Unknown);
+}
+
+void RemoteFileOperationsTest::parsesWindowsRemoteDeleteSafetyProbeOutput()
+{
+    const QString safePath = QStringLiteral("/C:/Users/Administrateur/rfm-destination");
+    const QString nestedPath = safePath + QStringLiteral("/nested");
+    const QString reparsePath = safePath + QStringLiteral("/junction");
+    const auto encoded = [](const QString& path) { return path.toUtf8().toBase64(); };
+    rfm::core::VolumeCommandResult result;
+    result.started = true;
+    result.exitCode = 0;
+    result.standardOutput =
+        QStringLiteral("RFM_WINDOWS_DELETE_V1\n"
+                       "RFM_WINDOWS_DELETE_PATH_V1:SAFE:%1\n"
+                       "RFM_WINDOWS_DELETE_PATH_V1:SAFE:%2\n"
+                       "RFM_WINDOWS_DELETE_PATH_V1:REPARSE:%3\n")
+            .arg(QString::fromLatin1(encoded(safePath)), QString::fromLatin1(encoded(nestedPath)),
+                 QString::fromLatin1(encoded(reparsePath)));
+
+    const auto states = rfm::ssh::RemoteDeleteSafetyProbe::windowsMountPointStates(result);
+    QCOMPARE(states.value(safePath.toCaseFolded()),
+             rfm::core::RemoteMountPointState::NotMountPoint);
+    QCOMPARE(states.value(nestedPath.toCaseFolded()),
+             rfm::core::RemoteMountPointState::NotMountPoint);
+    QCOMPARE(states.value(reparsePath.toCaseFolded()),
+             rfm::core::RemoteMountPointState::MountPoint);
+
+    const QString command = rfm::ssh::RemoteDeleteSafetyProbe::windowsCommand(
+        {safePath, QStringLiteral("/C:/Users/Administrateur/quoted 'path' $")});
+    QVERIFY(command.startsWith(QStringLiteral("powershell.exe -NoProfile -NonInteractive ")));
+    QVERIFY(command.contains(QStringLiteral("-EncodedCommand")));
+    QVERIFY(!command.contains(safePath));
+
+    result.standardOutput = QStringLiteral("RFM_WINDOWS_DELETE_V1\n"
+                                           "RFM_WINDOWS_DELETE_PATH_V1:SAFE:not-base64\n");
+    QVERIFY(rfm::ssh::RemoteDeleteSafetyProbe::windowsMountPointStates(result).isEmpty());
 }
 
 void RemoteFileOperationsTest::acceptsFileSystemSpecificMountRoots()

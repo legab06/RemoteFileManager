@@ -29,6 +29,7 @@ add_library(
     core/VolumeService.cpp
     ssh/LibsshRuntime.cpp
     ssh/RemoteDelete.hpp
+    ssh/RemoteDeleteSafetyProbe.cpp
     ssh/RemoteCopyCapabilityProbe.cpp
     ssh/RemoteCopyTelemetryCounter.hpp
     ssh/RemoteStorageCapabilityProbe.cpp
@@ -51,6 +52,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/TransferCoordinator.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/core/VolumeService.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshSession.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteDeleteSafetyProbe.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteCopyCapabilityProbe.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/RemoteStorageCapabilityProbe.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/ssh/SshAuthenticationPolicy.hpp

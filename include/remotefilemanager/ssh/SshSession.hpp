@@ -125,6 +125,8 @@ class SshSession final : public QObject
     void processRemoteStorageCapabilityProbe();
     void scheduleRemoteStorageCapabilityProbe(bool activityAvailable = true);
     void finishRemoteStorageCapabilityProbe();
+    void processRemoteDeleteSafetyProbe();
+    void scheduleRemoteDeleteSafetyProbe(bool activityAvailable = true);
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();
