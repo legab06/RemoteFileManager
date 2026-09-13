@@ -1318,22 +1318,23 @@ void MainWindow::handleRemoteCopyExecutionCapabilitiesDetected(
 }
 
 void MainWindow::handleRemoteStorageCapabilitiesDetected(
-    rfm::core::RemoteStorageCapabilities capabilities)
+    rfm::core::ConnectionProfile profile, rfm::core::RemoteStorageCapabilities capabilities)
 {
-    if (!m_connected || capabilities.detectionState !=
-                            rfm::core::CapabilityDetectionState::Detected) {
+    if ((!m_connecting && !m_connected) || !profile.isValid() ||
+        capabilities.detectionState != rfm::core::CapabilityDetectionState::Detected ||
+        !profilesHaveSameConnectionSettings(profile, m_activeProfile)) {
         return;
     }
-    const QString identity = serverCapabilitiesIdentity(m_activeProfile);
+    const QString identity = serverCapabilitiesIdentity(profile);
     auto existing = m_serverCapabilities.find(identity);
     if (existing == m_serverCapabilities.end() ||
-        !profilesHaveSameConnectionSettings(existing->profile, m_activeProfile)) {
+        !profilesHaveSameConnectionSettings(existing->profile, profile)) {
         return;
     }
     existing->capabilities.storage = capabilities;
     existing->capabilities.detectedAt = QDateTime::currentDateTimeUtc();
     existing->detectedThisRun = true;
-    persistServerCapabilities(m_activeProfile, existing->capabilities);
+    persistServerCapabilities(profile, existing->capabilities);
 }
 
 void MainWindow::associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,

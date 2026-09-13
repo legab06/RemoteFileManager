@@ -72,7 +72,7 @@ void ServerProfileDialogTest::startsWithCapabilitiesNotDetected()
     QVERIFY(remoteCopyLayout != nullptr);
     auto* const extensionLabel = qobject_cast<QLabel*>(remoteCopyLayout->labelForField(protocol));
     QVERIFY(extensionLabel != nullptr);
-    QCOMPARE(extensionLabel->text(), QStringLiteral("SFTP extension:"));
+    QCOMPARE(extensionLabel->text(), QStringLiteral("Capability checked:"));
     QCOMPARE(dialog.findChild<QTableWidget*>(QStringLiteral("sftpExtensionsTable"))->rowCount(), 0);
 }
 

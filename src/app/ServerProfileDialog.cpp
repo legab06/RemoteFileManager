@@ -78,7 +78,7 @@ ServerProfileDialog::ServerProfileDialog(QWidget* parent) : QDialog(parent)
     remoteCopyLayout->addRow(tr("SFTP copy-data — RFM backend support:"), m_copyDataBackendStatus);
     remoteCopyLayout->addRow(tr("Native server copy — POSIX cp:"), m_nativeCopyStatus);
     remoteCopyLayout->addRow(tr("Effective method:"), m_effectiveCopyMethod);
-    remoteCopyLayout->addRow(tr("SFTP extension:"), protocol);
+    remoteCopyLayout->addRow(tr("Capability checked:"), protocol);
     m_copyDataDescription = new QLabel(remoteCopy);
     m_copyDataDescription->setObjectName(QStringLiteral("copyDataDescriptionLabel"));
     m_copyDataDescription->setWordWrap(true);

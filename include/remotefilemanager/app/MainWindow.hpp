@@ -152,7 +152,7 @@ class MainWindow final : public QMainWindow
     Q_INVOKABLE void handleRemoteCopyExecutionCapabilitiesDetected(
         rfm::core::RemoteCopyExecutionCapabilities capabilities);
     Q_INVOKABLE void handleRemoteStorageCapabilitiesDetected(
-        rfm::core::RemoteStorageCapabilities capabilities);
+        rfm::core::ConnectionProfile profile, rfm::core::RemoteStorageCapabilities capabilities);
     void associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,
                                      const rfm::core::ConnectionProfile& savedProfile);
     void removeSelectedServerProfile();

@@ -22,7 +22,7 @@ RemoteStorageProvider selectRemoteStorageProvider(const RemoteStorageCapabilitie
     return RemoteStorageProvider::None;
 }
 
-bool storageDiscoverySupported(const RemoteStorageCapabilities& capabilities)
+bool storageProviderDetected(const RemoteStorageCapabilities& capabilities)
 {
     return capabilities.detectionState == CapabilityDetectionState::Detected &&
            capabilities.provider != RemoteStorageProvider::None;

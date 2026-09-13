@@ -93,9 +93,6 @@ RemoteStorageCapabilityProbe::applyWindowsResult(rfm::core::RemoteStorageCapabil
     }
     const QSet<QByteArray> lines = outputLines(result.standardOutput);
     if (!lines.contains(WindowsMarker)) {
-        if (result.exitCode != 0) {
-            capabilities.windowsPowerShell = rfm::core::CapabilitySupport::Unsupported;
-        }
         return capabilities;
     }
     capabilities.windowsPowerShell = rfm::core::CapabilitySupport::Supported;

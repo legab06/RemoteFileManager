@@ -85,7 +85,7 @@ void RemoteStorageCapabilityProbeTest::detectsMarkedWindowsPowerShellCommands()
 void RemoteStorageCapabilityProbeTest::doesNotTrustUnmarkedWindowsOutput()
 {
     const auto capabilities = rfm::ssh::RemoteStorageCapabilityProbe::applyWindowsResult(
-        {}, commandResult(QStringLiteral("powershell\nGet-Volume\nGet-Disk\n")));
+        {}, commandResult(QStringLiteral("powershell\nGet-Volume\nGet-Disk\n"), 1));
     QCOMPARE(capabilities.windowsPowerShell, rfm::core::CapabilitySupport::Unknown);
     QCOMPARE(capabilities.windowsGetVolume, rfm::core::CapabilitySupport::Unknown);
     QCOMPARE(capabilities.windowsGetDisk, rfm::core::CapabilitySupport::Unknown);
@@ -97,14 +97,14 @@ void RemoteStorageCapabilityProbeTest::selectsProvidersFromRuntimeProof()
     linux.linuxMountInfo = rfm::core::CapabilitySupport::Supported;
     linux = rfm::ssh::RemoteStorageCapabilityProbe::finalized(linux);
     QCOMPARE(linux.provider, rfm::core::RemoteStorageProvider::Linux);
-    QVERIFY(rfm::core::storageDiscoverySupported(linux));
+    QVERIFY(rfm::core::storageProviderDetected(linux));
 
     rfm::core::RemoteStorageCapabilities windows;
     windows.windowsPowerShell = rfm::core::CapabilitySupport::Supported;
     windows.windowsGetVolume = rfm::core::CapabilitySupport::Supported;
     windows = rfm::ssh::RemoteStorageCapabilityProbe::finalized(windows);
     QCOMPARE(windows.provider, rfm::core::RemoteStorageProvider::WindowsPowerShell);
-    QVERIFY(rfm::core::storageDiscoverySupported(windows));
+    QVERIFY(rfm::core::storageProviderDetected(windows));
 }
 
 void RemoteStorageCapabilityProbeTest::reportsNoProviderAsUnsupportedDiscovery()
@@ -114,7 +114,7 @@ void RemoteStorageCapabilityProbeTest::reportsNoProviderAsUnsupportedDiscovery()
     windowsLike.lsblk = rfm::core::CapabilitySupport::Unknown;
     windowsLike = rfm::ssh::RemoteStorageCapabilityProbe::finalized(windowsLike);
     QCOMPARE(windowsLike.provider, rfm::core::RemoteStorageProvider::None);
-    QVERIFY(!rfm::core::storageDiscoverySupported(windowsLike));
+    QVERIFY(!rfm::core::storageProviderDetected(windowsLike));
 }
 
 void RemoteStorageCapabilityProbeTest::completesWindowsLifecycleWithoutLinuxScanner()

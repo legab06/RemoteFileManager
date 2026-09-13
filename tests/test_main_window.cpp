@@ -2744,9 +2744,6 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
                                       Q_ARG(rfm::core::ServerCapabilities, temporaryCapabilities)));
     QVERIFY(capabilitiesStore.load(&error).isEmpty());
     QVERIFY(error.isEmpty());
-    QVERIFY(QMetaObject::invokeMethod(
-        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     rfm::core::RemoteStorageCapabilities storageCapabilities;
     storageCapabilities.detectionState = rfm::core::CapabilityDetectionState::Detected;
     storageCapabilities.linuxMountInfo = rfm::core::CapabilitySupport::Unsupported;
@@ -2757,7 +2754,11 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
         rfm::core::selectRemoteStorageProvider(storageCapabilities);
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleRemoteStorageCapabilitiesDetected", Qt::DirectConnection,
+        Q_ARG(rfm::core::ConnectionProfile, temporaryProfile),
         Q_ARG(rfm::core::RemoteStorageCapabilities, storageCapabilities)));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleConnected", Qt::DirectConnection, Q_ARG(QString, QStringLiteral(".")),
+        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
     QList saved = store.load(&error);
     QVERIFY(error.isEmpty());
     QCOMPARE(saved.size(), 1);

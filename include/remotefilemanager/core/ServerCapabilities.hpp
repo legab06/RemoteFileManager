@@ -46,7 +46,7 @@ struct ServerCapabilities {
 [[nodiscard]] RemoteStorageProvider
 selectRemoteStorageProvider(const RemoteStorageCapabilities& capabilities);
 
-[[nodiscard]] bool storageDiscoverySupported(const RemoteStorageCapabilities& capabilities);
+[[nodiscard]] bool storageProviderDetected(const RemoteStorageCapabilities& capabilities);
 
 [[nodiscard]] ServerCapabilities
 detectedServerCapabilities(QList<SftpExtensionCapability> sftpExtensions, QDateTime detectedAt,

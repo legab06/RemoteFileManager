@@ -2387,7 +2387,8 @@ void SshSession::finishRemoteStorageCapabilityProbe()
     }
     m_impl->currentServerCapabilities.storage =
         m_impl->storageCapabilityLifecycle.capabilities();
-    emit remoteStorageCapabilitiesDetected(m_impl->currentServerCapabilities.storage);
+    emit remoteStorageCapabilitiesDetected(m_impl->profile,
+                                           m_impl->currentServerCapabilities.storage);
     startPendingRemoteWork();
 }
 
