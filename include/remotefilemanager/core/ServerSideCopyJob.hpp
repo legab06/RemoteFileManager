@@ -112,6 +112,7 @@ class ServerSideCopyJob final
     void applyCopyTelemetry(const RemoteCopyTelemetry& telemetry);
     void completeCurrentItemByteProgress(const RemoteBackendResult& result);
     void disableByteProgress();
+    void invalidateGlobalByteProgress();
     void finishPreflight(const RemoteBackendResult& result);
     void startCopySpeedMeasurement();
     void updateCopySpeed();
@@ -151,6 +152,7 @@ class ServerSideCopyJob final
     bool m_copyActive{false};
     bool m_preflightActive{false};
     bool m_currentItemByteProgressAvailable{false};
+    bool m_globalByteProgressInvalidated{false};
     bool m_speedMeasurementActive{false};
     bool m_stagingOwned{false};
 };

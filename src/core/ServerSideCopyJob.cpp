@@ -187,6 +187,15 @@ void ServerSideCopyJob::applyCopyTelemetry(const RemoteCopyTelemetry& telemetry)
         }
         m_currentItemTransferredBytes = telemetry.transferredBytes;
     }
+    if (m_globalByteProgressInvalidated) {
+        m_progress.byteProgressAvailable = false;
+        m_progress.transferredBytes = 0;
+        m_progress.totalBytes = 0;
+        return;
+    }
+    if (!m_currentItemByteProgressAvailable && !m_copyActive) {
+        return;
+    }
     if (!m_preflightTotalBytes.has_value()) {
         m_progress.byteProgressAvailable = false;
         m_progress.totalBytes = 0;
@@ -227,6 +236,14 @@ void ServerSideCopyJob::applyCopyTelemetry(const RemoteCopyTelemetry& telemetry)
 void ServerSideCopyJob::completeCurrentItemByteProgress(const RemoteBackendResult& result)
 {
     if (!result.succeeded()) {
+        return;
+    }
+    if (m_globalByteProgressInvalidated) {
+        m_currentItemTransferredBytes = 0;
+        m_currentItemByteProgressAvailable = false;
+        m_progress.byteProgressAvailable = false;
+        m_progress.transferredBytes = 0;
+        m_progress.totalBytes = 0;
         return;
     }
     if (!m_currentItemByteProgressAvailable ||
@@ -272,10 +289,22 @@ void ServerSideCopyJob::completeCurrentItemByteProgress(const RemoteBackendResul
 
 void ServerSideCopyJob::disableByteProgress()
 {
+    if (m_preflightTotalBytes.has_value()) {
+        invalidateGlobalByteProgress();
+    }
     m_progress.byteProgressAvailable = false;
     m_progress.transferredBytes = 0;
     m_progress.totalBytes = 0;
     resetCopySpeed();
+}
+
+void ServerSideCopyJob::invalidateGlobalByteProgress()
+{
+    m_globalByteProgressInvalidated = true;
+    m_preflightTotalBytes.reset();
+    m_progress.byteProgressAvailable = false;
+    m_progress.transferredBytes = 0;
+    m_progress.totalBytes = 0;
 }
 
 qint64 ServerSideCopyJob::monotonicMilliseconds() const

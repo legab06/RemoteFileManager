@@ -407,6 +407,17 @@ erreur si le système ne peut pas l’ouvrir.
 - SFTP sert à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
 - Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
+- La suppression récursive distante reste fail-closed face aux frontières de montage. Sous
+  Linux, `/proc/self/mountinfo` correctement lu et validé est la preuve privilégiée : il
+  détecte les mount points réels et les bind mounts ; une donnée absente ou malformée ne
+  prouve rien. Le fallback SFTP portable considère une canonicalisation incohérente ou des
+  `f_fsid` distincts comme une frontière, mais des `f_fsid` identiques signalent seulement
+  qu'aucun changement de filesystem n'a été observé et restent `Unknown`. Sous Windows,
+  PowerShell n'est lancé que lorsque les capabilities runtime l'ont déjà établi comme
+  supporté ; son parcours est en lecture seule et un reparse point est une frontière. Une
+  erreur, un timeout ou un résultat incomplet reste `Unknown`, donc refuse la suppression
+  récursive. Les fichiers réguliers ne traversent pas d'arbre et ne requièrent pas ce
+  preflight de frontières.
 - Les copies entre deux chemins du même serveur restent côté serveur pour éviter un aller-retour des données par le client.
 - `cp` n’expose pas nativement une progression exploitable. Une copie active affiche donc une
   progression indéterminée honnête ; aucun pourcentage n'est estimé ou fabriqué.

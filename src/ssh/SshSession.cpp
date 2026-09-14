@@ -2137,6 +2137,8 @@ SshSession::~SshSession()
 {
     terminalizeTransfer(rfm::core::TransferState::Cancelled,
                         tr("Transfer cancelled because the SSH session is closing."));
+    finishPendingRemoteDeleteForDisconnect(
+        tr("The SSH connection was closed while verifying remote mount boundaries."));
 }
 
 void SshSession::postVolumeAuthentication(quint64 operationId, quint64 authenticationToken,
@@ -2171,6 +2173,8 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile)
 {
     terminalizeTransfer(rfm::core::TransferState::Cancelled,
                         tr("Transfer cancelled because the SSH session was replaced."));
+    finishPendingRemoteDeleteForDisconnect(
+        tr("The SSH connection was closed while verifying remote mount boundaries."));
     m_impl->reset();
     if (!profile.isValid()) {
         fail(tr("Invalid connection settings."));
@@ -2391,6 +2395,8 @@ void SshSession::cancelPasswordAuthentication()
     if (!m_impl->awaitingPasswordAuthentication) {
         return;
     }
+    finishPendingRemoteDeleteForDisconnect(
+        tr("The SSH connection was closed while verifying remote mount boundaries."));
     m_impl->reset();
 }
 
@@ -2686,6 +2692,25 @@ void SshSession::processRemoteDeleteSafetyProbe()
     emit operationFinished(removeRemoteEntriesWithSafetyProbe(m_impl->sftp, pending.id,
                                                               pending.sources, pending.recursive,
                                                               pending.mountInfo, windowsStates));
+}
+
+void SshSession::finishPendingRemoteDeleteForDisconnect(const QString& error)
+{
+    m_impl->remoteDeleteSafetyPollScheduler.cancel();
+    if (!m_impl->pendingRemoteDelete.has_value()) {
+        return;
+    }
+    PendingRemoteDelete pending = std::move(*m_impl->pendingRemoteDelete);
+    m_impl->pendingRemoteDelete.reset();
+    m_impl->remoteDeleteSafetyProcess.reset();
+    emit operationFinished(
+        rfm::ssh::detail::rejectedRemoteRemoval(pending.id, pending.sources, error));
+}
+
+void SshSession::stagePendingRemoteDeleteForTesting(quint64 id,
+                                                    QList<rfm::core::RemoteSelection> sources)
+{
+    m_impl->pendingRemoteDelete = {id, std::move(sources), {}, true};
 }
 
 void SshSession::listDirectory(quint64 requestId, QString path)
@@ -3646,6 +3671,8 @@ void SshSession::completeShutdownIfReady()
     }
     const bool emitTransfersShutdown = m_impl->shuttingDown;
     const bool emitDisconnected = m_impl->disconnecting;
+    finishPendingRemoteDeleteForDisconnect(
+        tr("The SSH connection was closed while verifying remote mount boundaries."));
     m_impl->reset();
     if (emitTransfersShutdown) {
         emit transfersShutdown();
@@ -3719,6 +3746,7 @@ void SshSession::fail(const QString& message)
         m_impl->copyBackend.reset();
     }
     terminalizeTransfer(rfm::core::TransferState::Failed, message);
+    finishPendingRemoteDeleteForDisconnect(message);
     m_impl->reset();
     emit failed(message);
 }

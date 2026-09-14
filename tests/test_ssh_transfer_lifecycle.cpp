@@ -208,6 +208,7 @@ class SshSessionTransferTest final : public QObject
     void connectionLossFailsActiveAndQueuedExactlyOnce();
     void normalFailureStartsNextTransfer();
     void cancellingQueuedTransferDoesNotCreateBackend();
+    void pendingRemoteDeleteDisconnectFinishesExactlyOnce();
 
   private:
     [[nodiscard]] std::unique_ptr<SshSession> makeSession();
@@ -429,6 +430,29 @@ void SshSessionTransferTest::cancellingQueuedTransferDoesNotCreateBackend()
     QCOMPARE(terminalCount(updates, 41), 1);
     QCOMPARE(terminalCount(updates, 42), 1);
     QCOMPARE(m_createdBackends, 1);
+}
+
+void SshSessionTransferTest::pendingRemoteDeleteDisconnectFinishesExactlyOnce()
+{
+    auto session = makeSession();
+    QSignalSpy finished(session.get(), &SshSession::operationFinished);
+    QSignalSpy disconnected(session.get(), &SshSession::disconnected);
+    session->stagePendingRemoteDeleteForTesting(
+        51, {{QStringLiteral("/C:/Users/Administrateur/rfm-destination"), true}});
+
+    session->disconnectFromHost();
+
+    QCOMPARE(disconnected.size(), 1);
+    QCOMPARE(finished.size(), 1);
+    const auto result =
+        finished.constFirst().constFirst().value<rfm::core::RemoteOperationResult>();
+    QCOMPARE(result.id, quint64{51});
+    QCOMPARE(result.items.size(), 1);
+    QVERIFY(!result.items.constFirst().success);
+    QVERIFY(result.items.constFirst().error.contains(QStringLiteral("closed")));
+
+    session->processRemoteDeleteSafetyProbe();
+    QCOMPARE(finished.size(), 1);
 }
 
 } // namespace rfm::ssh

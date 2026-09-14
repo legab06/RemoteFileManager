@@ -551,6 +551,7 @@ class RemoteFileOperationsTest final : public QObject
     void serverSideCopyCalculatesSpeedWithoutByteProgress();
     void serverSideCopyResetsSpeedAfterFailureAndCancellation();
     void serverSideCopyKeepsMultiSelectionByteProgressIndeterminate();
+    void serverSideCopyKeepsByteProgressIndeterminateAfterMissingTelemetry();
     void serverSideCopyAggregatesMultiSelectionByteProgress();
     void serverSideCopyKeepsZeroBytePreflightDeterminate();
     void serverSideCopyDisablesByteProgressWhenTotalsChange();
@@ -1416,6 +1417,37 @@ void RemoteFileOperationsTest::serverSideCopyKeepsMultiSelectionByteProgressInde
     QCOMPARE(job.progress().totalItems, quint64{2});
 }
 
+void RemoteFileOperationsTest::serverSideCopyKeepsByteProgressIndeterminateAfterMissingTelemetry()
+{
+    FakeCopyBackend backend;
+    backend.completeAfterPolls = 1;
+    backend.preflightTotalBytes = 600;
+    backend.copyTelemetryResponses = {{0, 0, false}, {600, 0, true}};
+    rfm::core::ServerSideCopyJob job(
+        backend, 115,
+        {{QStringLiteral("/source/first"), false}, {QStringLiteral("/source/second"), false}},
+        QStringLiteral("/destination"));
+
+    for (int step = 0; step < 20 && job.progress().completedItems == 0; ++step) {
+        job.step();
+    }
+
+    QCOMPARE(job.progress().completedItems, quint64{1});
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+
+    for (int step = 0; step < 20 && !job.isFinished(); ++step) {
+        job.step();
+    }
+
+    QVERIFY(job.isFinished());
+    QCOMPARE(job.progress().state, rfm::core::OperationState::Completed);
+    QVERIFY(!job.progress().byteProgressAvailable);
+    QCOMPARE(job.progress().transferredBytes, quint64{0});
+    QCOMPARE(job.progress().totalBytes, quint64{0});
+}
+
 void RemoteFileOperationsTest::serverSideCopyPreflightStaysPreparingAndCanCancel()
 {
     FakeCopyBackend backend;
@@ -1499,9 +1531,11 @@ void RemoteFileOperationsTest::serverSideCopyDisablesByteProgressWhenTotalsChang
     FakeCopyBackend backend;
     backend.completeAfterPolls = 1;
     backend.preflightTotalBytes = 100;
-    backend.copyTelemetry = {120, 0, true};
-    rfm::core::ServerSideCopyJob job(backend, 108, {{QStringLiteral("/source/file"), false}},
-                                     QStringLiteral("/destination"));
+    backend.copyTelemetryResponses = {{120, 0, true}, {50, 0, true}};
+    rfm::core::ServerSideCopyJob job(
+        backend, 108,
+        {{QStringLiteral("/source/first"), false}, {QStringLiteral("/source/second"), false}},
+        QStringLiteral("/destination"));
 
     for (int step = 0; step < 20 && !job.isFinished(); ++step) {
         job.step();
@@ -2503,7 +2537,7 @@ void RemoteFileOperationsTest::classifiesPortableRemoteDeleteSafetyEvidence()
         QStringLiteral("/C:/Users/Administrateur/rfm-destination"),
         QStringLiteral("/C:/Users/Administrateur/rfm-destination"), quint64{42}, quint64{42}};
     QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(safe),
-             rfm::core::RemoteMountPointState::NotMountPoint);
+             rfm::core::RemoteMountPointState::Unknown);
 
     auto differentFileSystem = safe;
     differentFileSystem.childFileSystem = 43;
@@ -2521,9 +2555,25 @@ void RemoteFileOperationsTest::classifiesPortableRemoteDeleteSafetyEvidence()
         rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(missingCanonicalization),
         rfm::core::RemoteMountPointState::Unknown);
 
+    auto missingParentCanonicalization = safe;
+    missingParentCanonicalization.canonicalParent.reset();
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(
+                 missingParentCanonicalization),
+             rfm::core::RemoteMountPointState::Unknown);
+
+    auto invalidExpectedChild = safe;
+    invalidExpectedChild.expectedChild.clear();
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(invalidExpectedChild),
+             rfm::core::RemoteMountPointState::Unknown);
+
     auto missingFileSystem = safe;
     missingFileSystem.parentFileSystem.reset();
     QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(missingFileSystem),
+             rfm::core::RemoteMountPointState::Unknown);
+
+    auto missingChildFileSystem = safe;
+    missingChildFileSystem.childFileSystem.reset();
+    QCOMPARE(rfm::ssh::RemoteDeleteSafetyProbe::portableSftpMountPointState(missingChildFileSystem),
              rfm::core::RemoteMountPointState::Unknown);
 }
 

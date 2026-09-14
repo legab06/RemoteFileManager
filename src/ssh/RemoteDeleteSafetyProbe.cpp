@@ -53,7 +53,7 @@ RemoteDeleteSafetyProbe::portableSftpMountPointState(const RemoteDeleteSftpEvide
         return rfm::core::RemoteMountPointState::Unknown;
     }
     return *evidence.parentFileSystem == *evidence.childFileSystem
-               ? rfm::core::RemoteMountPointState::NotMountPoint
+               ? rfm::core::RemoteMountPointState::Unknown
                : rfm::core::RemoteMountPointState::MountPoint;
 }
 
