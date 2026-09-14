@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 
 #include <QByteArray>
+#include <QHash>
 #include <QPoint>
 #include <QSet>
 #include <QStringList>
@@ -56,6 +57,8 @@ class FileBrowserPane final : public QWidget
     [[nodiscard]] QByteArray createInternalDragData() const;
     [[nodiscard]] std::optional<FileEntryProperties> contextEntryProperties() const;
     [[nodiscard]] std::optional<rfm::core::BrowserLocation> contextLocalFile() const;
+    [[nodiscard]] bool hasDirectoryContents(const rfm::core::BrowserLocation& location,
+                                            const QList<rfm::core::RemoteEntry>& entries) const;
 
     void showDirectory(const QString& path, const QString& displayPath,
                        const QList<rfm::core::RemoteEntry>& entries,
@@ -71,6 +74,11 @@ class FileBrowserPane final : public QWidget
     void setPendingSelectionNames(QStringList names);
     void setDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
                                const QString& name, std::optional<quint64> count);
+    void retryUnknownDirectoryItemCounts();
+    void cancelDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
+                                  const QString& name, bool preservePending = false);
+    void suspendDirectoryItemCounts();
+    void resumeDirectoryItemCounts();
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
     void setTransferContext(QString applicationInstanceId,
@@ -128,7 +136,7 @@ class FileBrowserPane final : public QWidget
     void applyTableHeaderState(const QByteArray& state, int sortColumn, Qt::SortOrder sortOrder,
                                bool adaptiveLayout);
     void resetTableHeaderState();
-    void applyAdaptiveLayout();
+    void applyAdaptiveLayout(std::optional<int> contentWidth = std::nullopt);
     void markManualLayout();
     void applyDefaultFileView();
     void handleHeaderSectionClicked(int logicalIndex);
@@ -138,6 +146,10 @@ class FileBrowserPane final : public QWidget
     void scheduleTableHeaderStateSave();
     void saveTableHeaderState();
     void requestNextDirectoryItemCount();
+    void scheduleDirectoryRenderStep();
+    void processDirectoryRenderStep();
+    void finishDirectoryRender();
+    void applyCutAppearance(int row);
     [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
     void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
@@ -147,12 +159,14 @@ class FileBrowserPane final : public QWidget
     QListView* m_mosaicView{nullptr};
     ViewMode m_viewMode{ViewMode::Details};
     rfm::core::BrowserLocation m_currentLocation;
+    QList<rfm::core::RemoteEntry> m_directoryEntries;
     QStringList m_pendingSelectionNames;
     QStringList m_pendingDirectoryCountNames;
     rfm::core::BrowserLocation m_activeDirectoryCountLocation;
     QString m_activeDirectoryCountName;
     quint64 m_directoryCountGeneration{0};
     quint64 m_activeDirectoryCountGeneration{0};
+    bool m_directoryItemCountsSuspended{false};
     QList<rfm::core::BrowserLocation> m_backHistory;
     QList<rfm::core::BrowserLocation> m_forwardHistory;
     QString m_applicationInstanceId;
@@ -176,6 +190,19 @@ class FileBrowserPane final : public QWidget
     int m_contextMenuRow{-1};
     bool m_restoreTableFocus{false};
     bool m_showHiddenFiles{false};
+    struct DirectoryRenderState {
+        QList<rfm::core::RemoteEntry> entries;
+        QHash<QString, quint64> preservedDirectoryCounts;
+        QSet<QString> namesToSelect;
+        qsizetype nextRow{0};
+        qsizetype entriesPerStep{0};
+        int previousScrollPosition{-1};
+        int maximumNameTextWidth{0};
+        bool sortingEnabled{false};
+    };
+    std::optional<DirectoryRenderState> m_directoryRender;
+    quint64 m_directoryRenderGeneration{0};
+    bool m_directoryRenderStepScheduled{false};
 };
 
 } // namespace rfm::app

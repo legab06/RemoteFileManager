@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
+#include "remotefilemanager/core/RemoteMoveSafety.hpp"
 #include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/ServerCapabilities.hpp"
 #include "remotefilemanager/core/Storage.hpp"
@@ -13,6 +14,7 @@
 #include "remotefilemanager/core/VolumeService.hpp"
 
 #include <QByteArray>
+#include <QHash>
 #include <QObject>
 #include <functional>
 #include <memory>
@@ -26,6 +28,8 @@ namespace rfm::ssh
 {
 
 enum class PasswordAuthenticationReason;
+class RemoteRemoveBackend;
+struct RemoteMountInfoResult;
 
 class SshSessionTransferTest;
 
@@ -47,6 +51,7 @@ class SshSession final : public QObject
     void cancelPasswordAuthentication();
     void listDirectory(quint64 requestId, QString path);
     void countDirectoryEntries(quint64 requestId, QString path);
+    void cancelDirectoryCount(quint64 requestId);
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
     void operateVolume(rfm::core::VolumeOperationRequest request);
@@ -112,7 +117,8 @@ class SshSession final : public QObject
     friend class SshSessionTransferTest;
 
     SshSession(TransferBackendFactory transferBackendFactory,
-               std::function<bool()> transferConnectionAvailable, QObject* parent);
+               std::function<bool()> transferConnectionAvailable, QObject* parent,
+               std::function<qint64()> transferClock = {});
 
     void authenticateAndOpen();
     void authenticateWithPassword(rfm::core::SecurePassword password);
@@ -128,7 +134,18 @@ class SshSession final : public QObject
     void processRemoteDeleteSafetyProbe();
     void scheduleRemoteDeleteSafetyProbe(bool activityAvailable = true);
     void finishPendingRemoteDeleteForDisconnect(const QString& error);
+    void startRemoteRemoveJob(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive,
+                              RemoteMountInfoResult mountInfo,
+                              QHash<QString, rfm::core::RemoteMountPointState> windowsStates);
+    void processRemoteRemoveStep();
+    void scheduleRemoteRemoveStep();
+    void finishActiveRemoteRemove(const QString& error);
     void stagePendingRemoteDeleteForTesting(quint64 id, QList<rfm::core::RemoteSelection> sources);
+    void stageRemoteRemoveForTesting(std::unique_ptr<RemoteRemoveBackend> backend, quint64 id,
+                                     QList<rfm::core::RemoteSelection> sources, bool recursive);
+    void startNextDirectoryCount();
+    void processDirectoryCountStep();
+    void scheduleDirectoryCountStep();
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();
@@ -146,7 +163,8 @@ class SshSession final : public QObject
     void startRemoteStorageScanner(quint64 requestId);
     void startPendingRemoteWork();
     void completeShutdownIfReady();
-    void publishTransferProgress(const rfm::core::TransferProgress& progress);
+    void publishTransferProgress(const rfm::core::TransferProgress& progress,
+                                 bool immediate = false);
     void terminalizeTransfer(rfm::core::TransferState state, const QString& error);
     void fail(const QString& message);
 };

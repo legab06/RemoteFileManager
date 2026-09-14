@@ -2,6 +2,7 @@
 
 #include "RemoteCopyTelemetryCounter.hpp"
 #include "RemoteDelete.hpp"
+#include "RemoteRemoveJob.hpp"
 #include "SftpTransferBackend.hpp"
 #include "SshTransportHealth.hpp"
 #include "remotefilemanager/core/RemoteMoveSafety.hpp"
@@ -14,6 +15,7 @@
 #include "remotefilemanager/ssh/RemoteCopyCapabilityProbe.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/RemoteDeleteSafetyProbe.hpp"
+#include "remotefilemanager/ssh/RemoteDirectoryCountJob.hpp"
 #include "remotefilemanager/ssh/RemoteStorageCapabilityProbe.hpp"
 #include "remotefilemanager/ssh/RemoteStorageScanner.hpp"
 #include "remotefilemanager/ssh/RemoteVolumeService.hpp"
@@ -37,14 +39,30 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
 #include <fcntl.h>
 #include <limits>
 #include <optional>
 #include <utility>
 
+namespace rfm::ssh
+{
+
+enum class RemoteMountInfoState { Unavailable, Available, Invalid };
+
+struct RemoteMountInfoResult {
+    RemoteMountInfoState state{RemoteMountInfoState::Unavailable};
+    QByteArray contents;
+};
+
+} // namespace rfm::ssh
+
 namespace
 {
+
+using rfm::ssh::RemoteMountInfoResult;
+using rfm::ssh::RemoteMountInfoState;
 
 QEvent::Type volumeAuthenticationEventType()
 {
@@ -162,13 +180,6 @@ std::optional<quint64> remoteFileSystemId(sftp_session sftp, const QString& path
     sftp_statvfs_free(attributes);
     return id == 0 ? std::nullopt : std::optional<quint64>{id};
 }
-
-enum class RemoteMountInfoState { Unavailable, Available, Invalid };
-
-struct RemoteMountInfoResult {
-    RemoteMountInfoState state{RemoteMountInfoState::Unavailable};
-    QByteArray contents;
-};
 
 RemoteMountInfoResult remoteMountInfo(sftp_session sftp)
 {
@@ -658,23 +669,121 @@ remoteDeleteSftpMountPointState(sftp_session sftp, const RemoteMountInfoResult& 
         {canonicalParent, canonicalChild, expectedChild, parentFileSystem, childFileSystem});
 }
 
-rfm::core::RemoteOperationResult removeRemoteEntriesWithSafetyProbe(
-    sftp_session sftp, quint64 id, const QList<rfm::core::RemoteSelection>& sources, bool recursive,
-    const RemoteMountInfoResult& mountInfo,
-    const QHash<QString, rfm::core::RemoteMountPointState>& windowsStates)
+class SftpRemoteRemoveDirectory final : public rfm::ssh::RemoteRemoveDirectory
 {
-    SftpBackend backend(sftp);
-    return rfm::ssh::detail::removeRemoteEntriesSafely(
-        backend, id, sources, recursive, [sftp, &mountInfo, &windowsStates](const QString& path) {
-            const rfm::core::RemoteMountPointState sftpState =
-                remoteDeleteSftpMountPointState(sftp, mountInfo, path);
-            if (sftpState != rfm::core::RemoteMountPointState::Unknown) {
-                return sftpState;
+  public:
+    SftpRemoteRemoveDirectory(sftp_session sftp, sftp_dir directory)
+        : m_sftp(sftp), m_directory(directory)
+    {}
+
+    ~SftpRemoteRemoveDirectory() override
+    {
+        if (m_directory != nullptr) {
+            sftp_closedir(m_directory);
+        }
+    }
+
+    rfm::ssh::RemoteRemoveRead read() override
+    {
+        sftp_attributes attributes = sftp_readdir(m_sftp, m_directory);
+        if (attributes == nullptr) {
+            if (sftp_dir_eof(m_directory) != 0) {
+                return {rfm::ssh::RemoteRemoveReadState::End, {}, false, {}};
             }
-            const QString normalized = rfm::core::RemotePath::normalize(path).toCaseFolded();
-            return windowsStates.value(normalized, rfm::core::RemoteMountPointState::Unknown);
-        });
-}
+            return {rfm::ssh::RemoteRemoveReadState::Error,
+                    {},
+                    false,
+                    {backendError(sftp_get_error(m_sftp)),
+                     QCoreApplication::translate(
+                         "RemoteDelete", "Unable to finish listing the remote removal tree.")}};
+        }
+        const QString name = QString::fromUtf8(attributes->name);
+        const bool directory = attributes->type == SSH_FILEXFER_TYPE_DIRECTORY;
+        sftp_attributes_free(attributes);
+        if (name == QStringLiteral(".") || name == QStringLiteral("..")) {
+            return {rfm::ssh::RemoteRemoveReadState::Entry, name, false, {}};
+        }
+        return {rfm::ssh::RemoteRemoveReadState::Entry, name, directory, {}};
+    }
+
+  private:
+    sftp_session m_sftp{nullptr};
+    sftp_dir m_directory{nullptr};
+};
+
+class SftpRemoteRemoveBackend final : public rfm::ssh::RemoteRemoveBackend
+{
+  public:
+    SftpRemoteRemoveBackend(sftp_session sftp, const RemoteMountInfoResult& mountInfo,
+                            const QHash<QString, rfm::core::RemoteMountPointState>& windowsStates)
+        : m_sftp(sftp), m_mountInfo(mountInfo), m_windowsStates(windowsStates)
+    {}
+
+    rfm::core::RemoteBackendResult preflightDirectory(const QString& path) override
+    {
+        const rfm::core::RemoteMountPointState state = mountPointState(path);
+        if (state == rfm::core::RemoteMountPointState::MountPoint) {
+            return {rfm::core::RemoteBackendError::Failure,
+                    QCoreApplication::translate(
+                        "RemoteDelete",
+                        "A mount point exists in the remote removal tree. Nothing was deleted.")};
+        }
+        if (state == rfm::core::RemoteMountPointState::Unknown) {
+            return {rfm::core::RemoteBackendError::Failure,
+                    QCoreApplication::translate(
+                        "RemoteDelete",
+                        "Unable to verify remote mount boundaries. Nothing was deleted.")};
+        }
+        return {};
+    }
+
+    rfm::ssh::RemoteRemoveOpenResult openDirectory(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        sftp_dir directory = sftp_opendir(m_sftp, encoded.constData());
+        if (directory == nullptr) {
+            return {{backendError(sftp_get_error(m_sftp)),
+                     QCoreApplication::translate("RemoteDelete",
+                                                  "Unable to open the remote removal tree.")},
+                    {}};
+        }
+        return {{}, std::make_unique<SftpRemoteRemoveDirectory>(m_sftp, directory)};
+    }
+
+    rfm::core::RemoteBackendResult removeFile(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        if (sftp_unlink(m_sftp, encoded.constData()) == SSH_OK) {
+            return {};
+        }
+        return {backendError(sftp_get_error(m_sftp)), {}};
+    }
+
+    rfm::core::RemoteBackendResult removeDirectory(const QString& path) override
+    {
+        const QByteArray encoded = path.toUtf8();
+        if (sftp_rmdir(m_sftp, encoded.constData()) == SSH_OK) {
+            return {};
+        }
+        return {backendError(sftp_get_error(m_sftp)), {}};
+    }
+
+  private:
+    [[nodiscard]] rfm::core::RemoteMountPointState mountPointState(const QString& path) const
+    {
+        const rfm::core::RemoteMountPointState sftpState =
+            remoteDeleteSftpMountPointState(m_sftp, m_mountInfo, path);
+        if (sftpState != rfm::core::RemoteMountPointState::Unknown) {
+            return sftpState;
+        }
+        return m_windowsStates.value(rfm::core::RemotePath::normalize(path).toCaseFolded(),
+                                     rfm::core::RemoteMountPointState::Unknown);
+    }
+
+    sftp_session m_sftp{nullptr};
+    RemoteMountInfoResult m_mountInfo;
+    QHash<QString, rfm::core::RemoteMountPointState> m_windowsStates;
+};
 
 class SshServerSideCopyBackend final : public rfm::core::ServerSideCopyBackend
 {
@@ -1953,12 +2062,25 @@ struct PendingRemoteDelete {
     bool recursive{false};
 };
 
+struct PendingDirectoryCountRequest {
+    quint64 id{0};
+    QString path;
+};
+
 bool isTerminalTransferState(rfm::core::TransferState state)
 {
     return state == rfm::core::TransferState::Completed ||
            state == rfm::core::TransferState::Cancelled ||
            state == rfm::core::TransferState::Failed;
 }
+
+qint64 monotonicMilliseconds()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+constexpr qint64 transferUiPublicationIntervalMilliseconds = 50;
 
 QString remoteCopyMethodDescription(rfm::core::RemoteCopyMethod method,
                                     rfm::core::NativeServerCopyPrimitive primitive)
@@ -1984,11 +2106,19 @@ namespace rfm::ssh
 class SshSession::Impl final
 {
   public:
-    Impl() = default;
+    struct TransferPublicationState {
+        qint64 lastPublishedAt{0};
+        bool hasPublished{false};
+        std::optional<rfm::core::TransferProgress> pending;
+    };
 
-    Impl(TransferBackendFactory backendFactory, std::function<bool()> connectionAvailable)
+    Impl() : transferClock(monotonicMilliseconds) {}
+
+    Impl(TransferBackendFactory backendFactory, std::function<bool()> connectionAvailable,
+         std::function<qint64()> clock)
         : transferBackendFactory(std::move(backendFactory)),
-          transferConnectionAvailable(std::move(connectionAvailable))
+          transferConnectionAvailable(std::move(connectionAvailable)),
+          transferClock(clock ? std::move(clock) : std::function<qint64()>(monotonicMilliseconds))
     {}
 
     ~Impl() { reset(); }
@@ -2008,6 +2138,13 @@ class SshSession::Impl final
 
     void reset()
     {
+        activeDirectoryCount.reset();
+        pendingDirectoryCounts.clear();
+        directoryCountStepScheduled = false;
+        activeRemoteRemoveJob.reset();
+        remoteRemoveBackend.reset();
+        remoteRemoveStepScheduled = false;
+        testRemoteRemoveBackend = false;
         remoteCopyCapabilityProcess.reset();
         remoteCopyCapabilityPollScheduler.cancel();
         storageCapabilityProcess.reset();
@@ -2049,6 +2186,7 @@ class SshSession::Impl final
         activeTransferJob.reset();
         transferBackend.reset();
         terminalTransferIds.clear();
+        transferPublicationStates.clear();
         transferStepScheduled = false;
         copyStepScheduled = false;
         shuttingDown = false;
@@ -2079,6 +2217,8 @@ class SshSession::Impl final
     std::unique_ptr<rfm::core::TransferJob> activeTransferJob;
     std::unique_ptr<SshServerSideCopyBackend> copyBackend;
     std::unique_ptr<rfm::core::ServerSideCopyJob> activeCopyJob;
+    std::unique_ptr<rfm::ssh::RemoteRemoveBackend> remoteRemoveBackend;
+    std::unique_ptr<rfm::ssh::RemoteRemoveJob> activeRemoteRemoveJob;
     std::unique_ptr<rfm::ssh::RemoteStorageScanner> storageScanner;
     std::unique_ptr<SshCommandProcess> remoteCopyCapabilityProcess;
     std::unique_ptr<SshCommandProcess> storageCapabilityProcess;
@@ -2099,18 +2239,25 @@ class SshSession::Impl final
     rfm::ssh::SshCommandPollScheduler remoteDeleteSafetyPollScheduler;
     rfm::ssh::RemoteStorageCapabilityLifecycle storageCapabilityLifecycle;
     std::optional<PendingRemoteDelete> pendingRemoteDelete;
+    std::unique_ptr<rfm::ssh::RemoteDirectoryCountJob> activeDirectoryCount;
+    QQueue<PendingDirectoryCountRequest> pendingDirectoryCounts;
     rfm::ssh::SshCommandPollScheduler volumePollScheduler;
     sftp_file storageProbeFile{nullptr};
     QByteArray storageProbeData;
     quint64 storageProbeRequestId{0};
     quint64 pendingStorageRequestId{0};
     QSet<quint64> terminalTransferIds;
+    QHash<quint64, TransferPublicationState> transferPublicationStates;
     TransferBackendFactory transferBackendFactory;
     std::function<bool()> transferConnectionAvailable;
+    std::function<qint64()> transferClock;
     bool transferStepScheduled{false};
     bool copyStepScheduled{false};
+    bool remoteRemoveStepScheduled{false};
+    bool testRemoteRemoveBackend{false};
     bool storageStepScheduled{false};
     bool storageProbeStepScheduled{false};
+    bool directoryCountStepScheduled{false};
     bool shuttingDown{false};
     bool disconnecting{false};
     quint64 nextAuthenticationToken{0};
@@ -2124,9 +2271,11 @@ SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_uniq
 }
 
 SshSession::SshSession(TransferBackendFactory transferBackendFactory,
-                       std::function<bool()> transferConnectionAvailable, QObject* parent)
+                       std::function<bool()> transferConnectionAvailable, QObject* parent,
+                       std::function<qint64()> transferClock)
     : QObject(parent), m_impl(std::make_unique<Impl>(std::move(transferBackendFactory),
-                                                     std::move(transferConnectionAvailable)))
+                                                     std::move(transferConnectionAvailable),
+                                                     std::move(transferClock)))
 {
     qRegisterMetaType<rfm::core::ServerCapabilities>();
     qRegisterMetaType<rfm::core::RemoteCopyExecutionCapabilities>();
@@ -2137,6 +2286,7 @@ SshSession::~SshSession()
 {
     terminalizeTransfer(rfm::core::TransferState::Cancelled,
                         tr("Transfer cancelled because the SSH session is closing."));
+    finishActiveRemoteRemove(tr("Remote removal cancelled because the SSH session is closing."));
     finishPendingRemoteDeleteForDisconnect(
         tr("The SSH connection was closed while verifying remote mount boundaries."));
 }
@@ -2173,6 +2323,7 @@ void SshSession::connectToHost(rfm::core::ConnectionProfile profile)
 {
     terminalizeTransfer(rfm::core::TransferState::Cancelled,
                         tr("Transfer cancelled because the SSH session was replaced."));
+    finishActiveRemoteRemove(tr("Remote removal cancelled because the SSH session was replaced."));
     finishPendingRemoteDeleteForDisconnect(
         tr("The SSH connection was closed while verifying remote mount boundaries."));
     m_impl->reset();
@@ -2689,9 +2840,8 @@ void SshSession::processRemoteDeleteSafetyProbe()
         poll.result.has_value()
             ? rfm::ssh::RemoteDeleteSafetyProbe::windowsMountPointStates(*poll.result)
             : QHash<QString, rfm::core::RemoteMountPointState>{};
-    emit operationFinished(removeRemoteEntriesWithSafetyProbe(m_impl->sftp, pending.id,
-                                                              pending.sources, pending.recursive,
-                                                              pending.mountInfo, windowsStates));
+    startRemoteRemoveJob(pending.id, std::move(pending.sources), pending.recursive,
+                         std::move(pending.mountInfo), windowsStates);
 }
 
 void SshSession::finishPendingRemoteDeleteForDisconnect(const QString& error)
@@ -2705,6 +2855,83 @@ void SshSession::finishPendingRemoteDeleteForDisconnect(const QString& error)
     m_impl->remoteDeleteSafetyProcess.reset();
     emit operationFinished(
         rfm::ssh::detail::rejectedRemoteRemoval(pending.id, pending.sources, error));
+}
+
+void SshSession::startRemoteRemoveJob(
+    quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive,
+    RemoteMountInfoResult mountInfo, QHash<QString, rfm::core::RemoteMountPointState> windowsStates)
+{
+    if (m_impl->sftp == nullptr) {
+        emit operationFinished(
+            rfm::ssh::detail::rejectedRemoteRemoval(id, sources, tr("No active SFTP connection.")));
+        return;
+    }
+    if (!recursive) {
+        mountInfo = {};
+    }
+    m_impl->remoteRemoveBackend =
+        std::make_unique<SftpRemoteRemoveBackend>(m_impl->sftp, mountInfo, windowsStates);
+    m_impl->testRemoteRemoveBackend = false;
+    m_impl->activeRemoteRemoveJob = std::make_unique<rfm::ssh::RemoteRemoveJob>(
+        *m_impl->remoteRemoveBackend, id, std::move(sources), recursive);
+    scheduleRemoteRemoveStep();
+}
+
+void SshSession::scheduleRemoteRemoveStep()
+{
+    if (m_impl->activeRemoteRemoveJob != nullptr && !m_impl->remoteRemoveStepScheduled) {
+        m_impl->remoteRemoveStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processRemoteRemoveStep, Qt::QueuedConnection);
+    }
+}
+
+void SshSession::finishActiveRemoteRemove(const QString& error)
+{
+    if (m_impl->activeRemoteRemoveJob == nullptr) {
+        return;
+    }
+    m_impl->activeRemoteRemoveJob->cancel(error);
+    const rfm::core::RemoteOperationResult result = m_impl->activeRemoteRemoveJob->result();
+    m_impl->activeRemoteRemoveJob.reset();
+    m_impl->remoteRemoveBackend.reset();
+    emit operationFinished(result);
+}
+
+void SshSession::processRemoteRemoveStep()
+{
+    m_impl->remoteRemoveStepScheduled = false;
+    if (m_impl->activeRemoteRemoveJob == nullptr) {
+        completeShutdownIfReady();
+        return;
+    }
+    m_impl->activeRemoteRemoveJob->step();
+    if (!m_impl->testRemoteRemoveBackend &&
+        !rfm::ssh::transportAlive(m_impl->session, m_impl->sftp) && !m_impl->shuttingDown &&
+        !m_impl->disconnecting) {
+        finishActiveRemoteRemove(tr("The SSH/SFTP connection was lost during remote removal."));
+        fail(tr("The SSH/SFTP connection was lost during remote removal."));
+        return;
+    }
+    if (m_impl->activeRemoteRemoveJob->isFinished()) {
+        const rfm::core::RemoteOperationResult result = m_impl->activeRemoteRemoveJob->result();
+        m_impl->activeRemoteRemoveJob.reset();
+        m_impl->remoteRemoveBackend.reset();
+        emit operationFinished(result);
+        completeShutdownIfReady();
+        return;
+    }
+    scheduleRemoteRemoveStep();
+}
+
+void SshSession::stageRemoteRemoveForTesting(std::unique_ptr<RemoteRemoveBackend> backend,
+                                             quint64 id, QList<rfm::core::RemoteSelection> sources,
+                                             bool recursive)
+{
+    m_impl->remoteRemoveBackend = std::move(backend);
+    m_impl->testRemoteRemoveBackend = true;
+    m_impl->activeRemoteRemoveJob = std::make_unique<rfm::ssh::RemoteRemoveJob>(
+        *m_impl->remoteRemoveBackend, id, std::move(sources), recursive);
+    scheduleRemoteRemoveStep();
 }
 
 void SshSession::stagePendingRemoteDeleteForTesting(quint64 id,
@@ -2773,40 +3000,106 @@ void SshSession::countDirectoryEntries(quint64 requestId, QString path)
         emit directoryCountFailed(requestId, path);
         return;
     }
-    const QByteArray encodedPath = path.toUtf8();
+    m_impl->pendingDirectoryCounts.enqueue({requestId, std::move(path)});
+    startNextDirectoryCount();
+}
+
+void SshSession::cancelDirectoryCount(quint64 requestId)
+{
+    if (m_impl->activeDirectoryCount != nullptr &&
+        m_impl->activeDirectoryCount->id() == requestId) {
+        m_impl->activeDirectoryCount.reset();
+        startNextDirectoryCount();
+        return;
+    }
+    m_impl->pendingDirectoryCounts.removeIf(
+        [requestId](const PendingDirectoryCountRequest& request) {
+            return request.id == requestId;
+        });
+}
+
+void SshSession::startNextDirectoryCount()
+{
+    if (m_impl->activeDirectoryCount != nullptr || m_impl->sftp == nullptr ||
+        m_impl->pendingDirectoryCounts.isEmpty()) {
+        return;
+    }
+    const PendingDirectoryCountRequest request = m_impl->pendingDirectoryCounts.dequeue();
+    const QByteArray encodedPath = request.path.toUtf8();
     sftp_dir directory = sftp_opendir(m_impl->sftp, encodedPath.constData());
     if (directory == nullptr) {
         const int directoryError = sftp_get_error(m_impl->sftp);
-        emit directoryCountFailed(requestId, path);
+        emit directoryCountFailed(request.id, request.path);
         if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
             ssh_is_connected(m_impl->session) == 0) {
-            fail(tr("The SSH connection was lost while opening %1.").arg(path));
+            fail(tr("The SSH connection was lost while opening %1.").arg(request.path));
+            return;
         }
+        QMetaObject::invokeMethod(this, &SshSession::startNextDirectoryCount, Qt::QueuedConnection);
         return;
     }
+    const sftp_session sftp = m_impl->sftp;
+    m_impl->activeDirectoryCount = std::make_unique<rfm::ssh::RemoteDirectoryCountJob>(
+        request.id, request.path,
+        [sftp, directory] {
+            sftp_attributes attributes = sftp_readdir(sftp, directory);
+            if (attributes == nullptr) {
+                return rfm::ssh::RemoteDirectoryCountRead{
+                    sftp_dir_eof(directory) != 0 ? rfm::ssh::RemoteDirectoryCountReadState::End
+                                                 : rfm::ssh::RemoteDirectoryCountReadState::Error,
+                    {},
+                    sftp_get_error(sftp)};
+            }
+            const QString name = QString::fromUtf8(attributes->name);
+            sftp_attributes_free(attributes);
+            return rfm::ssh::RemoteDirectoryCountRead{
+                rfm::ssh::RemoteDirectoryCountReadState::Entry, name, SSH_FX_OK};
+        },
+        [directory] { sftp_closedir(directory); },
+        [this, path = request.path](const QString& name) {
+            return m_impl->activeCopyJob != nullptr &&
+                   m_impl->activeCopyJob->hidesListingEntry(path, name);
+        });
+    scheduleDirectoryCountStep();
+}
 
-    quint64 count = 0;
-    while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
-        const QString name = QString::fromUtf8(attributes->name);
-        if (name != QStringLiteral(".") && name != QStringLiteral("..") &&
-            (m_impl->activeCopyJob == nullptr ||
-             !m_impl->activeCopyJob->hidesListingEntry(path, name))) {
-            ++count;
-        }
-        sftp_attributes_free(attributes);
+void SshSession::scheduleDirectoryCountStep()
+{
+    if (m_impl->activeDirectoryCount != nullptr && !m_impl->directoryCountStepScheduled) {
+        m_impl->directoryCountStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processDirectoryCountStep,
+                                  Qt::QueuedConnection);
     }
-    const int directoryError =
-        sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
-    sftp_closedir(directory);
-    if (directoryError != SSH_FX_OK) {
+}
+
+void SshSession::processDirectoryCountStep()
+{
+    m_impl->directoryCountStepScheduled = false;
+    if (m_impl->activeDirectoryCount == nullptr) {
+        startNextDirectoryCount();
+        return;
+    }
+    const rfm::ssh::RemoteDirectoryCountState state = m_impl->activeDirectoryCount->step();
+    if (state == rfm::ssh::RemoteDirectoryCountState::Pending) {
+        scheduleDirectoryCountStep();
+        return;
+    }
+    const quint64 requestId = m_impl->activeDirectoryCount->id();
+    const QString path = m_impl->activeDirectoryCount->path();
+    const quint64 count = m_impl->activeDirectoryCount->count();
+    const int directoryError = m_impl->activeDirectoryCount->error();
+    m_impl->activeDirectoryCount.reset();
+    if (state == rfm::ssh::RemoteDirectoryCountState::Completed) {
+        emit directoryCounted(requestId, path, count);
+    } else if (state == rfm::ssh::RemoteDirectoryCountState::Failed) {
         emit directoryCountFailed(requestId, path);
         if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
             ssh_is_connected(m_impl->session) == 0) {
             fail(tr("The SSH connection was lost while reading %1.").arg(path));
+            return;
         }
-        return;
     }
-    emit directoryCounted(requestId, path, count);
+    startNextDirectoryCount();
 }
 
 void SshSession::listStorageVolumes(quint64 requestId)
@@ -3432,7 +3725,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
         emit operationFinished(rejected);
         return;
     }
-    if (m_impl->pendingRemoteDelete.has_value()) {
+    if (m_impl->pendingRemoteDelete.has_value() || m_impl->activeRemoteRemoveJob != nullptr) {
         emit operationFinished(rfm::ssh::detail::rejectedRemoteRemoval(
             id, sources, tr("Another remote removal preflight is already active.")));
         return;
@@ -3443,8 +3736,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
     for (const rfm::core::RemoteSelection& source : std::as_const(sources)) {
         const QString path = rfm::core::RemotePath::normalize(source.path);
         if (rfm::core::RemotePath::isProtected(path)) {
-            emit operationFinished(removeRemoteEntriesWithSafetyProbe(m_impl->sftp, id, sources,
-                                                                      recursive, mountInfo, {}));
+            startRemoteRemoveJob(id, std::move(sources), recursive, std::move(mountInfo), {});
             return;
         }
         if (source.directory) {
@@ -3457,8 +3749,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
         m_impl->currentServerCapabilities.storage.windowsPowerShell ==
             rfm::core::CapabilitySupport::Supported;
     if (!windowsProbeAvailable) {
-        emit operationFinished(removeRemoteEntriesWithSafetyProbe(m_impl->sftp, id, sources,
-                                                                  recursive, mountInfo, {}));
+        startRemoteRemoveJob(id, std::move(sources), recursive, std::move(mountInfo), {});
         return;
     }
 
@@ -3466,8 +3757,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
     m_impl->remoteDeleteSafetyProcess = std::make_unique<SshCommandProcess>(m_impl->session);
     if (command.isEmpty() || !m_impl->remoteDeleteSafetyProcess->start(command)) {
         m_impl->remoteDeleteSafetyProcess.reset();
-        emit operationFinished(removeRemoteEntriesWithSafetyProbe(m_impl->sftp, id, sources,
-                                                                  recursive, mountInfo, {}));
+        startRemoteRemoveJob(id, std::move(sources), recursive, std::move(mountInfo), {});
         return;
     }
     m_impl->pendingRemoteDelete = {id, std::move(sources), mountInfo, recursive};
@@ -3501,6 +3791,7 @@ void SshSession::startTransfer(rfm::core::TransferRequest request)
         emit transferRejected(request.id, tr("Another transfer is already active."));
         return;
     }
+    m_impl->transferPublicationStates.remove(request.id);
     m_impl->transferBackend = m_impl->makeTransferBackend();
     if (m_impl->transferBackend == nullptr) {
         publishTransferProgress({request.id,
@@ -3532,7 +3823,7 @@ void SshSession::pauseTransfer(quint64 id)
 {
     if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id &&
         m_impl->activeTransferJob->requestPause()) {
-        publishTransferProgress(m_impl->activeTransferJob->progress());
+        publishTransferProgress(m_impl->activeTransferJob->progress(), true);
         return;
     }
     emit transferRejected(id, tr("Only the active transfer can be paused."));
@@ -3542,7 +3833,7 @@ void SshSession::resumeTransfer(quint64 id)
 {
     if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id &&
         m_impl->activeTransferJob->resume()) {
-        publishTransferProgress(m_impl->activeTransferJob->progress());
+        publishTransferProgress(m_impl->activeTransferJob->progress(), true);
         scheduleTransferStep();
         return;
     }
@@ -3553,7 +3844,7 @@ void SshSession::cancelTransfer(quint64 id)
 {
     if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id) {
         if (m_impl->activeTransferJob->requestCancel()) {
-            publishTransferProgress(m_impl->activeTransferJob->progress());
+            publishTransferProgress(m_impl->activeTransferJob->progress(), true);
             scheduleTransferStep();
         }
         return;
@@ -3564,6 +3855,11 @@ void SshSession::cancelTransfer(quint64 id)
 
 void SshSession::cancelRemoteOperation(quint64 id)
 {
+    if (m_impl->activeRemoteRemoveJob != nullptr &&
+        m_impl->activeRemoteRemoveJob->result().id == id) {
+        finishActiveRemoteRemove(tr("Remote removal cancelled."));
+        return;
+    }
     if (m_impl->activeCopyJob == nullptr || m_impl->activeCopyJob->progress().id != id ||
         !m_impl->activeCopyJob->requestCancel()) {
         return;
@@ -3576,6 +3872,8 @@ void SshSession::shutdownTransfers()
 {
     cancelStorageProbe();
     cancelStorageScan();
+    m_impl->activeDirectoryCount.reset();
+    m_impl->pendingDirectoryCounts.clear();
     m_impl->shuttingDown = true;
     if (m_impl->activeTransferJob != nullptr) {
         if (!m_impl->activeTransferJob->isFinished()) {
@@ -3589,6 +3887,8 @@ void SshSession::shutdownTransfers()
         }
         scheduleCopyStep();
     }
+    finishActiveRemoteRemove(
+        tr("Remote removal cancelled because the SSH session is shutting down."));
     completeShutdownIfReady();
 }
 
@@ -3666,7 +3966,7 @@ void SshSession::processCopyStep()
 void SshSession::completeShutdownIfReady()
 {
     if ((!m_impl->shuttingDown && !m_impl->disconnecting) || m_impl->activeTransferJob != nullptr ||
-        m_impl->activeCopyJob != nullptr) {
+        m_impl->activeCopyJob != nullptr || m_impl->activeRemoteRemoveJob != nullptr) {
         return;
     }
     const bool emitTransfersShutdown = m_impl->shuttingDown;
@@ -3686,6 +3986,8 @@ void SshSession::disconnectFromHost()
 {
     cancelStorageProbe();
     cancelStorageScan();
+    m_impl->activeDirectoryCount.reset();
+    m_impl->pendingDirectoryCounts.clear();
     m_impl->remoteCopyCapabilityProcess.reset();
     m_impl->remoteCopyCapabilityPollScheduler.cancel();
     m_impl->remoteCopyExecutionCapabilities = {};
@@ -3698,18 +4000,51 @@ void SshSession::disconnectFromHost()
         static_cast<void>(m_impl->activeCopyJob->requestCancel());
         scheduleCopyStep();
     }
+    finishActiveRemoteRemove(
+        tr("Remote removal cancelled because the SSH session is disconnecting."));
     completeShutdownIfReady();
 }
 
-void SshSession::publishTransferProgress(const rfm::core::TransferProgress& progress)
+void SshSession::publishTransferProgress(const rfm::core::TransferProgress& progress,
+                                         bool immediate)
 {
-    if (isTerminalTransferState(progress.state)) {
-        if (m_impl->terminalTransferIds.contains(progress.id)) {
-            return;
-        }
+    if (m_impl->terminalTransferIds.contains(progress.id)) {
+        return;
+    }
+    const bool terminal = isTerminalTransferState(progress.state);
+    if (terminal) {
         m_impl->terminalTransferIds.insert(progress.id);
     }
-    emit transferUpdated(progress);
+
+    const bool controlState = progress.state == rfm::core::TransferState::Paused ||
+                              progress.state == rfm::core::TransferState::Cancelling;
+    if (terminal) {
+        m_impl->transferPublicationStates.remove(progress.id);
+        emit transferUpdated(progress);
+        return;
+    }
+
+    if (immediate || controlState) {
+        auto& publication = m_impl->transferPublicationStates[progress.id];
+        publication.hasPublished = true;
+        publication.lastPublishedAt = m_impl->transferClock();
+        publication.pending.reset();
+        emit transferUpdated(progress);
+        return;
+    }
+
+    const qint64 now = m_impl->transferClock();
+    auto& publication = m_impl->transferPublicationStates[progress.id];
+    if (!publication.hasPublished ||
+        now - publication.lastPublishedAt >= transferUiPublicationIntervalMilliseconds) {
+        publication.hasPublished = true;
+        publication.lastPublishedAt = now;
+        publication.pending.reset();
+        emit transferUpdated(progress);
+        return;
+    }
+
+    publication.pending = progress;
 }
 
 void SshSession::terminalizeTransfer(rfm::core::TransferState state, const QString& error)
@@ -3726,7 +4061,7 @@ void SshSession::terminalizeTransfer(rfm::core::TransferState state, const QStri
     m_impl->activeTransferJob.reset();
     m_impl->transferBackend.reset();
     if (terminalProgress.has_value()) {
-        publishTransferProgress(*terminalProgress);
+        publishTransferProgress(*terminalProgress, true);
     }
 }
 
@@ -3746,6 +4081,7 @@ void SshSession::fail(const QString& message)
         m_impl->copyBackend.reset();
     }
     terminalizeTransfer(rfm::core::TransferState::Failed, message);
+    finishActiveRemoteRemove(message);
     finishPendingRemoteDeleteForDisconnect(message);
     m_impl->reset();
     emit failed(message);

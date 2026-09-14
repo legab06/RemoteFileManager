@@ -55,6 +55,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
+#include <QTimeZone>
 #include <QTimer>
 #include <QToolBar>
 #include <QToolButton>
@@ -509,6 +510,14 @@ class MainWindowTest final : public QObject
     void displaysQueuedOperationUntilWorkerStarts();
     void displaysLocalSuccessWarning();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
+    void manualRefreshRelistsWithoutRebuildingIdenticalRemoteDirectory();
+    void keepsRemoteDirectoryCountAcrossSameLocationRefresh();
+    void retriesFailedRemoteDirectoryCountOnlyOnManualRefresh();
+    void suspendsRemoteDirectoryCountsWhilePaneIsHidden();
+    void refreshesRemoteDirectoryWhenListingChanges_data();
+    void refreshesRemoteDirectoryWhenListingChanges();
+    void keepsLargeRemoteDirectoryRenderForIdenticalListing();
+    void replacesLargeRemoteDirectoryRenderForChangedListing();
     void refreshesAfterCompletedUpload();
     void localAndRemoteNavigationShowOpeningStatusMessage();
     void manualRefreshShowsStatusMessage();
@@ -3667,6 +3676,9 @@ void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
     QVERIFY(timer != nullptr);
     QVERIFY(timer->isActive());
     table->selectRow(0);
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    QSignalSpy historyChanges(pane, &rfm::app::FileBrowserPane::historyChanged);
 
     QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
     QSignalSpy requested(&window, &rfm::app::MainWindow::directoryRequested);
@@ -3680,9 +3692,335 @@ void MainWindowTest::refreshTimerIsConnectionAwareAndCoalescesListings()
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
         Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCOMPARE(historyChanges.size(), 0);
     QCOMPARE(table->selectionModel()->selectedRows(0).size(), 1);
     QCOMPARE(table->item(table->selectionModel()->selectedRows(0).constFirst().row(), 0)->text(),
              QStringLiteral("selected.txt"));
+}
+
+void MainWindowTest::manualRefreshRelistsWithoutRebuildingIdenticalRemoteDirectory()
+{
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("entry.txt"), 10, {}, false, false, false}};
+    rfm::app::MainWindow window;
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    auto* const refresh = window.findChild<QAction*>(QStringLiteral("refreshAction"));
+    QVERIFY(pane != nullptr);
+    QVERIFY(refresh != nullptr);
+    QSignalSpy historyChanges(pane, &rfm::app::FileBrowserPane::historyChanged);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
+    QSignalSpy requests(&window, &rfm::app::MainWindow::directoryRequested);
+
+    refresh->trigger();
+    QCOMPARE(requests.size(), 1);
+    const quint64 requestId = requests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCOMPARE(historyChanges.size(), 0);
+    QCOMPARE(pane->fileTable()->rowCount(), 1);
+    QCOMPARE(pane->fileTable()->item(0, 0)->text(), QStringLiteral("entry.txt"));
+}
+
+void MainWindowTest::keepsRemoteDirectoryCountAcrossSameLocationRefresh()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy countRequests(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested);
+    QSignalSpy countCancellations(&window, &rfm::app::MainWindow::remoteDirectoryCountCancelled);
+    QSignalSpy listingRequests(&window, &rfm::app::MainWindow::directoryRequested);
+    const QList<rfm::core::RemoteEntry> entries{{QStringLiteral("folder"), 0, {}, true, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QTRY_COMPARE(countRequests.size(), 1);
+    const quint64 countRequestId = countRequests.constFirst().constFirst().toULongLong();
+    QCOMPARE(countRequests.constFirst().at(1).toString(), QStringLiteral("/srv/folder"));
+
+    auto* const refreshTimer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(refreshTimer != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(refreshTimer, "timeout", Qt::DirectConnection));
+    QCOMPARE(listingRequests.size(), 1);
+    const quint64 listingRequestId = listingRequests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingRequestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCOMPARE(countCancellations.size(), 0);
+    QCOMPARE(countRequests.size(), 1);
+
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryCounted", Qt::DirectConnection, Q_ARG(quint64, countRequestId),
+        Q_ARG(QString, QStringLiteral("/srv/folder")), Q_ARG(quint64, 99)));
+    QCoreApplication::processEvents();
+    QCOMPARE(countRequests.size(), 1);
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    QCOMPARE(pane->fileTable()->item(0, 1)->text(), QStringLiteral("99 items"));
+}
+
+void MainWindowTest::suspendsRemoteDirectoryCountsWhilePaneIsHidden()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy countRequests(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested);
+    QSignalSpy countCancellations(&window, &rfm::app::MainWindow::remoteDirectoryCountCancelled);
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("first"), 0, {}, true, false, false},
+        {QStringLiteral("second"), 0, {}, true, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QTRY_COMPARE(countRequests.size(), 1);
+
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    QVERIFY(tabs != nullptr);
+    auto* const workspace = tabs->activeWorkspace();
+    QVERIFY(workspace != nullptr);
+    auto* const remotePane = workspace->activePane();
+    workspace->setSplit(true);
+    workspace->activateOtherPane();
+    workspace->setSplit(false);
+    QTRY_COMPARE(countCancellations.size(), 1);
+    QCoreApplication::processEvents();
+    QCOMPARE(countRequests.size(), 1);
+
+    workspace->setSplit(true);
+    QTRY_COMPARE(countRequests.size(), 2);
+    QCOMPARE(countRequests.at(1).at(1).toString(), QStringLiteral("/srv/first"));
+    QVERIFY(!remotePane->isHidden());
+
+    const quint64 resumedRequestId = countRequests.at(1).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryCounted", Qt::DirectConnection, Q_ARG(quint64, resumedRequestId),
+        Q_ARG(QString, QStringLiteral("/srv/first")), Q_ARG(quint64, 7)));
+    workspace->setSplit(false);
+    QCoreApplication::processEvents();
+    QCOMPARE(countRequests.size(), 2);
+}
+
+void MainWindowTest::retriesFailedRemoteDirectoryCountOnlyOnManualRefresh()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy countRequests(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested);
+    QSignalSpy listingRequests(&window, &rfm::app::MainWindow::directoryRequested);
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("failed"), 0, {}, true, false, false},
+        {QStringLiteral("known"), 0, {}, true, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QTRY_COMPARE(countRequests.size(), 1);
+    const quint64 failedRequestId = countRequests.at(0).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryCountFailed", Qt::DirectConnection,
+                                      Q_ARG(quint64, failedRequestId),
+                                      Q_ARG(QString, QStringLiteral("/srv/failed"))));
+    QTRY_COMPARE(countRequests.size(), 2);
+    const quint64 knownRequestId = countRequests.at(1).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryCounted", Qt::DirectConnection, Q_ARG(quint64, knownRequestId),
+        Q_ARG(QString, QStringLiteral("/srv/known")), Q_ARG(quint64, 4)));
+
+    auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(timer != nullptr);
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    QCOMPARE(listingRequests.size(), 1);
+    const quint64 automaticRequestId = listingRequests.at(0).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, automaticRequestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCOMPARE(countRequests.size(), 2);
+
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    QVERIFY(pane != nullptr);
+    pane->requestRefresh();
+    QCOMPARE(listingRequests.size(), 2);
+    const quint64 manualRequestId = listingRequests.at(1).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, manualRequestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QTRY_COMPARE(countRequests.size(), 3);
+    QCOMPARE(countRequests.at(2).at(1).toString(), QStringLiteral("/srv/failed"));
+    const quint64 retryRequestId = countRequests.at(2).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryCounted", Qt::DirectConnection, Q_ARG(quint64, retryRequestId),
+        Q_ARG(QString, QStringLiteral("/srv/failed")), Q_ARG(quint64, 8)));
+
+    pane->requestRefresh();
+    QCOMPARE(listingRequests.size(), 3);
+    const quint64 secondManualRequestId = listingRequests.at(2).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDirectoryListed", Qt::DirectConnection,
+                                      Q_ARG(quint64, secondManualRequestId),
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCoreApplication::processEvents();
+    QCOMPARE(countRequests.size(), 3);
+}
+
+void MainWindowTest::refreshesRemoteDirectoryWhenListingChanges_data()
+{
+    QTest::addColumn<QList<rfm::core::RemoteEntry>>("entries");
+    QTest::addColumn<int>("expectedRows");
+
+    const QDateTime modifiedAt = QDateTime::fromSecsSinceEpoch(1'700'000'000, QTimeZone::UTC);
+    const rfm::core::RemoteEntry original{
+        QStringLiteral("entry.txt"), 10, modifiedAt, false, false, false};
+    QTest::newRow("size") << QList<rfm::core::RemoteEntry>{{original.name, 11, original.modifiedAt,
+                                                            false, false, false}}
+                          << 1;
+    QTest::newRow("mtime") << QList<rfm::core::RemoteEntry>{{original.name, original.size,
+                                                             original.modifiedAt.addSecs(1), false,
+                                                             false, false}}
+                           << 1;
+    QTest::newRow("addition") << QList<rfm::core::RemoteEntry>{original,
+                                                               {QStringLiteral("added.txt"), 1,
+                                                                modifiedAt, false, false, false}}
+                              << 2;
+    QTest::newRow("removal") << QList<rfm::core::RemoteEntry>{} << 0;
+    QTest::newRow("rename") << QList<rfm::core::RemoteEntry>{{QStringLiteral("renamed.txt"), 10,
+                                                              modifiedAt, false, false, false}}
+                            << 1;
+    QTest::newRow("directory") << QList<rfm::core::RemoteEntry>{{original.name, original.size,
+                                                                 original.modifiedAt, true, false,
+                                                                 false}}
+                               << 1;
+    QTest::newRow("symlink") << QList<rfm::core::RemoteEntry>{{original.name, original.size,
+                                                               original.modifiedAt, false, true,
+                                                               false}}
+                             << 1;
+    QTest::newRow("hidden") << QList<rfm::core::RemoteEntry>{{original.name, original.size,
+                                                              original.modifiedAt, false, false,
+                                                              true}}
+                            << 1;
+}
+
+void MainWindowTest::refreshesRemoteDirectoryWhenListingChanges()
+{
+    QFETCH(QList<rfm::core::RemoteEntry>, entries);
+    QFETCH(int, expectedRows);
+
+    const QDateTime modifiedAt = QDateTime::fromSecsSinceEpoch(1'700'000'000, QTimeZone::UTC);
+    const QList<rfm::core::RemoteEntry> original{
+        {QStringLiteral("entry.txt"), 10, modifiedAt, false, false, false}};
+    rfm::app::MainWindow window;
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, original)));
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(pane != nullptr);
+    QVERIFY(timer != nullptr);
+    QSignalSpy historyChanges(pane, &rfm::app::FileBrowserPane::historyChanged);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
+    QSignalSpy requests(&window, &rfm::app::MainWindow::directoryRequested);
+
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    QCOMPARE(requests.size(), 1);
+    const quint64 requestId = requests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+
+    QCOMPARE(historyChanges.size(), 1);
+    QCOMPARE(pane->fileTable()->rowCount(), expectedRows);
+    if (!entries.isEmpty()) {
+        const auto displayed =
+            pane->fileTable()->item(0, 0)->data(Qt::UserRole + 2).value<rfm::core::RemoteEntry>();
+        const rfm::core::RemoteEntry& expected = entries.constFirst();
+        QCOMPARE(displayed.name, expected.name);
+        QCOMPARE(displayed.size, expected.size);
+        QCOMPARE(displayed.modifiedAt, expected.modifiedAt);
+        QCOMPARE(displayed.directory, expected.directory);
+        QCOMPARE(displayed.symbolicLink, expected.symbolicLink);
+        QCOMPARE(displayed.hidden, expected.hidden);
+    }
+}
+
+void MainWindowTest::keepsLargeRemoteDirectoryRenderForIdenticalListing()
+{
+    QList<rfm::core::RemoteEntry> entries;
+    entries.reserve(10001);
+    for (int index = 0; index < 10001; ++index) {
+        entries.push_back({QStringLiteral("entry-%1.txt").arg(index),
+                           static_cast<quint64>(index),
+                           {},
+                           false,
+                           false,
+                           false});
+    }
+    rfm::app::MainWindow window;
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(pane != nullptr);
+    QVERIFY(timer != nullptr);
+    QCOMPARE(pane->fileTable()->rowCount(), 64);
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
+    QSignalSpy requests(&window, &rfm::app::MainWindow::directoryRequested);
+
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    const quint64 requestId = requests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QCOMPARE(pane->fileTable()->rowCount(), 64);
+    QCOMPARE(pane->fileTable()->item(0, 0)->text(), QStringLiteral("entry-0.txt"));
+    QTRY_COMPARE(pane->fileTable()->rowCount(), entries.size());
+}
+
+void MainWindowTest::replacesLargeRemoteDirectoryRenderForChangedListing()
+{
+    QList<rfm::core::RemoteEntry> oldEntries;
+    QList<rfm::core::RemoteEntry> newEntries;
+    oldEntries.reserve(10001);
+    newEntries.reserve(10001);
+    for (int index = 0; index < 10001; ++index) {
+        oldEntries.push_back({QStringLiteral("old-%1.txt").arg(index),
+                              static_cast<quint64>(index),
+                              {},
+                              false,
+                              false,
+                              false});
+        newEntries.push_back({QStringLiteral("new-%1.txt").arg(index),
+                              static_cast<quint64>(index),
+                              {},
+                              false,
+                              false,
+                              false});
+    }
+    rfm::app::MainWindow window;
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, oldEntries)));
+    auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
+    auto* const timer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(pane != nullptr);
+    QVERIFY(timer != nullptr);
+    QCOMPARE(pane->fileTable()->rowCount(), 64);
+    QCOMPARE(pane->fileTable()->item(0, 0)->text(), QStringLiteral("old-0.txt"));
+    QObject::disconnect(&window, SIGNAL(directoryRequested(quint64, QString)), nullptr, nullptr);
+    QSignalSpy requests(&window, &rfm::app::MainWindow::directoryRequested);
+
+    QVERIFY(QMetaObject::invokeMethod(timer, "timeout", Qt::DirectConnection));
+    const quint64 requestId = requests.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, requestId),
+        Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, newEntries)));
+    QCOMPARE(pane->fileTable()->rowCount(), 64);
+    QCOMPARE(pane->fileTable()->item(0, 0)->text(), QStringLiteral("new-0.txt"));
+    QTRY_COMPARE(pane->fileTable()->rowCount(), newEntries.size());
+    QCOMPARE(pane->fileTable()->item(10000, 0)->text(), QStringLiteral("new-10000.txt"));
 }
 
 void MainWindowTest::refreshesAfterCompletedUpload()

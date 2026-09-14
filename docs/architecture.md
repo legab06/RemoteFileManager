@@ -308,6 +308,9 @@ chaque panneau et survit aux changements de dossier et aux actualisations de la 
 Le nombre affiché pour un dossier est chargé après son listing principal. Le panneau
 émet au plus une demande de comptage à la fois et rend la main à la boucle d'événements
 avant la suivante ; les workers Local et SSH ne parcourent que les enfants immédiats.
+Les grands listings sont également insérés par lots bornés dans le thread GUI : une nouvelle
+génération de listing invalide les lots déjà en attente afin que deux dossiers ne soient jamais
+mélangés dans le même panneau.
 Une génération associe chaque réponse à l'affichage qui l'a demandée. Une réponse
 obsolète est ignorée, un refus ou une erreur laisse un tiret, et un refresh recrée les
 placeholders puis relance naturellement les comptages. La clé de tri `Size` représente
@@ -407,6 +410,13 @@ erreur si le système ne peut pas l’ouvrir.
 - SFTP sert à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
 - Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
+- Le comptage affiché pour les dossiers distants parcourt SFTP par lots bornés dans le worker
+  SSH. Chaque lot rend la main à sa boucle d'évènements ; un refresh de la même localisation
+  conserve le count actif. Un auto-refresh identique ne relance aucun count ; un F5 identique
+  retente uniquement les counts absents ou échoués, sans recompter ceux déjà connus. Un changement
+  de localisation ou le retrait d'un panneau annule le request ID devenu obsolète et ferme son
+  handle SFTP ; un panneau masqué temporairement suspend ses counts en attente et les reprend à
+  sa réapparition.
 - La suppression récursive distante reste fail-closed face aux frontières de montage. Sous
   Linux, `/proc/self/mountinfo` correctement lu et validé est la preuve privilégiée : il
   détecte les mount points réels et les bind mounts ; une donnée absente ou malformée ne
@@ -416,8 +426,9 @@ erreur si le système ne peut pas l’ouvrir.
   PowerShell n'est lancé que lorsque les capabilities runtime l'ont déjà établi comme
   supporté ; son parcours est en lecture seule et un reparse point est une frontière. Une
   erreur, un timeout ou un résultat incomplet reste `Unknown`, donc refuse la suppression
-  récursive. Les fichiers réguliers ne traversent pas d'arbre et ne requièrent pas ce
-  preflight de frontières.
+  récursive. Le snapshot SFTP obtenu au preflight est transmis au job et réutilisé après le
+  probe Windows ; il n'est pas relu avant la suppression. Les fichiers réguliers ne traversent
+  pas d'arbre et ne requièrent pas ce preflight de frontières.
 - Les copies entre deux chemins du même serveur restent côté serveur pour éviter un aller-retour des données par le client.
 - `cp` n’expose pas nativement une progression exploitable. Une copie active affiche donc une
   progression indéterminée honnête ; aucun pourcentage n'est estimé ou fabriqué.

@@ -43,6 +43,7 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <limits>
@@ -70,6 +71,8 @@ constexpr int defaultSizeColumnWidth = 110;
 constexpr int defaultTypeColumnWidth = 180;
 constexpr int defaultModifiedColumnWidth = 170;
 constexpr int defaultMosaicIconSize = 48;
+constexpr qsizetype directoryRenderEntriesPerStep = 64;
+constexpr qsizetype synchronousDirectoryRenderEntryLimit = 512;
 constexpr std::array mosaicIconSizes{32, 40, 48, 56, 64, 72, 80, 96, 112, 128};
 
 QSet<FileBrowserPane*>& tableHeaderPanes()
@@ -738,7 +741,7 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
     dragList->startDragHandler = [this](Qt::DropActions supportedActions) {
         startInternalDrag(supportedActions);
     };
-    QTimer::singleShot(0, this, &FileBrowserPane::applyAdaptiveLayout);
+    QTimer::singleShot(0, this, [this] { applyAdaptiveLayout(); });
 }
 
 FileBrowserPane::~FileBrowserPane()
@@ -835,7 +838,7 @@ void FileBrowserPane::resetTableHeaderState()
     m_applyingLayoutState = false;
 }
 
-void FileBrowserPane::applyAdaptiveLayout()
+void FileBrowserPane::applyAdaptiveLayout(std::optional<int> contentWidth)
 {
     if (!m_adaptiveLayout || m_fileTable == nullptr) {
         return;
@@ -855,15 +858,20 @@ void FileBrowserPane::applyAdaptiveLayout()
             qMax(minimumWidths.at(column - 1), adaptiveBaseWidths.at(column - 1)));
     }
     int otherColumnsWidth = std::accumulate(otherWidths.cbegin(), otherWidths.cend(), 0);
-    int contentWidth = defaultNameColumnWidth;
-    const QFontMetrics metrics(m_fileTable->font());
-    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
-        if (const QTableWidgetItem* const item = m_fileTable->item(row, 0); item != nullptr) {
-            contentWidth = qMax(contentWidth, metrics.horizontalAdvance(item->text()) + 32);
+    int measuredContentWidth = defaultNameColumnWidth;
+    if (contentWidth.has_value()) {
+        measuredContentWidth = *contentWidth;
+    } else {
+        const QFontMetrics metrics(m_fileTable->font());
+        for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+            if (const QTableWidgetItem* const item = m_fileTable->item(row, 0); item != nullptr) {
+                measuredContentWidth =
+                    qMax(measuredContentWidth, metrics.horizontalAdvance(item->text()) + 32);
+            }
         }
     }
     constexpr int minimumNameWidth = 160;
-    const int contentLimit = qBound(520, contentWidth, 900);
+    const int contentLimit = qBound(520, measuredContentWidth, 900);
     const int maximumNameWidth = qMax(520, qMin(viewportWidth * 2 / 3, contentLimit));
     const int availableNameWidth = viewportWidth - otherColumnsWidth;
     // Name follows the remaining viewport continuously.  The only clamp is the
@@ -983,6 +991,9 @@ void FileBrowserPane::handleSortIndicatorChanged(int logicalIndex, Qt::SortOrder
 
 void FileBrowserPane::applySortState()
 {
+    if (m_directoryRender.has_value()) {
+        return;
+    }
     m_applyingSortState = true;
     QHeaderView* const header = m_fileTable->horizontalHeader();
     if (m_sortColumn < 0 || m_sortColumn >= m_fileTable->columnCount()) {
@@ -1002,6 +1013,9 @@ void FileBrowserPane::applySortState()
 
 void FileBrowserPane::restoreNaturalOrder()
 {
+    if (m_directoryRender.has_value()) {
+        return;
+    }
     if (m_fileTable->rowCount() < 2) {
         return;
     }
@@ -1028,6 +1042,7 @@ void FileBrowserPane::restoreNaturalOrder()
         };
         return naturalIndex(first) < naturalIndex(second);
     });
+    const bool sortingEnabled = m_fileTable->isSortingEnabled();
     m_fileTable->setSortingEnabled(false);
     for (int row = 0; row < rows.size(); ++row) {
         for (int column = 0; column < rows.at(row).size(); ++column) {
@@ -1043,7 +1058,7 @@ void FileBrowserPane::restoreNaturalOrder()
                                                       QItemSelectionModel::Rows);
         }
     }
-    m_fileTable->setSortingEnabled(true);
+    m_fileTable->setSortingEnabled(sortingEnabled);
     updateHiddenRows();
 }
 
@@ -1407,6 +1422,24 @@ void FileBrowserPane::showDirectory(const QString& path, const QString& displayP
     showDirectory({rfm::core::FileSource::Ssh, machineId, path}, displayPath, entries, navigation);
 }
 
+bool FileBrowserPane::hasDirectoryContents(const rfm::core::BrowserLocation& location,
+                                           const QList<rfm::core::RemoteEntry>& entries) const
+{
+    rfm::core::BrowserLocation normalizedLocation = location;
+    normalizedLocation.path = normalizedPath(location);
+    if (normalizedLocation != m_currentLocation || entries.size() != m_directoryEntries.size()) {
+        return false;
+    }
+    return std::equal(entries.cbegin(), entries.cend(), m_directoryEntries.cbegin(),
+                      [](const rfm::core::RemoteEntry& left, const rfm::core::RemoteEntry& right) {
+                          return left.name == right.name && left.size == right.size &&
+                                 left.modifiedAt == right.modifiedAt &&
+                                 left.directory == right.directory &&
+                                 left.symbolicLink == right.symbolicLink &&
+                                 left.hidden == right.hidden;
+                      });
+}
+
 void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
                                     const QString& displayPath,
                                     const QList<rfm::core::RemoteEntry>& entries,
@@ -1480,6 +1513,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         m_forwardHistory.clear();
     }
     m_currentLocation = normalizedLocation;
+    m_directoryEntries = entries;
     m_contextMenuRow = -1;
     const bool internalTransferEnabled = m_currentLocation.source != rfm::core::FileSource::None;
     m_fileTable->setDragEnabled(internalTransferEnabled);
@@ -1492,9 +1526,54 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     m_fileTable->setSortingEnabled(false);
     ++m_directoryCountGeneration;
     m_pendingDirectoryCountNames.clear();
-    m_fileTable->setRowCount(static_cast<int>(entries.size()));
-    for (qsizetype row = 0; row < entries.size(); ++row) {
-        const auto& entry = entries.at(row);
+    ++m_directoryRenderGeneration;
+    m_directoryRenderStepScheduled = false;
+    DirectoryRenderState render;
+    render.entries = entries;
+    render.preservedDirectoryCounts = std::move(preservedDirectoryCounts);
+    render.namesToSelect = QSet<QString>(namesToSelect.cbegin(), namesToSelect.cend());
+    render.previousScrollPosition = previousScrollPosition;
+    render.maximumNameTextWidth = defaultNameColumnWidth;
+    render.entriesPerStep = entries.size() <= synchronousDirectoryRenderEntryLimit
+                                ? entries.size()
+                                : directoryRenderEntriesPerStep;
+    render.sortingEnabled = sortingEnabled;
+    m_directoryRender = std::move(render);
+    m_fileTable->clearContents();
+    m_fileTable->setRowCount(0);
+    m_pathEdit->setText(displayPath);
+    processDirectoryRenderStep();
+}
+
+void FileBrowserPane::scheduleDirectoryRenderStep()
+{
+    if (m_directoryRender.has_value() && !m_directoryRenderStepScheduled) {
+        m_directoryRenderStepScheduled = true;
+        const quint64 generation = m_directoryRenderGeneration;
+        QMetaObject::invokeMethod(
+            this,
+            [this, generation] {
+                if (generation == m_directoryRenderGeneration) {
+                    processDirectoryRenderStep();
+                }
+            },
+            Qt::QueuedConnection);
+    }
+}
+
+void FileBrowserPane::processDirectoryRenderStep()
+{
+    m_directoryRenderStepScheduled = false;
+    if (!m_directoryRender.has_value()) {
+        return;
+    }
+    DirectoryRenderState& render = *m_directoryRender;
+    const qsizetype end = qMin(render.nextRow + render.entriesPerStep, render.entries.size());
+    m_fileTable->setRowCount(static_cast<int>(end));
+    const QFontMetrics metrics(m_fileTable->font());
+    for (; render.nextRow < end; ++render.nextRow) {
+        const qsizetype row = render.nextRow;
+        const rfm::core::RemoteEntry& entry = render.entries.at(row);
         const FilePresentation presentation = presentationForEntry(entry);
         auto* const nameItem = new SortableFileItem(entry.name, SortKind::Text, entry.name,
                                                     entry.name, entry.directory);
@@ -1504,17 +1583,20 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         nameItem->setData(Qt::UserRole + 2, QVariant::fromValue(entry));
         nameItem->setData(SortNaturalIndexRole, static_cast<int>(row));
         m_fileTable->setItem(static_cast<int>(row), 0, nameItem);
+        render.maximumNameTextWidth =
+            qMax(render.maximumNameTextWidth, metrics.horizontalAdvance(entry.name) + 32);
         const qint64 displaySize =
             entry.size > static_cast<quint64>(std::numeric_limits<qint64>::max())
                 ? std::numeric_limits<qint64>::max()
                 : static_cast<qint64>(entry.size);
         const bool countableDirectory = entry.directory && !entry.symbolicLink;
-        if (countableDirectory) {
+        if (countableDirectory && !m_pendingDirectoryCountNames.contains(entry.name) &&
+            entry.name != m_activeDirectoryCountName) {
             m_pendingDirectoryCountNames.push_back(entry.name);
         }
-        const auto preservedCount = preservedDirectoryCounts.constFind(entry.name);
+        const auto preservedCount = render.preservedDirectoryCounts.constFind(entry.name);
         const bool hasPreservedCount =
-            countableDirectory && preservedCount != preservedDirectoryCounts.cend();
+            countableDirectory && preservedCount != render.preservedDirectoryCounts.cend();
         auto* const sizeItem = new SortableFileItem(
             hasPreservedCount    ? directoryItemCountText(*preservedCount)
             : countableDirectory ? tr("…")
@@ -1531,31 +1613,42 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
                              new SortableFileItem(modifiedDisplayText(entry.modifiedAt),
                                                   SortKind::Modified, entry.modifiedAt, entry.name,
                                                   entry.directory));
-        m_fileTable->setRowHidden(static_cast<int>(row),
-                                  !m_showHiddenFiles &&
-                                      (entry.hidden || entry.name.startsWith(QChar{'.'})));
-        m_mosaicView->setRowHidden(static_cast<int>(row),
-                                   !m_showHiddenFiles &&
-                                       (entry.hidden || entry.name.startsWith(QChar{'.'})));
+        const bool hidden =
+            !m_showHiddenFiles && (entry.hidden || entry.name.startsWith(QChar{'.'}));
+        m_fileTable->setRowHidden(static_cast<int>(row), hidden);
+        m_mosaicView->setRowHidden(static_cast<int>(row), hidden);
+        applyCutAppearance(static_cast<int>(row));
     }
-    m_fileTable->setSortingEnabled(sortingEnabled);
-    if (sortingEnabled) {
+    if (render.nextRow < render.entries.size()) {
+        scheduleDirectoryRenderStep();
+        return;
+    }
+    finishDirectoryRender();
+}
+
+void FileBrowserPane::finishDirectoryRender()
+{
+    if (!m_directoryRender.has_value()) {
+        return;
+    }
+    DirectoryRenderState render = std::move(*m_directoryRender);
+    m_directoryRender.reset();
+    m_fileTable->setSortingEnabled(render.sortingEnabled);
+    if (render.sortingEnabled) {
         applySortState();
     }
-    applyAdaptiveLayout();
+    applyAdaptiveLayout(render.maximumNameTextWidth);
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
-        const QTableWidgetItem* const item = m_fileTable->item(row, 0);
-        if (item != nullptr && namesToSelect.contains(item->text())) {
+        if (const QTableWidgetItem* const item = m_fileTable->item(row, 0);
+            item != nullptr && render.namesToSelect.contains(item->text())) {
             m_fileTable->selectionModel()->select(m_fileTable->model()->index(row, 0),
                                                   QItemSelectionModel::Select |
                                                       QItemSelectionModel::Rows);
         }
     }
-    if (previousScrollPosition >= 0) {
-        m_fileTable->verticalScrollBar()->setValue(previousScrollPosition);
+    if (render.previousScrollPosition >= 0) {
+        m_fileTable->verticalScrollBar()->setValue(render.previousScrollPosition);
     }
-    m_pathEdit->setText(displayPath);
-    updateCutAppearance();
     emit historyChanged();
     QTimer::singleShot(0, this, &FileBrowserPane::requestNextDirectoryItemCount);
 }
@@ -1586,7 +1679,11 @@ void FileBrowserPane::updateHiddenRows()
 
 void FileBrowserPane::clear()
 {
+    ++m_directoryRenderGeneration;
+    m_directoryRender.reset();
+    m_directoryRenderStepScheduled = false;
     m_currentLocation = {};
+    m_directoryEntries.clear();
     m_contextMenuRow = -1;
     m_pendingSelectionNames.clear();
     ++m_directoryCountGeneration;
@@ -1684,9 +1781,58 @@ void FileBrowserPane::setDirectoryItemCount(const rfm::core::BrowserLocation& lo
     QTimer::singleShot(0, this, &FileBrowserPane::requestNextDirectoryItemCount);
 }
 
+void FileBrowserPane::cancelDirectoryItemCount(const rfm::core::BrowserLocation& location,
+                                               quint64 generation, const QString& name,
+                                               bool preservePending)
+{
+    if (location == m_activeDirectoryCountLocation &&
+        generation == m_activeDirectoryCountGeneration && name == m_activeDirectoryCountName) {
+        if (preservePending && !m_pendingDirectoryCountNames.contains(name)) {
+            m_pendingDirectoryCountNames.prepend(name);
+        }
+        m_activeDirectoryCountLocation = {};
+        m_activeDirectoryCountName.clear();
+        m_activeDirectoryCountGeneration = 0;
+    }
+}
+
+void FileBrowserPane::retryUnknownDirectoryItemCounts()
+{
+    if (!m_currentLocation.isValid()) {
+        return;
+    }
+    QSet<QString> scheduledNames(m_pendingDirectoryCountNames.cbegin(),
+                                 m_pendingDirectoryCountNames.cend());
+    if (!m_activeDirectoryCountName.isEmpty()) {
+        scheduledNames.insert(m_activeDirectoryCountName);
+    }
+    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+        const QTableWidgetItem* const nameItem = m_fileTable->item(row, 0);
+        const QTableWidgetItem* const sizeItem = m_fileTable->item(row, 1);
+        if (nameItem == nullptr || sizeItem == nullptr || !nameItem->data(Qt::UserRole).toBool() ||
+            nameItem->data(Qt::UserRole + 1).toBool() ||
+            sizeItem->data(SortValueKnownRole).toBool() ||
+            scheduledNames.contains(nameItem->text())) {
+            continue;
+        }
+        m_pendingDirectoryCountNames.push_back(nameItem->text());
+        scheduledNames.insert(nameItem->text());
+    }
+    requestNextDirectoryItemCount();
+}
+
+void FileBrowserPane::resumeDirectoryItemCounts()
+{
+    m_directoryItemCountsSuspended = false;
+    requestNextDirectoryItemCount();
+}
+
+void FileBrowserPane::suspendDirectoryItemCounts() { m_directoryItemCountsSuspended = true; }
+
 void FileBrowserPane::requestNextDirectoryItemCount()
 {
-    if (!m_activeDirectoryCountName.isEmpty() || m_pendingDirectoryCountNames.isEmpty() ||
+    if (m_directoryItemCountsSuspended || m_directoryRender.has_value() ||
+        !m_activeDirectoryCountName.isEmpty() || m_pendingDirectoryCountNames.isEmpty() ||
         !m_currentLocation.isValid()) {
         return;
     }
@@ -2016,23 +2162,27 @@ void FileBrowserPane::updateDropAppearance(bool active, bool valid, QAbstractIte
 
 void FileBrowserPane::updateCutAppearance()
 {
-    const QColor cutColor = palette().color(QPalette::Disabled, QPalette::Text);
     for (int row = 0; row < m_fileTable->rowCount(); ++row) {
-        const QTableWidgetItem* const name = m_fileTable->item(row, 0);
-        const QString path =
-            name == nullptr
-                ? QString{}
-                : (m_currentLocation.source == rfm::core::FileSource::Local
-                       ? QDir(m_currentLocation.path).filePath(name->text())
-                       : rfm::core::RemotePath::join(m_currentLocation.path, name->text()));
-        const bool cut = m_cutPaths.contains(rfm::core::RemotePath::normalize(path));
-        for (int column = 0; column < m_fileTable->columnCount(); ++column) {
-            if (QTableWidgetItem* const item = m_fileTable->item(row, column)) {
-                item->setForeground(cut ? QBrush(cutColor) : QBrush{});
-                QFont font = item->font();
-                font.setItalic(cut);
-                item->setFont(font);
-            }
+        applyCutAppearance(row);
+    }
+}
+
+void FileBrowserPane::applyCutAppearance(int row)
+{
+    const QTableWidgetItem* const name = m_fileTable->item(row, 0);
+    const QString path =
+        name == nullptr ? QString{}
+                        : (m_currentLocation.source == rfm::core::FileSource::Local
+                               ? QDir(m_currentLocation.path).filePath(name->text())
+                               : rfm::core::RemotePath::join(m_currentLocation.path, name->text()));
+    const bool cut = m_cutPaths.contains(rfm::core::RemotePath::normalize(path));
+    const QColor cutColor = palette().color(QPalette::Disabled, QPalette::Text);
+    for (int column = 0; column < m_fileTable->columnCount(); ++column) {
+        if (QTableWidgetItem* const item = m_fileTable->item(row, column)) {
+            item->setForeground(cut ? QBrush(cutColor) : QBrush{});
+            QFont font = item->font();
+            font.setItalic(cut);
+            item->setFont(font);
         }
     }
 }
