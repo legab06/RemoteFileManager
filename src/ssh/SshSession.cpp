@@ -39,6 +39,7 @@
 #include <QTimer>
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
 #include <fcntl.h>
 #include <limits>
@@ -2063,6 +2064,14 @@ bool isTerminalTransferState(rfm::core::TransferState state)
            state == rfm::core::TransferState::Failed;
 }
 
+qint64 monotonicMilliseconds()
+{
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+constexpr qint64 transferUiPublicationIntervalMilliseconds = 50;
+
 QString remoteCopyMethodDescription(rfm::core::RemoteCopyMethod method,
                                     rfm::core::NativeServerCopyPrimitive primitive)
 {
@@ -2087,11 +2096,19 @@ namespace rfm::ssh
 class SshSession::Impl final
 {
   public:
-    Impl() = default;
+    struct TransferPublicationState {
+        qint64 lastPublishedAt{0};
+        bool hasPublished{false};
+        std::optional<rfm::core::TransferProgress> pending;
+    };
 
-    Impl(TransferBackendFactory backendFactory, std::function<bool()> connectionAvailable)
+    Impl() : transferClock(monotonicMilliseconds) {}
+
+    Impl(TransferBackendFactory backendFactory, std::function<bool()> connectionAvailable,
+         std::function<qint64()> clock)
         : transferBackendFactory(std::move(backendFactory)),
-          transferConnectionAvailable(std::move(connectionAvailable))
+          transferConnectionAvailable(std::move(connectionAvailable)),
+          transferClock(clock ? std::move(clock) : std::function<qint64()>(monotonicMilliseconds))
     {}
 
     ~Impl() { reset(); }
@@ -2159,6 +2176,7 @@ class SshSession::Impl final
         activeTransferJob.reset();
         transferBackend.reset();
         terminalTransferIds.clear();
+        transferPublicationStates.clear();
         transferStepScheduled = false;
         copyStepScheduled = false;
         shuttingDown = false;
@@ -2219,8 +2237,10 @@ class SshSession::Impl final
     quint64 storageProbeRequestId{0};
     quint64 pendingStorageRequestId{0};
     QSet<quint64> terminalTransferIds;
+    QHash<quint64, TransferPublicationState> transferPublicationStates;
     TransferBackendFactory transferBackendFactory;
     std::function<bool()> transferConnectionAvailable;
+    std::function<qint64()> transferClock;
     bool transferStepScheduled{false};
     bool copyStepScheduled{false};
     bool remoteRemoveStepScheduled{false};
@@ -2241,9 +2261,11 @@ SshSession::SshSession(QObject* parent) : QObject(parent), m_impl(std::make_uniq
 }
 
 SshSession::SshSession(TransferBackendFactory transferBackendFactory,
-                       std::function<bool()> transferConnectionAvailable, QObject* parent)
+                       std::function<bool()> transferConnectionAvailable, QObject* parent,
+                       std::function<qint64()> transferClock)
     : QObject(parent), m_impl(std::make_unique<Impl>(std::move(transferBackendFactory),
-                                                     std::move(transferConnectionAvailable)))
+                                                     std::move(transferConnectionAvailable),
+                                                     std::move(transferClock)))
 {
     qRegisterMetaType<rfm::core::ServerCapabilities>();
     qRegisterMetaType<rfm::core::RemoteCopyExecutionCapabilities>();
@@ -3757,6 +3779,7 @@ void SshSession::startTransfer(rfm::core::TransferRequest request)
         emit transferRejected(request.id, tr("Another transfer is already active."));
         return;
     }
+    m_impl->transferPublicationStates.remove(request.id);
     m_impl->transferBackend = m_impl->makeTransferBackend();
     if (m_impl->transferBackend == nullptr) {
         publishTransferProgress({request.id,
@@ -3788,7 +3811,7 @@ void SshSession::pauseTransfer(quint64 id)
 {
     if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id &&
         m_impl->activeTransferJob->requestPause()) {
-        publishTransferProgress(m_impl->activeTransferJob->progress());
+        publishTransferProgress(m_impl->activeTransferJob->progress(), true);
         return;
     }
     emit transferRejected(id, tr("Only the active transfer can be paused."));
@@ -3798,7 +3821,7 @@ void SshSession::resumeTransfer(quint64 id)
 {
     if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id &&
         m_impl->activeTransferJob->resume()) {
-        publishTransferProgress(m_impl->activeTransferJob->progress());
+        publishTransferProgress(m_impl->activeTransferJob->progress(), true);
         scheduleTransferStep();
         return;
     }
@@ -3809,7 +3832,7 @@ void SshSession::cancelTransfer(quint64 id)
 {
     if (m_impl->activeTransferJob != nullptr && m_impl->activeTransferJob->progress().id == id) {
         if (m_impl->activeTransferJob->requestCancel()) {
-            publishTransferProgress(m_impl->activeTransferJob->progress());
+            publishTransferProgress(m_impl->activeTransferJob->progress(), true);
             scheduleTransferStep();
         }
         return;
@@ -3970,15 +3993,46 @@ void SshSession::disconnectFromHost()
     completeShutdownIfReady();
 }
 
-void SshSession::publishTransferProgress(const rfm::core::TransferProgress& progress)
+void SshSession::publishTransferProgress(const rfm::core::TransferProgress& progress,
+                                         bool immediate)
 {
-    if (isTerminalTransferState(progress.state)) {
-        if (m_impl->terminalTransferIds.contains(progress.id)) {
-            return;
-        }
+    if (m_impl->terminalTransferIds.contains(progress.id)) {
+        return;
+    }
+    const bool terminal = isTerminalTransferState(progress.state);
+    if (terminal) {
         m_impl->terminalTransferIds.insert(progress.id);
     }
-    emit transferUpdated(progress);
+
+    const bool controlState = progress.state == rfm::core::TransferState::Paused ||
+                              progress.state == rfm::core::TransferState::Cancelling;
+    if (terminal) {
+        m_impl->transferPublicationStates.remove(progress.id);
+        emit transferUpdated(progress);
+        return;
+    }
+
+    if (immediate || controlState) {
+        auto& publication = m_impl->transferPublicationStates[progress.id];
+        publication.hasPublished = true;
+        publication.lastPublishedAt = m_impl->transferClock();
+        publication.pending.reset();
+        emit transferUpdated(progress);
+        return;
+    }
+
+    const qint64 now = m_impl->transferClock();
+    auto& publication = m_impl->transferPublicationStates[progress.id];
+    if (!publication.hasPublished ||
+        now - publication.lastPublishedAt >= transferUiPublicationIntervalMilliseconds) {
+        publication.hasPublished = true;
+        publication.lastPublishedAt = now;
+        publication.pending.reset();
+        emit transferUpdated(progress);
+        return;
+    }
+
+    publication.pending = progress;
 }
 
 void SshSession::terminalizeTransfer(rfm::core::TransferState state, const QString& error)
@@ -3995,7 +4049,7 @@ void SshSession::terminalizeTransfer(rfm::core::TransferState state, const QStri
     m_impl->activeTransferJob.reset();
     m_impl->transferBackend.reset();
     if (terminalProgress.has_value()) {
-        publishTransferProgress(*terminalProgress);
+        publishTransferProgress(*terminalProgress, true);
     }
 }
 

@@ -260,6 +260,24 @@ rfm::core::TransferRequest download(quint64 id, QTemporaryDir& directory)
             directory.filePath(QStringLiteral("download-%1").arg(id))};
 }
 
+rfm::core::TransferProgress progress(quint64 id, rfm::core::TransferState state,
+                                     quint64 transferredBytes, quint64 totalBytes)
+{
+    return {id,
+            state,
+            QStringLiteral("/source"),
+            QStringLiteral("/destination"),
+            transferredBytes,
+            totalBytes,
+            0,
+            {},
+            0,
+            0,
+            {},
+            rfm::core::TransferDirection::Upload,
+            false};
+}
+
 } // namespace
 
 class SshSessionTransferTest final : public QObject
@@ -276,6 +294,10 @@ class SshSessionTransferTest final : public QObject
     void pendingRemoteDeleteDisconnectFinishesExactlyOnce();
     void remoteRemoveRunsAcrossQueuedWorkerSteps();
     void disconnectCancelsActiveRemoteRemoveAndClosesDirectories();
+    void throttlesProgressAndPublishesLatestValue();
+    void publishesControlAndTerminalStatesImmediately();
+    void controlRequestsBypassThrottle();
+    void keepsThrottleStateIndependentAndClearsOnDisconnect();
 
   private:
     [[nodiscard]] std::unique_ptr<SshSession> makeSession();
@@ -286,6 +308,7 @@ class SshSessionTransferTest final : public QObject
 
     QList<BackendMode> m_modes;
     int m_createdBackends{0};
+    qint64 m_clock{0};
 };
 
 void SshSessionTransferTest::init()
@@ -293,6 +316,7 @@ void SshSessionTransferTest::init()
     qRegisterMetaType<rfm::core::TransferProgress>();
     m_modes.clear();
     m_createdBackends = 0;
+    m_clock = 0;
 }
 
 std::unique_ptr<SshSession> SshSessionTransferTest::makeSession()
@@ -305,7 +329,7 @@ std::unique_ptr<SshSession> SshSessionTransferTest::makeSession()
             ++m_createdBackends;
             return std::make_unique<LifecycleBackend>(mode);
         },
-        [] { return true; }, nullptr));
+        [] { return true; }, nullptr, [this] { return m_clock; }));
 }
 
 std::unique_ptr<rfm::core::TransferCoordinator>
@@ -464,7 +488,6 @@ void SshSessionTransferTest::normalFailureStartsNextTransfer()
     QCOMPARE(terminalState(updates, 31), rfm::core::TransferState::Failed);
     QCOMPARE(terminalState(updates, 32), rfm::core::TransferState::Completed);
     QVERIFY(hasState(updates, 32, rfm::core::TransferState::Preparing));
-    QVERIFY(hasState(updates, 32, rfm::core::TransferState::Transferring));
     QVERIFY(eventIndex(updates, 31, rfm::core::TransferState::Failed) <
             eventIndex(updates, 32, rfm::core::TransferState::Preparing));
     QCOMPARE(failures.size(), 0);
@@ -558,6 +581,107 @@ void SshSessionTransferTest::disconnectCancelsActiveRemoteRemoveAndClosesDirecto
     QCOMPARE(result.id, quint64{52});
     QVERIFY(!result.allSucceeded());
     QCOMPARE(stats->closedDirectories, 1);
+}
+
+void SshSessionTransferTest::throttlesProgressAndPublishesLatestValue()
+{
+    auto session = makeSession();
+    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+
+    session->publishTransferProgress(progress(61, rfm::core::TransferState::Preparing, 0, 1000));
+    for (quint64 transferred = 1; transferred <= 1000; ++transferred) {
+        ++m_clock;
+        session->publishTransferProgress(
+            progress(61, rfm::core::TransferState::Transferring, transferred, 1000));
+    }
+
+    const qsizetype intermediatePublications = updates.size();
+    QVERIFY(intermediatePublications > 2);
+    QVERIFY(intermediatePublications < 30);
+
+    session->publishTransferProgress(progress(61, rfm::core::TransferState::Completed, 1000, 1000));
+    const QList<rfm::core::TransferProgress> events = progressEvents(updates);
+    QCOMPARE(events.constLast().state, rfm::core::TransferState::Completed);
+    QCOMPARE(events.constLast().transferredBytes, quint64{1000});
+    QCOMPARE(events.constLast().totalBytes, quint64{1000});
+    const qsizetype eventCount = updates.size();
+    QCoreApplication::processEvents();
+    QCOMPARE(updates.size(), eventCount);
+}
+
+void SshSessionTransferTest::publishesControlAndTerminalStatesImmediately()
+{
+    auto session = makeSession();
+    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Preparing, 0, 100));
+    ++m_clock;
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Transferring, 1, 100));
+    QCOMPARE(updates.size(), 1);
+
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Paused, 1, 100), true);
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Transferring, 2, 100),
+                                     true);
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Cancelling, 2, 100),
+                                     true);
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Cancelled, 2, 100));
+
+    const QList<rfm::core::TransferProgress> events = progressEvents(updates);
+    QCOMPARE(events.size(), 5);
+    QCOMPARE(events.at(1).state, rfm::core::TransferState::Paused);
+    QCOMPARE(events.at(2).state, rfm::core::TransferState::Transferring);
+    QCOMPARE(events.at(3).state, rfm::core::TransferState::Cancelling);
+    QCOMPARE(events.at(4).state, rfm::core::TransferState::Cancelled);
+    session->publishTransferProgress(progress(62, rfm::core::TransferState::Transferring, 3, 100));
+    QCOMPARE(updates.size(), 5);
+}
+
+void SshSessionTransferTest::controlRequestsBypassThrottle()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const QString source = makeEmptySource(directory, QStringLiteral("control-source"));
+    QVERIFY(!source.isEmpty());
+    auto session = makeSession();
+    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+
+    session->startTransfer(upload(65, source));
+    session->processTransferStep();
+    session->processTransferStep();
+    session->processTransferStep();
+    updates.clear();
+
+    session->pauseTransfer(65);
+    session->resumeTransfer(65);
+    session->cancelTransfer(65);
+
+    const QList<rfm::core::TransferProgress> events = progressEvents(updates);
+    QCOMPARE(events.size(), 3);
+    QCOMPARE(events.at(0).state, rfm::core::TransferState::Paused);
+    QCOMPARE(events.at(1).state, rfm::core::TransferState::Transferring);
+    QCOMPARE(events.at(2).state, rfm::core::TransferState::Cancelling);
+}
+
+void SshSessionTransferTest::keepsThrottleStateIndependentAndClearsOnDisconnect()
+{
+    auto session = makeSession();
+    QSignalSpy updates(session.get(), &SshSession::transferUpdated);
+    session->publishTransferProgress(progress(63, rfm::core::TransferState::Preparing, 0, 10));
+    session->publishTransferProgress(progress(64, rfm::core::TransferState::Preparing, 0, 10));
+    QCOMPARE(updates.size(), 2);
+
+    ++m_clock;
+    session->publishTransferProgress(progress(63, rfm::core::TransferState::Transferring, 1, 10));
+    m_clock += 49;
+    session->publishTransferProgress(progress(64, rfm::core::TransferState::Transferring, 1, 10));
+    QCOMPARE(updates.size(), 3);
+    QCOMPARE(progressEvents(updates).constLast().id, quint64{64});
+
+    session->disconnectFromHost();
+    session->publishTransferProgress(progress(63, rfm::core::TransferState::Transferring, 2, 10));
+    QCOMPARE(updates.size(), 4);
+    QCOMPARE(progressEvents(updates).constLast().id, quint64{63});
+    QCOMPARE(progressEvents(updates).constLast().transferredBytes, quint64{2});
 }
 
 } // namespace rfm::ssh

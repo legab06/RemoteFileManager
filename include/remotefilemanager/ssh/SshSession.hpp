@@ -116,7 +116,8 @@ class SshSession final : public QObject
     friend class SshSessionTransferTest;
 
     SshSession(TransferBackendFactory transferBackendFactory,
-               std::function<bool()> transferConnectionAvailable, QObject* parent);
+               std::function<bool()> transferConnectionAvailable, QObject* parent,
+               std::function<qint64()> transferClock = {});
 
     void authenticateAndOpen();
     void authenticateWithPassword(rfm::core::SecurePassword password);
@@ -160,7 +161,8 @@ class SshSession final : public QObject
     void startRemoteStorageScanner(quint64 requestId);
     void startPendingRemoteWork();
     void completeShutdownIfReady();
-    void publishTransferProgress(const rfm::core::TransferProgress& progress);
+    void publishTransferProgress(const rfm::core::TransferProgress& progress,
+                                 bool immediate = false);
     void terminalizeTransfer(rfm::core::TransferState state, const QString& error);
     void fail(const QString& message);
 };
