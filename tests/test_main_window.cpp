@@ -505,6 +505,7 @@ class MainWindowTest final : public QObject
     void displaysTerminalTransferStatesAndErrors();
     void formatsTransferSizesAndSpeeds();
     void displaysSpeedOnlyForRunningTransfers();
+    void displaysRemoteCopyByteProgressAndSpeed();
     void displaysQueuedOperationUntilWorkerStarts();
     void displaysLocalSuccessWarning();
     void refreshTimerIsConnectionAwareAndCoalescesListings();
@@ -3520,6 +3521,94 @@ void MainWindowTest::displaysSpeedOnlyForRunningTransfers()
     updateAndVerifySpeed(503, rfm::core::TransferState::Cancelled, QStringLiteral("—"));
     updateAndVerifySpeed(504, rfm::core::TransferState::Failed, QStringLiteral("—"));
     updateAndVerifySpeed(505, rfm::core::TransferState::Completed, QStringLiteral("—"));
+}
+
+void MainWindowTest::displaysRemoteCopyByteProgressAndSpeed()
+{
+    rfm::app::OperationPanel panel;
+    auto* const table = panel.findChild<QTableWidget*>(QStringLiteral("operationTable"));
+    QVERIFY(table != nullptr);
+
+    rfm::core::OperationProgress determined;
+    determined.id = 506;
+    determined.kind = rfm::core::OperationKind::RemoteCopy;
+    determined.state = rfm::core::OperationState::Running;
+    determined.transferredBytes = 742ULL * 1024ULL * 1024ULL;
+    determined.totalBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+    determined.bytesPerSecond = 84ULL * 1024ULL * 1024ULL;
+    determined.completedItems = 1;
+    determined.totalItems = 3;
+    determined.byteProgressAvailable = true;
+    panel.updateOperation(determined);
+
+    int row = rowForId(table, determined.id);
+    auto* progressBar = qobject_cast<QProgressBar*>(table->cellWidget(row, 4));
+    QVERIFY(progressBar != nullptr);
+    QCOMPARE(progressBar->minimum(), 0);
+    QCOMPARE(progressBar->maximum(), 1000);
+    QCOMPARE(progressBar->value(), 362);
+    QCOMPARE(progressBar->format(), QStringLiteral("742 MiB / 2.0 GiB · 1 / 3 files"));
+    QCOMPARE(table->item(row, 5)->text(), QStringLiteral("84 MiB/s"));
+
+    auto indeterminate = determined;
+    indeterminate.id = 507;
+    indeterminate.byteProgressAvailable = false;
+    panel.updateOperation(indeterminate);
+    row = rowForId(table, indeterminate.id);
+    progressBar = qobject_cast<QProgressBar*>(table->cellWidget(row, 4));
+    QVERIFY(progressBar != nullptr);
+    QCOMPARE(progressBar->minimum(), 0);
+    QCOMPARE(progressBar->maximum(), 0);
+    QCOMPARE(progressBar->format(), QStringLiteral("Working"));
+    QCOMPARE(table->item(row, 5)->text(), QStringLiteral("84 MiB/s"));
+
+    auto zeroByte = determined;
+    zeroByte.id = 512;
+    zeroByte.transferredBytes = 0;
+    zeroByte.totalBytes = 0;
+    zeroByte.bytesPerSecond = 0;
+    panel.updateOperation(zeroByte);
+    row = rowForId(table, zeroByte.id);
+    progressBar = qobject_cast<QProgressBar*>(table->cellWidget(row, 4));
+    QVERIFY(progressBar != nullptr);
+    QCOMPARE(progressBar->minimum(), 0);
+    QCOMPARE(progressBar->maximum(), 1000);
+    QCOMPARE(progressBar->value(), 0);
+    QCOMPARE(progressBar->format(), QStringLiteral("0 B / 0 B · 1 / 3 files"));
+    QCOMPARE(table->item(row, 5)->text(), QStringLiteral("—"));
+
+    auto finalizing = determined;
+    finalizing.id = 508;
+    finalizing.state = rfm::core::OperationState::Finalizing;
+    finalizing.transferredBytes = finalizing.totalBytes;
+    panel.updateOperation(finalizing);
+    row = rowForId(table, finalizing.id);
+    progressBar = qobject_cast<QProgressBar*>(table->cellWidget(row, 4));
+    QVERIFY(progressBar != nullptr);
+    QCOMPARE(progressBar->value(), 999);
+    QCOMPARE(table->item(row, 5)->text(), QStringLiteral("—"));
+
+    auto completed = determined;
+    completed.id = 509;
+    completed.state = rfm::core::OperationState::Completed;
+    completed.transferredBytes = completed.totalBytes;
+    completed.completedItems = completed.totalItems;
+    panel.updateOperation(completed);
+    row = rowForId(table, completed.id);
+    QVERIFY(table->cellWidget(row, 4) == nullptr);
+    QCOMPARE(table->item(row, 4)->text(), QStringLiteral("3 / 3 completed"));
+    QCOMPARE(table->item(row, 5)->text(), QStringLiteral("—"));
+
+    auto failed = determined;
+    failed.id = 510;
+    failed.state = rfm::core::OperationState::Failed;
+    panel.updateOperation(failed);
+    auto cancelled = determined;
+    cancelled.id = 511;
+    cancelled.state = rfm::core::OperationState::Cancelled;
+    panel.updateOperation(cancelled);
+    QCOMPARE(table->item(rowForId(table, failed.id), 3)->text(), QStringLiteral("Failed"));
+    QCOMPARE(table->item(rowForId(table, cancelled.id), 3)->text(), QStringLiteral("Cancelled"));
 }
 
 void MainWindowTest::displaysQueuedOperationUntilWorkerStarts()

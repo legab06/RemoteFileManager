@@ -17,6 +17,13 @@ using RemoteDeleteMountProbe = std::function<rfm::core::RemoteMountPointState(co
 preflightRemoteRemovalTree(rfm::core::RemoteFileBackend& backend, const QString& path,
                            bool directory, const RemoteDeleteMountProbe& mountProbe)
 {
+    if (path.isEmpty() || rfm::core::RemotePath::isProtected(path)) {
+        return {rfm::core::RemoteBackendError::InvalidPath,
+                QCoreApplication::translate("RemoteDelete", "Invalid or protected remote path.")};
+    }
+    if (!directory) {
+        return {};
+    }
     const rfm::core::RemoteMountPointState mountState =
         mountProbe ? mountProbe(path) : rfm::core::RemoteMountPointState::Unknown;
     if (mountState == rfm::core::RemoteMountPointState::MountPoint) {
@@ -31,10 +38,6 @@ preflightRemoteRemovalTree(rfm::core::RemoteFileBackend& backend, const QString&
             QCoreApplication::translate(
                 "RemoteDelete", "Unable to verify remote mount boundaries. Nothing was deleted.")};
     }
-    if (!directory) {
-        return {};
-    }
-
     const rfm::core::RemoteDirectoryResult listing = backend.list(path);
     if (!listing.result.succeeded()) {
         return listing.result;

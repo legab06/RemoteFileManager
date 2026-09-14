@@ -322,13 +322,13 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
     m_table->item(row, StateColumn)->setText(stateText(progress.state));
     const bool isRunning = progress.state == rfm::core::OperationState::Running;
     m_table->item(row, SpeedColumn)
-        ->setText(isRunning && progress.byteProgressAvailable ? formatSpeed(progress.bytesPerSecond)
-                                                              : QStringLiteral("—"));
+        ->setText(isRunning ? formatSpeed(progress.bytesPerSecond) : QStringLiteral("—"));
     QTableWidgetItem* const errorItem = m_table->item(row, ErrorColumn);
     errorItem->setText(progress.error);
     errorItem->setToolTip(progress.error);
 
-    if (progress.byteProgressAvailable) {
+    const bool terminal = rfm::core::isTerminal(progress.state);
+    if (progress.byteProgressAvailable && !terminal) {
         auto* progressBar = qobject_cast<QProgressBar*>(m_table->cellWidget(row, ProgressColumn));
         if (progressBar == nullptr) {
             progressBar = new QProgressBar(m_table);
@@ -341,32 +341,22 @@ void OperationPanel::updateRow(int row, const rfm::core::OperationProgress& prog
                 progressBar->style()->pixelMetric(QStyle::PM_ProgressBarChunkWidth) * 2);
             m_table->setCellWidget(row, ProgressColumn, progressBar);
         }
-        if (progress.totalBytes == 0 && !rfm::core::isTerminal(progress.state)) {
-            progressBar->setRange(0, 0);
-            progressBar->setFormat(progress.totalItems == 0 ? tr("Calculating size")
-                                                            : tr("Calculating size · %1 / %2 files")
-                                                                  .arg(progress.completedItems)
-                                                                  .arg(progress.totalItems));
-        } else {
-            progressBar->setRange(0, 1000);
-            const double ratio =
-                progress.totalBytes == 0
-                    ? (progress.state == rfm::core::OperationState::Completed ? 1.0 : 0.0)
-                    : std::clamp(static_cast<double>(progress.transferredBytes) /
-                                     static_cast<double>(progress.totalBytes),
-                                 0.0, 1.0);
-            progressBar->setValue(static_cast<int>(std::round(ratio * 1000.0)));
-            QString progressText = progress.totalBytes == 0
-                                       ? formatBytes(progress.transferredBytes)
-                                       : tr("%1 / %2").arg(formatBytes(progress.transferredBytes),
-                                                           formatBytes(progress.totalBytes));
-            if (progress.totalItems > 0) {
-                progressText +=
-                    tr(" · %1 / %2 files").arg(progress.completedItems).arg(progress.totalItems);
-            }
-            progressBar->setFormat(progressText);
+        progressBar->setRange(0, 1000);
+        const double ratio = progress.totalBytes == 0
+                                 ? 0.0
+                                 : std::clamp(static_cast<double>(progress.transferredBytes) /
+                                                  static_cast<double>(progress.totalBytes),
+                                              0.0, 1.0);
+        const double displayedRatio = std::min(ratio, 0.999);
+        progressBar->setValue(static_cast<int>(std::round(displayedRatio * 1000.0)));
+        QString progressText = tr("%1 / %2").arg(formatBytes(progress.transferredBytes),
+                                                 formatBytes(progress.totalBytes));
+        if (progress.totalItems > 0) {
+            progressText +=
+                tr(" · %1 / %2 files").arg(progress.completedItems).arg(progress.totalItems);
         }
-    } else if (!rfm::core::isTerminal(progress.state)) {
+        progressBar->setFormat(progressText);
+    } else if (!terminal) {
         auto* progressBar = qobject_cast<QProgressBar*>(m_table->cellWidget(row, ProgressColumn));
         if (progressBar == nullptr) {
             progressBar = new QProgressBar(m_table);

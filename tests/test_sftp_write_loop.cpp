@@ -1,7 +1,10 @@
+#include "../src/ssh/RemoteCopyTelemetryCounter.hpp"
 #include "../src/ssh/SftpWriteLoop.hpp"
 
 #include <QList>
 #include <QTest>
+
+#include <limits>
 
 namespace
 {
@@ -26,6 +29,11 @@ class SftpWriteLoopTest final : public QObject
     void rejectsWriteCountLargerThanRemaining();
     void stopsWhenWriteMakesNoProgress();
     void skipsEmptyBuffer();
+    void tracksKnownFileAcrossShortWrites();
+    void preservesPartialProgressAcrossErrors();
+    void representsEmptyAndRecursiveCopiesHonestly();
+    void resetsBetweenCopies();
+    void rejectsTelemetryCounterOverflow();
 };
 
 void SftpWriteLoopTest::writesCompleteBufferInOneCall()
@@ -127,6 +135,93 @@ void SftpWriteLoopTest::skipsEmptyBuffer()
 
     QVERIFY(outcome == rfm::ssh::detail::SftpWriteLoopResult::Completed);
     QVERIFY(!called);
+}
+
+void SftpWriteLoopTest::tracksKnownFileAcrossShortWrites()
+{
+    rfm::ssh::detail::RemoteCopyTelemetryCounter counter;
+    counter.reset(65'536);
+
+    QVERIFY(counter.recordWrite(20'000, 65'536));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{20'000});
+    QVERIFY(counter.recordWrite(30'000, 45'536));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{50'000});
+    QVERIFY(counter.recordWrite(15'536, 15'536));
+
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{65'536});
+    QCOMPARE(counter.telemetry().totalBytes, quint64{65'536});
+    QVERIFY(counter.telemetry().byteProgressAvailable);
+}
+
+void SftpWriteLoopTest::preservesPartialProgressAcrossErrors()
+{
+    rfm::ssh::detail::RemoteCopyTelemetryCounter counter;
+    counter.reset(12);
+    QVERIFY(counter.recordWrite(4, 12));
+
+    QVERIFY(!counter.recordWrite(-1, 8));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{4});
+    QVERIFY(!counter.recordWrite(0, 8));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{4});
+    QVERIFY(!counter.recordWrite(9, 8));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{4});
+
+    // A failed read never reaches recordWrite(), so the last observed write remains authoritative.
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{4});
+}
+
+void SftpWriteLoopTest::representsEmptyAndRecursiveCopiesHonestly()
+{
+    rfm::ssh::detail::RemoteCopyTelemetryCounter counter;
+    counter.reset(0);
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{0});
+    QCOMPARE(counter.telemetry().totalBytes, quint64{0});
+    QVERIFY(counter.telemetry().byteProgressAvailable);
+
+    counter.reset();
+    QVERIFY(counter.recordWrite(5, 5));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{5});
+    QCOMPARE(counter.telemetry().totalBytes, quint64{0});
+    QVERIFY(!counter.telemetry().byteProgressAvailable);
+
+    counter.reset(std::nullopt, true);
+    QVERIFY(counter.recordWrite(5, 5));
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{5});
+    QCOMPARE(counter.telemetry().totalBytes, quint64{0});
+    QVERIFY(counter.telemetry().byteProgressAvailable);
+}
+
+void SftpWriteLoopTest::resetsBetweenCopies()
+{
+    rfm::ssh::detail::RemoteCopyTelemetryCounter counter;
+    counter.reset(10);
+    QVERIFY(counter.recordWrite(6, 10));
+
+    counter.reset(3);
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{0});
+    QCOMPARE(counter.telemetry().totalBytes, quint64{3});
+    QVERIFY(counter.telemetry().byteProgressAvailable);
+
+    counter.reset();
+    QCOMPARE(counter.telemetry().transferredBytes, quint64{0});
+    QCOMPARE(counter.telemetry().totalBytes, quint64{0});
+    QVERIFY(!counter.telemetry().byteProgressAvailable);
+}
+
+void SftpWriteLoopTest::rejectsTelemetryCounterOverflow()
+{
+    if constexpr (sizeof(qsizetype) < sizeof(qint64)) {
+        QSKIP("This overflow boundary requires a 64-bit qsizetype.");
+    }
+
+    rfm::ssh::detail::RemoteCopyTelemetryCounter counter;
+    const qint64 largestWrite = std::numeric_limits<qint64>::max();
+    const qsizetype largestRemaining = std::numeric_limits<qsizetype>::max();
+    QVERIFY(counter.recordWrite(largestWrite, largestRemaining));
+    QVERIFY(counter.recordWrite(largestWrite, largestRemaining));
+    QVERIFY(counter.recordWrite(1, 1));
+    QVERIFY(!counter.recordWrite(1, 1));
+    QCOMPARE(counter.telemetry().transferredBytes, std::numeric_limits<quint64>::max());
 }
 
 } // namespace

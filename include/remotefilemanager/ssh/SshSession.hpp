@@ -125,6 +125,10 @@ class SshSession final : public QObject
     void processRemoteStorageCapabilityProbe();
     void scheduleRemoteStorageCapabilityProbe(bool activityAvailable = true);
     void finishRemoteStorageCapabilityProbe();
+    void processRemoteDeleteSafetyProbe();
+    void scheduleRemoteDeleteSafetyProbe(bool activityAvailable = true);
+    void finishPendingRemoteDeleteForDisconnect(const QString& error);
+    void stagePendingRemoteDeleteForTesting(quint64 id, QList<rfm::core::RemoteSelection> sources);
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();
