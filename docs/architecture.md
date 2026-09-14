@@ -308,6 +308,9 @@ chaque panneau et survit aux changements de dossier et aux actualisations de la 
 Le nombre affiché pour un dossier est chargé après son listing principal. Le panneau
 émet au plus une demande de comptage à la fois et rend la main à la boucle d'événements
 avant la suivante ; les workers Local et SSH ne parcourent que les enfants immédiats.
+Les grands listings sont également insérés par lots bornés dans le thread GUI : une nouvelle
+génération de listing invalide les lots déjà en attente afin que deux dossiers ne soient jamais
+mélangés dans le même panneau.
 Une génération associe chaque réponse à l'affichage qui l'a demandée. Une réponse
 obsolète est ignorée, un refus ou une erreur laisse un tiret, et un refresh recrée les
 placeholders puis relance naturellement les comptages. La clé de tri `Size` représente

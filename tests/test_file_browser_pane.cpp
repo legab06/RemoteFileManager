@@ -51,6 +51,9 @@ class FileBrowserPaneTest final : public QObject
     void sortsEveryColumnUsingRawValues();
     void loadsDirectoryCountsLazilyAndSortsThem();
     void preservesSshDirectoryCountsAcrossRefresh();
+    void rendersLargeDirectoryInCooperativeBatches();
+    void replacesObsoleteDirectoryRender();
+    void rendersSmallDirectorySynchronously();
     void rubberBandSelectsMultipleLocalRows();
     void controlRubberBandTogglesRemoteRows();
     void dragFromSelectedRowPreservesSelectionAndStartsInternalDrag();
@@ -1127,6 +1130,76 @@ void FileBrowserPaneTest::preservesSshDirectoryCountsAcrossRefresh()
              QStringLiteral("…"));
     QCOMPARE(pane.fileTable()->item(rowNamed(QStringLiteral("new")), 1)->text(),
              QStringLiteral("…"));
+}
+
+void FileBrowserPaneTest::rendersLargeDirectoryInCooperativeBatches()
+{
+    QList<rfm::core::RemoteEntry> entries;
+    entries.reserve(10001);
+    for (int index = 0; index < 10001; ++index) {
+        entries.push_back({QStringLiteral("entry-%1.txt").arg(index),
+                           static_cast<quint64>(index),
+                           {},
+                           false,
+                           false});
+    }
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
+                       QStringLiteral("file:///fixture"), entries);
+    QCOMPARE(pane.fileTable()->rowCount(), 64);
+
+    bool unrelatedEventProcessed = false;
+    QTimer::singleShot(0, &pane, [&unrelatedEventProcessed] { unrelatedEventProcessed = true; });
+    QTRY_VERIFY(unrelatedEventProcessed);
+    QVERIFY(pane.fileTable()->rowCount() < entries.size());
+    QTRY_COMPARE(pane.fileTable()->rowCount(), entries.size());
+    QCOMPARE(pane.fileTable()->item(10000, 0)->text(), QStringLiteral("entry-10000.txt"));
+}
+
+void FileBrowserPaneTest::replacesObsoleteDirectoryRender()
+{
+    QList<rfm::core::RemoteEntry> oldEntries;
+    oldEntries.reserve(513);
+    for (int index = 0; index < 513; ++index) {
+        oldEntries.push_back({QStringLiteral("old-%1.txt").arg(index),
+                              static_cast<quint64>(index),
+                              {},
+                              false,
+                              false});
+    }
+    const QList<rfm::core::RemoteEntry> replacement{
+        {QStringLiteral("new-one.txt"), 1, {}, false, false},
+        {QStringLiteral("new-two.txt"), 2, {}, false, false},
+    };
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/old")},
+                       QStringLiteral("file:///old"), oldEntries);
+    QCOMPARE(pane.fileTable()->rowCount(), 64);
+
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/new")},
+                       QStringLiteral("file:///new"), replacement);
+    QCoreApplication::processEvents();
+    QCOMPARE(pane.fileTable()->rowCount(), 2);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("new-one.txt"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("new-two.txt"));
+}
+
+void FileBrowserPaneTest::rendersSmallDirectorySynchronously()
+{
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("first.txt"), 1, {}, false, false},
+        {QStringLiteral("second.txt"), 2, {}, false, false},
+    };
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory({rfm::core::FileSource::Local,
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
+                       QStringLiteral("file:///fixture"), entries);
+    QCOMPARE(pane.fileTable()->rowCount(), 2);
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("first.txt"));
+    QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("second.txt"));
 }
 
 void FileBrowserPaneTest::rubberBandSelectsMultipleLocalRows()

@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 
 #include <QByteArray>
+#include <QHash>
 #include <QPoint>
 #include <QSet>
 #include <QStringList>
@@ -130,7 +131,7 @@ class FileBrowserPane final : public QWidget
     void applyTableHeaderState(const QByteArray& state, int sortColumn, Qt::SortOrder sortOrder,
                                bool adaptiveLayout);
     void resetTableHeaderState();
-    void applyAdaptiveLayout();
+    void applyAdaptiveLayout(std::optional<int> contentWidth = std::nullopt);
     void markManualLayout();
     void applyDefaultFileView();
     void handleHeaderSectionClicked(int logicalIndex);
@@ -140,6 +141,10 @@ class FileBrowserPane final : public QWidget
     void scheduleTableHeaderStateSave();
     void saveTableHeaderState();
     void requestNextDirectoryItemCount();
+    void scheduleDirectoryRenderStep();
+    void processDirectoryRenderStep();
+    void finishDirectoryRender();
+    void applyCutAppearance(int row);
     [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
     void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
@@ -178,6 +183,19 @@ class FileBrowserPane final : public QWidget
     int m_contextMenuRow{-1};
     bool m_restoreTableFocus{false};
     bool m_showHiddenFiles{false};
+    struct DirectoryRenderState {
+        QList<rfm::core::RemoteEntry> entries;
+        QHash<QString, quint64> preservedDirectoryCounts;
+        QSet<QString> namesToSelect;
+        qsizetype nextRow{0};
+        qsizetype entriesPerStep{0};
+        int previousScrollPosition{-1};
+        int maximumNameTextWidth{0};
+        bool sortingEnabled{false};
+    };
+    std::optional<DirectoryRenderState> m_directoryRender;
+    quint64 m_directoryRenderGeneration{0};
+    bool m_directoryRenderStepScheduled{false};
 };
 
 } // namespace rfm::app
