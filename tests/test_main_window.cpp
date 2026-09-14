@@ -1755,7 +1755,7 @@ void MainWindowTest::exposesInitialDisconnectedShell()
 
     const auto* const pathEdit = window.findChild<QLineEdit*>(QStringLiteral("remotePathEdit"));
     QVERIFY(pathEdit != nullptr);
-    QVERIFY(pathEdit->isReadOnly());
+    QVERIFY(!pathEdit->isReadOnly());
 
     const auto* const connectionButton =
         window.findChild<QPushButton*>(QStringLiteral("homeNewConnectionButton"));

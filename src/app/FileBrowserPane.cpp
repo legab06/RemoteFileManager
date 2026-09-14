@@ -21,6 +21,7 @@
 #include <QHeaderView>
 #include <QIcon>
 #include <QItemSelectionModel>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QListView>
 #include <QLocale>
@@ -40,6 +41,7 @@
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
+#include <QUrl>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -627,10 +629,10 @@ FileBrowserPane::FileBrowserPane(QWidget* parent) : QWidget(parent)
 
     m_pathEdit = new QLineEdit(this);
     m_pathEdit->setObjectName(QStringLiteral("remotePathEdit"));
-    m_pathEdit->setReadOnly(true);
-    m_pathEdit->setPlaceholderText(tr("Local folder or sftp://user@server/path"));
+    m_pathEdit->setPlaceholderText(tr("Enter an absolute local or remote path"));
     m_pathEdit->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     layout->addWidget(m_pathEdit);
+    connect(m_pathEdit, &QLineEdit::returnPressed, this, &FileBrowserPane::submitPathEdit);
 
     m_fileViews = new QStackedWidget(this);
     m_fileViews->setObjectName(QStringLiteral("fileViews"));
@@ -1237,6 +1239,15 @@ std::optional<rfm::core::BrowserLocation> FileBrowserPane::contextLocalFile() co
 
 bool FileBrowserPane::eventFilter(QObject* watched, QEvent* event)
 {
+    if (watched == m_pathEdit && event->type() == QEvent::KeyPress &&
+        static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape) {
+        restorePathEdit();
+        event->accept();
+        return true;
+    }
+    if (watched == m_pathEdit && event->type() == QEvent::FocusOut) {
+        restorePathEdit();
+    }
     QHeaderView* const header = m_fileTable->horizontalHeader();
     const bool headerEvent = watched == header || watched == header->viewport();
     if (watched == this || watched == m_pathEdit || watched == m_fileTable ||
@@ -1541,7 +1552,8 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
     m_directoryRender = std::move(render);
     m_fileTable->clearContents();
     m_fileTable->setRowCount(0);
-    m_pathEdit->setText(displayPath);
+    m_displayPath = displayPath;
+    restorePathEdit();
     processDirectoryRenderStep();
 }
 
@@ -1683,6 +1695,7 @@ void FileBrowserPane::clear()
     m_directoryRender.reset();
     m_directoryRenderStepScheduled = false;
     m_currentLocation = {};
+    m_displayPath.clear();
     m_directoryEntries.clear();
     m_contextMenuRow = -1;
     m_pendingSelectionNames.clear();
@@ -1916,6 +1929,82 @@ void FileBrowserPane::focusLocation()
 {
     m_pathEdit->setFocus(Qt::ShortcutFocusReason);
     m_pathEdit->selectAll();
+}
+
+void FileBrowserPane::submitPathEdit()
+{
+    QString path = m_pathEdit->text();
+    restorePathEdit();
+    if (!m_currentLocation.isValid() || path.isEmpty() || path.contains(QChar{'\0'})) {
+        return;
+    }
+    if (m_currentLocation.source == rfm::core::FileSource::Local) {
+        if (path == QStringLiteral("~")) {
+            path = QDir::homePath();
+        } else if (path.startsWith(QStringLiteral("~/"))) {
+            path = QDir(QDir::homePath()).filePath(path.mid(2));
+        } else if (path.startsWith(QStringLiteral("file:"), Qt::CaseInsensitive)) {
+            const QUrl localUrl(path, QUrl::StrictMode);
+            if (!localUrl.isValid() || !localUrl.isLocalFile() || localUrl.hasQuery() ||
+                localUrl.hasFragment()) {
+                return;
+            }
+            path = localUrl.toLocalFile();
+            if (path.contains(QChar{'\0'})) {
+                return;
+            }
+        }
+        if (!QDir::isAbsolutePath(path)) {
+            return;
+        }
+    } else if (m_currentLocation.source == rfm::core::FileSource::Ssh) {
+        const auto remotePath = remotePathFromPathEdit(path);
+        if (!remotePath.has_value()) {
+            return;
+        }
+        path = *remotePath;
+    }
+    navigateTo(path);
+}
+
+void FileBrowserPane::restorePathEdit()
+{
+    if (m_pathEdit->text() != m_displayPath) {
+        m_pathEdit->setText(m_displayPath);
+    }
+}
+
+std::optional<QString> FileBrowserPane::remotePathFromPathEdit(const QString& text) const
+{
+    if (text.startsWith(QChar{'/'})) {
+        return text;
+    }
+
+    const QUrl currentUrl(m_displayPath, QUrl::StrictMode);
+    const QUrl enteredUrl(text, QUrl::StrictMode);
+    const bool usesCurrentConnection =
+        currentUrl.isValid() && enteredUrl.isValid() &&
+        currentUrl.scheme().compare(QStringLiteral("sftp"), Qt::CaseInsensitive) == 0 &&
+        enteredUrl.scheme().compare(QStringLiteral("sftp"), Qt::CaseInsensitive) == 0 &&
+        enteredUrl.userName(QUrl::FullyDecoded) == currentUrl.userName(QUrl::FullyDecoded) &&
+        enteredUrl.host().compare(currentUrl.host(), Qt::CaseInsensitive) == 0 &&
+        enteredUrl.port(22) == currentUrl.port(22) && enteredUrl.password().isEmpty() &&
+        !enteredUrl.hasQuery() && !enteredUrl.hasFragment();
+    if (!usesCurrentConnection) {
+        return std::nullopt;
+    }
+
+    QString remotePath = enteredUrl.path(QUrl::FullyDecoded);
+    if (remotePath.contains(QChar{'\0'}) || !remotePath.startsWith(QChar{'/'})) {
+        return std::nullopt;
+    }
+    if (remotePath == QStringLiteral("/~/")) {
+        return QStringLiteral(".");
+    }
+    if (remotePath.startsWith(QStringLiteral("/~/"))) {
+        remotePath.remove(0, 3);
+    }
+    return remotePath;
 }
 
 void FileBrowserPane::navigateTo(const QString& path)

@@ -150,6 +150,9 @@ class FileBrowserPane final : public QWidget
     void processDirectoryRenderStep();
     void finishDirectoryRender();
     void applyCutAppearance(int row);
+    void submitPathEdit();
+    void restorePathEdit();
+    [[nodiscard]] std::optional<QString> remotePathFromPathEdit(const QString& text) const;
     [[nodiscard]] QString normalizedPath(const rfm::core::BrowserLocation& location) const;
     void requestLocation(const rfm::core::BrowserLocation& location, PaneNavigation navigation);
 
@@ -159,6 +162,7 @@ class FileBrowserPane final : public QWidget
     QListView* m_mosaicView{nullptr};
     ViewMode m_viewMode{ViewMode::Details};
     rfm::core::BrowserLocation m_currentLocation;
+    QString m_displayPath;
     QList<rfm::core::RemoteEntry> m_directoryEntries;
     QStringList m_pendingSelectionNames;
     QStringList m_pendingDirectoryCountNames;
