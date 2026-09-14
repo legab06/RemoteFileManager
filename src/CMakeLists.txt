@@ -30,6 +30,7 @@ add_library(
     ssh/LibsshRuntime.cpp
     ssh/RemoteDirectoryCountJob.cpp
     ssh/RemoteDelete.hpp
+    ssh/RemoteRemoveJob.hpp
     ssh/RemoteDeleteSafetyProbe.cpp
     ssh/RemoteCopyCapabilityProbe.cpp
     ssh/RemoteCopyTelemetryCounter.hpp

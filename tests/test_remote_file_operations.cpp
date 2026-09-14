@@ -9,6 +9,7 @@
 #include "remotefilemanager/ssh/SshSession.hpp"
 
 #include "../src/ssh/RemoteDelete.hpp"
+#include "../src/ssh/RemoteRemoveJob.hpp"
 
 #include <QDir>
 #include <QFile>
@@ -126,6 +127,81 @@ class FakeRemoteBackend final : public rfm::core::RemoteFileBackend
     QHash<QString, QList<QPair<QString, bool>>> listings;
     QHash<QString, rfm::core::RemoteBackendResult> forced;
     QStringList calls;
+};
+
+class FakeRemoteRemoveBackend final : public rfm::ssh::RemoteRemoveBackend
+{
+  public:
+    class Directory final : public rfm::ssh::RemoteRemoveDirectory
+    {
+      public:
+        Directory(FakeRemoteRemoveBackend& backend, QString path)
+            : m_backend(backend), m_path(std::move(path))
+        {}
+
+        ~Directory() override { ++m_backend.closedDirectories; }
+
+        rfm::ssh::RemoteRemoveRead read() override
+        {
+            ++m_backend.reads;
+            if (m_backend.readFailures.contains(m_path)) {
+                return {rfm::ssh::RemoteRemoveReadState::Error,
+                        {},
+                        false,
+                        {rfm::core::RemoteBackendError::Failure, QStringLiteral("read failed")}};
+            }
+            const QList<QPair<QString, bool>>& entries = m_backend.entries.value(m_path);
+            if (m_next == entries.size()) {
+                return {rfm::ssh::RemoteRemoveReadState::End, {}, false, {}};
+            }
+            const auto& entry = entries.at(m_next++);
+            return {rfm::ssh::RemoteRemoveReadState::Entry, entry.first, entry.second, {}};
+        }
+
+      private:
+        FakeRemoteRemoveBackend& m_backend;
+        QString m_path;
+        qsizetype m_next{0};
+    };
+
+    rfm::core::RemoteBackendResult preflightDirectory(const QString& path) override
+    {
+        preflighted.push_back(path);
+        return mountResults.value(path);
+    }
+
+    rfm::ssh::RemoteRemoveOpenResult openDirectory(const QString& path) override
+    {
+        ++openCalls[path];
+        const rfm::core::RemoteBackendResult result = openResults.value(path);
+        if (!result.succeeded()) {
+            return {result, {}};
+        }
+        return {{}, std::make_unique<Directory>(*this, path)};
+    }
+
+    rfm::core::RemoteBackendResult removeFile(const QString& path) override
+    {
+        calls.push_back(QStringLiteral("unlink:%1").arg(path));
+        return removeResults.value(QStringLiteral("unlink:%1").arg(path));
+    }
+
+    rfm::core::RemoteBackendResult removeDirectory(const QString& path) override
+    {
+        calls.push_back(QStringLiteral("rmdir:%1").arg(path));
+        return removeResults.value(QStringLiteral("rmdir:%1").arg(path));
+    }
+
+    QHash<QString, QList<QPair<QString, bool>>> entries;
+    QHash<QString, rfm::core::RemoteBackendResult> mountResults;
+    QHash<QString, rfm::core::RemoteBackendResult> openResults;
+    QHash<QString, rfm::core::RemoteBackendResult> removeResults;
+    QSet<QString> readFailures;
+    QHash<QString, int> openCalls;
+    QStringList preflighted;
+    QStringList calls;
+    int reads{0};
+    int closedDirectories{0};
 };
 
 class FakeCopyBackend final : public rfm::core::ServerSideCopyBackend
@@ -538,6 +614,8 @@ class RemoteFileOperationsTest final : public QObject
     void remoteCopyHandlesSymlinksConservatively();
     void remoteDirectoryCountRunsInBoundedSteps();
     void remoteDirectoryCountClosesOnFailureAndCancellation();
+    void remoteRemoveUsesOneCooperativePreflightTraversal();
+    void remoteRemovePreservesGuardsAndCleansUpOnFailureOrCancellation();
     void copyStatusProtocolIsDeterministic();
     void copyStatusWrapperForwardsTermination();
     void activeStagingOwnershipIsExactAndTemporary();
@@ -1042,6 +1120,99 @@ void RemoteFileOperationsTest::remoteDirectoryCountClosesOnFailureAndCancellatio
         QCOMPARE(cancelled.step(), rfm::ssh::RemoteDirectoryCountState::Cancelled);
     }
     QCOMPARE(cancelledCloses, 1);
+}
+
+void RemoteFileOperationsTest::remoteRemoveUsesOneCooperativePreflightTraversal()
+{
+    FakeRemoteRemoveBackend backend;
+    QList<QPair<QString, bool>> entries{{QStringLiteral("child"), true},
+                                        {QStringLiteral("link"), false}};
+    for (qsizetype index = 0; index < rfm::ssh::RemoteRemoveJob::operationsPerStep + 4; ++index) {
+        entries.push_back({QStringLiteral("file-%1").arg(index), false});
+    }
+    backend.entries.insert(QStringLiteral("/tree"), entries);
+    backend.entries.insert(QStringLiteral("/tree/child"), {{QStringLiteral("child-file"), false}});
+    rfm::ssh::RemoteRemoveJob job(backend, 81, {{QStringLiteral("/tree"), true}}, true);
+
+    job.step();
+    QVERIFY(!job.isFinished());
+    QVERIFY(backend.reads < entries.size());
+    QCOMPARE(backend.openCalls.value(QStringLiteral("/tree")), 1);
+
+    while (!job.isFinished()) {
+        job.step();
+    }
+    QVERIFY(job.result().allSucceeded());
+    QCOMPARE(backend.openCalls.value(QStringLiteral("/tree")), 1);
+    QCOMPARE(backend.openCalls.value(QStringLiteral("/tree/child")), 1);
+    QCOMPARE(backend.closedDirectories, 2);
+    QVERIFY(backend.calls.indexOf(QStringLiteral("unlink:/tree/child/child-file")) <
+            backend.calls.indexOf(QStringLiteral("rmdir:/tree/child")));
+    QVERIFY(backend.calls.indexOf(QStringLiteral("rmdir:/tree/child")) <
+            backend.calls.indexOf(QStringLiteral("rmdir:/tree")));
+    QCOMPARE(backend.calls.last(), QStringLiteral("rmdir:/tree"));
+
+    FakeRemoteRemoveBackend symlink;
+    symlink.entries.insert(QStringLiteral("/tree"), {{QStringLiteral("link"), false}});
+    rfm::ssh::RemoteRemoveJob symlinkJob(symlink, 85, {{QStringLiteral("/tree"), true}}, true);
+    while (!symlinkJob.isFinished()) {
+        symlinkJob.step();
+    }
+    QVERIFY(symlinkJob.result().allSucceeded());
+    QCOMPARE(symlink.openCalls.value(QStringLiteral("/tree/link")), 0);
+    QVERIFY(symlink.calls.contains(QStringLiteral("unlink:/tree/link")));
+}
+
+void RemoteFileOperationsTest::remoteRemovePreservesGuardsAndCleansUpOnFailureOrCancellation()
+{
+    FakeRemoteRemoveBackend guarded;
+    guarded.entries.insert(QStringLiteral("/tree"), {{QStringLiteral("mount"), true}});
+    guarded.mountResults.insert(
+        QStringLiteral("/tree/mount"),
+        {rfm::core::RemoteBackendError::Failure, QStringLiteral("mount point")});
+    rfm::ssh::RemoteRemoveJob guardedJob(guarded, 82, {{QStringLiteral("/tree"), true}}, true);
+    while (!guardedJob.isFinished()) {
+        guardedJob.step();
+    }
+    QVERIFY(!guardedJob.result().allSucceeded());
+    QVERIFY(guarded.calls.isEmpty());
+    QCOMPARE(guarded.closedDirectories, 1);
+
+    FakeRemoteRemoveBackend failed;
+    failed.entries.insert(QStringLiteral("/tree"), {{QStringLiteral("file"), false}});
+    failed.readFailures.insert(QStringLiteral("/tree"));
+    rfm::ssh::RemoteRemoveJob failedJob(failed, 83, {{QStringLiteral("/tree"), true}}, true);
+    failedJob.step();
+    QVERIFY(failedJob.isFinished());
+    QCOMPARE(failed.closedDirectories, 1);
+    QVERIFY(failed.calls.isEmpty());
+
+    FakeRemoteRemoveBackend deletionFailure;
+    deletionFailure.entries.insert(QStringLiteral("/tree"), {{QStringLiteral("file"), false}});
+    deletionFailure.removeResults.insert(
+        QStringLiteral("unlink:/tree/file"),
+        {rfm::core::RemoteBackendError::PermissionDenied, QStringLiteral("permission denied")});
+    rfm::ssh::RemoteRemoveJob deletionFailureJob(deletionFailure, 86,
+                                                 {{QStringLiteral("/tree"), true}}, true);
+    while (!deletionFailureJob.isFinished()) {
+        deletionFailureJob.step();
+    }
+    QVERIFY(!deletionFailureJob.result().allSucceeded());
+    QCOMPARE(deletionFailure.calls, QStringList{QStringLiteral("unlink:/tree/file")});
+
+    FakeRemoteRemoveBackend cancelled;
+    QList<QPair<QString, bool>> pendingEntries;
+    for (qsizetype index = 0; index < rfm::ssh::RemoteRemoveJob::operationsPerStep + 1; ++index) {
+        pendingEntries.push_back({QStringLiteral("file-%1").arg(index), false});
+    }
+    cancelled.entries.insert(QStringLiteral("/tree"), pendingEntries);
+    rfm::ssh::RemoteRemoveJob cancelledJob(cancelled, 84, {{QStringLiteral("/tree"), true}}, true);
+    cancelledJob.step();
+    QVERIFY(!cancelledJob.isFinished());
+    cancelledJob.cancel(QStringLiteral("cancelled"));
+    QVERIFY(cancelledJob.isFinished());
+    QCOMPARE(cancelled.closedDirectories, 1);
+    QVERIFY(cancelled.calls.isEmpty());
 }
 
 void RemoteFileOperationsTest::copyStatusProtocolIsDeterministic()

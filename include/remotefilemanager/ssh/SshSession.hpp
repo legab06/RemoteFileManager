@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/RemoteEntry.hpp"
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemoteFilesystem.hpp"
+#include "remotefilemanager/core/RemoteMoveSafety.hpp"
 #include "remotefilemanager/core/SecurePassword.hpp"
 #include "remotefilemanager/core/ServerCapabilities.hpp"
 #include "remotefilemanager/core/Storage.hpp"
@@ -13,6 +14,7 @@
 #include "remotefilemanager/core/VolumeService.hpp"
 
 #include <QByteArray>
+#include <QHash>
 #include <QObject>
 #include <functional>
 #include <memory>
@@ -26,6 +28,7 @@ namespace rfm::ssh
 {
 
 enum class PasswordAuthenticationReason;
+class RemoteRemoveBackend;
 
 class SshSessionTransferTest;
 
@@ -129,7 +132,14 @@ class SshSession final : public QObject
     void processRemoteDeleteSafetyProbe();
     void scheduleRemoteDeleteSafetyProbe(bool activityAvailable = true);
     void finishPendingRemoteDeleteForDisconnect(const QString& error);
+    void startRemoteRemoveJob(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive,
+                              QHash<QString, rfm::core::RemoteMountPointState> windowsStates);
+    void processRemoteRemoveStep();
+    void scheduleRemoteRemoveStep();
+    void finishActiveRemoteRemove(const QString& error);
     void stagePendingRemoteDeleteForTesting(quint64 id, QList<rfm::core::RemoteSelection> sources);
+    void stageRemoteRemoveForTesting(std::unique_ptr<RemoteRemoveBackend> backend, quint64 id,
+                                     QList<rfm::core::RemoteSelection> sources, bool recursive);
     void startNextDirectoryCount();
     void processDirectoryCountStep();
     void scheduleDirectoryCountStep();

@@ -2,10 +2,13 @@
 #include "remotefilemanager/core/TransferCoordinator.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
+#include "../src/ssh/RemoteRemoveJob.hpp"
+
 #include <QFile>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 #include <memory>
 
@@ -113,6 +116,68 @@ class LifecycleBackend final : public rfm::core::RemoteTransferBackend
     bool m_readCompleted{false};
 };
 
+struct SessionRemoveStats {
+    int closedDirectories{0};
+};
+
+class SessionRemoveDirectory final : public RemoteRemoveDirectory
+{
+  public:
+    SessionRemoveDirectory(int entries, std::shared_ptr<SessionRemoveStats> stats)
+        : m_remaining(entries), m_stats(std::move(stats))
+    {}
+
+    ~SessionRemoveDirectory() override { ++m_stats->closedDirectories; }
+
+    RemoteRemoveRead read() override
+    {
+        if (m_remaining-- > 0) {
+            return {RemoteRemoveReadState::Entry, QStringLiteral("entry"), false, {}};
+        }
+        return {RemoteRemoveReadState::End, {}, false, {}};
+    }
+
+  private:
+    int m_remaining{0};
+    std::shared_ptr<SessionRemoveStats> m_stats;
+};
+
+class SessionRemoveBackend final : public RemoteRemoveBackend
+{
+  public:
+    explicit SessionRemoveBackend(
+        std::shared_ptr<SessionRemoveStats> stats = std::make_shared<SessionRemoveStats>())
+        : m_stats(std::move(stats))
+    {}
+
+    rfm::core::RemoteBackendResult preflightDirectory(const QString&) override { return {}; }
+
+    RemoteRemoveOpenResult openDirectory(const QString&) override
+    {
+        return {{},
+                std::make_unique<SessionRemoveDirectory>(RemoteRemoveJob::operationsPerStep + 2,
+                                                         m_stats)};
+    }
+
+    rfm::core::RemoteBackendResult removeFile(const QString&) override
+    {
+        ++removedFiles;
+        return {};
+    }
+
+    rfm::core::RemoteBackendResult removeDirectory(const QString&) override
+    {
+        ++removedDirectories;
+        return {};
+    }
+
+    int removedFiles{0};
+    int removedDirectories{0};
+
+  private:
+    std::shared_ptr<SessionRemoveStats> m_stats;
+};
+
 bool isTerminal(rfm::core::TransferState state)
 {
     return state == rfm::core::TransferState::Completed ||
@@ -209,6 +274,8 @@ class SshSessionTransferTest final : public QObject
     void normalFailureStartsNextTransfer();
     void cancellingQueuedTransferDoesNotCreateBackend();
     void pendingRemoteDeleteDisconnectFinishesExactlyOnce();
+    void remoteRemoveRunsAcrossQueuedWorkerSteps();
+    void disconnectCancelsActiveRemoteRemoveAndClosesDirectories();
 
   private:
     [[nodiscard]] std::unique_ptr<SshSession> makeSession();
@@ -453,6 +520,44 @@ void SshSessionTransferTest::pendingRemoteDeleteDisconnectFinishesExactlyOnce()
 
     session->processRemoteDeleteSafetyProbe();
     QCOMPARE(finished.size(), 1);
+}
+
+void SshSessionTransferTest::remoteRemoveRunsAcrossQueuedWorkerSteps()
+{
+    auto session = makeSession();
+    auto backend = std::make_unique<SessionRemoveBackend>();
+    QSignalSpy finished(session.get(), &SshSession::operationFinished);
+    bool timerRan = false;
+
+    session->stageRemoteRemoveForTesting(std::move(backend), 51, {{QStringLiteral("/tree"), true}},
+                                         true);
+    QTimer::singleShot(0, [&timerRan] { timerRan = true; });
+    QTRY_VERIFY(timerRan);
+    QCOMPARE(finished.size(), 0);
+    QTRY_COMPARE(finished.size(), 1);
+    const auto result =
+        finished.constFirst().constFirst().value<rfm::core::RemoteOperationResult>();
+    QCOMPARE(result.id, quint64{51});
+    QVERIFY(result.allSucceeded());
+}
+
+void SshSessionTransferTest::disconnectCancelsActiveRemoteRemoveAndClosesDirectories()
+{
+    auto session = makeSession();
+    const auto stats = std::make_shared<SessionRemoveStats>();
+    QSignalSpy finished(session.get(), &SshSession::operationFinished);
+    session->stageRemoteRemoveForTesting(std::make_unique<SessionRemoveBackend>(stats), 52,
+                                         {{QStringLiteral("/tree"), true}}, true);
+
+    session->processRemoteRemoveStep();
+    session->disconnectFromHost();
+
+    QCOMPARE(finished.size(), 1);
+    const auto result =
+        finished.constFirst().constFirst().value<rfm::core::RemoteOperationResult>();
+    QCOMPARE(result.id, quint64{52});
+    QVERIFY(!result.allSucceeded());
+    QCOMPARE(stats->closedDirectories, 1);
 }
 
 } // namespace rfm::ssh
