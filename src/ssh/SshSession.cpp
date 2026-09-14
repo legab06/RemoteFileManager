@@ -694,7 +694,8 @@ class SftpRemoteRemoveDirectory final : public rfm::ssh::RemoteRemoveDirectory
                     {},
                     false,
                     {backendError(sftp_get_error(m_sftp)),
-                     QStringLiteral("Unable to finish listing the remote removal tree.")}};
+                     QCoreApplication::translate(
+                         "RemoteDelete", "Unable to finish listing the remote removal tree.")}};
         }
         const QString name = QString::fromUtf8(attributes->name);
         const bool directory = attributes->type == SSH_FILEXFER_TYPE_DIRECTORY;
@@ -742,7 +743,8 @@ class SftpRemoteRemoveBackend final : public rfm::ssh::RemoteRemoveBackend
         sftp_dir directory = sftp_opendir(m_sftp, encoded.constData());
         if (directory == nullptr) {
             return {{backendError(sftp_get_error(m_sftp)),
-                     QStringLiteral("Unable to open the remote removal tree.")},
+                     QCoreApplication::translate("RemoteDelete",
+                                                  "Unable to open the remote removal tree.")},
                     {}};
         }
         return {{}, std::make_unique<SftpRemoteRemoveDirectory>(m_sftp, directory)};
