@@ -43,6 +43,7 @@
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <limits>
@@ -1414,6 +1415,24 @@ void FileBrowserPane::showDirectory(const QString& path, const QString& displayP
     showDirectory({rfm::core::FileSource::Ssh, machineId, path}, displayPath, entries, navigation);
 }
 
+bool FileBrowserPane::hasDirectoryContents(const rfm::core::BrowserLocation& location,
+                                           const QList<rfm::core::RemoteEntry>& entries) const
+{
+    rfm::core::BrowserLocation normalizedLocation = location;
+    normalizedLocation.path = normalizedPath(location);
+    if (normalizedLocation != m_currentLocation || entries.size() != m_directoryEntries.size()) {
+        return false;
+    }
+    return std::equal(entries.cbegin(), entries.cend(), m_directoryEntries.cbegin(),
+                      [](const rfm::core::RemoteEntry& left, const rfm::core::RemoteEntry& right) {
+                          return left.name == right.name && left.size == right.size &&
+                                 left.modifiedAt == right.modifiedAt &&
+                                 left.directory == right.directory &&
+                                 left.symbolicLink == right.symbolicLink &&
+                                 left.hidden == right.hidden;
+                      });
+}
+
 void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
                                     const QString& displayPath,
                                     const QList<rfm::core::RemoteEntry>& entries,
@@ -1487,6 +1506,7 @@ void FileBrowserPane::showDirectory(const rfm::core::BrowserLocation& location,
         m_forwardHistory.clear();
     }
     m_currentLocation = normalizedLocation;
+    m_directoryEntries = entries;
     m_contextMenuRow = -1;
     const bool internalTransferEnabled = m_currentLocation.source != rfm::core::FileSource::None;
     m_fileTable->setDragEnabled(internalTransferEnabled);
@@ -1655,6 +1675,7 @@ void FileBrowserPane::clear()
     m_directoryRender.reset();
     m_directoryRenderStepScheduled = false;
     m_currentLocation = {};
+    m_directoryEntries.clear();
     m_contextMenuRow = -1;
     m_pendingSelectionNames.clear();
     ++m_directoryCountGeneration;

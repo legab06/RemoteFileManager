@@ -1833,12 +1833,14 @@ void MainWindow::handleDirectoryListed(quint64 requestId, const QString& path,
     if (expected && pane != nullptr && !pane->isHidden()) {
         const rfm::core::BrowserLocation location{rfm::core::FileSource::Ssh,
                                                   activeRemoteMachineId(), path};
-        if (pane->currentLocation() != location) {
-            cancelRemoteDirectoryCounts(request.paneId);
+        if (!pane->hasDirectoryContents(location, entries)) {
+            if (pane->currentLocation() != location) {
+                cancelRemoteDirectoryCounts(request.paneId);
+            }
+            const QString displayPath = remoteDisplayUrl(m_activeProfile, path);
+            pane->showDirectory(location, displayPath, entries, request.navigation);
+            pane->setProperty("connectionGeneration", QVariant::fromValue(m_connectionGeneration));
         }
-        const QString displayPath = remoteDisplayUrl(m_activeProfile, path);
-        pane->showDirectory(location, displayPath, entries, request.navigation);
-        pane->setProperty("connectionGeneration", QVariant::fromValue(m_connectionGeneration));
         m_expectedDirectoryRequests.remove(request.paneId);
         setPaneBusy(request.paneId, false);
     }

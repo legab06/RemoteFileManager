@@ -57,6 +57,8 @@ class FileBrowserPane final : public QWidget
     [[nodiscard]] QByteArray createInternalDragData() const;
     [[nodiscard]] std::optional<FileEntryProperties> contextEntryProperties() const;
     [[nodiscard]] std::optional<rfm::core::BrowserLocation> contextLocalFile() const;
+    [[nodiscard]] bool hasDirectoryContents(const rfm::core::BrowserLocation& location,
+                                            const QList<rfm::core::RemoteEntry>& entries) const;
 
     void showDirectory(const QString& path, const QString& displayPath,
                        const QList<rfm::core::RemoteEntry>& entries,
@@ -154,6 +156,7 @@ class FileBrowserPane final : public QWidget
     QListView* m_mosaicView{nullptr};
     ViewMode m_viewMode{ViewMode::Details};
     rfm::core::BrowserLocation m_currentLocation;
+    QList<rfm::core::RemoteEntry> m_directoryEntries;
     QStringList m_pendingSelectionNames;
     QStringList m_pendingDirectoryCountNames;
     rfm::core::BrowserLocation m_activeDirectoryCountLocation;
