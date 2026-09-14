@@ -1684,6 +1684,17 @@ void FileBrowserPane::setDirectoryItemCount(const rfm::core::BrowserLocation& lo
     QTimer::singleShot(0, this, &FileBrowserPane::requestNextDirectoryItemCount);
 }
 
+void FileBrowserPane::cancelDirectoryItemCount(const rfm::core::BrowserLocation& location,
+                                               quint64 generation, const QString& name)
+{
+    if (location == m_activeDirectoryCountLocation &&
+        generation == m_activeDirectoryCountGeneration && name == m_activeDirectoryCountName) {
+        m_activeDirectoryCountLocation = {};
+        m_activeDirectoryCountName.clear();
+        m_activeDirectoryCountGeneration = 0;
+    }
+}
+
 void FileBrowserPane::requestNextDirectoryItemCount()
 {
     if (!m_activeDirectoryCountName.isEmpty() || m_pendingDirectoryCountNames.isEmpty() ||

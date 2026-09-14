@@ -5,6 +5,7 @@
 #include "remotefilemanager/core/ServerSideCopyJob.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/RemoteDeleteSafetyProbe.hpp"
+#include "remotefilemanager/ssh/RemoteDirectoryCountJob.hpp"
 #include "remotefilemanager/ssh/SshSession.hpp"
 
 #include "../src/ssh/RemoteDelete.hpp"
@@ -535,6 +536,8 @@ class RemoteFileOperationsTest final : public QObject
     void remoteCopyBackendRoutesNativeAndClientMediatedPaths();
     void remoteCopyStagingCleanupIsSftpBounded();
     void remoteCopyHandlesSymlinksConservatively();
+    void remoteDirectoryCountRunsInBoundedSteps();
+    void remoteDirectoryCountClosesOnFailureAndCancellation();
     void copyStatusProtocolIsDeterministic();
     void copyStatusWrapperForwardsTermination();
     void activeStagingOwnershipIsExactAndTemporary();
@@ -979,6 +982,66 @@ void RemoteFileOperationsTest::remoteCopyHandlesSymlinksConservatively()
     QVERIFY(implementation.contains("Symbolic links are not supported by remote "));
     QVERIFY(implementation.contains("SFTP copy."));
     QVERIFY(implementation.contains("sftp_lstat"));
+}
+
+void RemoteFileOperationsTest::remoteDirectoryCountRunsInBoundedSteps()
+{
+    QStringList entries{QStringLiteral("."), QStringLiteral("..")};
+    for (qsizetype index = 0; index < rfm::ssh::RemoteDirectoryCountJob::entriesPerStep + 5;
+         ++index) {
+        entries.push_back(QStringLiteral("entry-%1").arg(index));
+    }
+    qsizetype next = 0;
+    int closes = 0;
+    rfm::ssh::RemoteDirectoryCountJob job(
+        71, QStringLiteral("/large-directory"),
+        [&entries, &next] {
+            if (next == entries.size()) {
+                return rfm::ssh::RemoteDirectoryCountRead{
+                    rfm::ssh::RemoteDirectoryCountReadState::End, {}, 0};
+            }
+            return rfm::ssh::RemoteDirectoryCountRead{
+                rfm::ssh::RemoteDirectoryCountReadState::Entry, entries.at(next++), 0};
+        },
+        [&closes] { ++closes; }, [](const QString&) { return false; });
+
+    QCOMPARE(job.step(), rfm::ssh::RemoteDirectoryCountState::Pending);
+    QCOMPARE(next, rfm::ssh::RemoteDirectoryCountJob::entriesPerStep);
+    QCOMPARE(closes, 0);
+    QCOMPARE(job.step(), rfm::ssh::RemoteDirectoryCountState::Completed);
+    QCOMPARE(job.count(),
+             static_cast<quint64>(rfm::ssh::RemoteDirectoryCountJob::entriesPerStep + 5));
+    QCOMPARE(closes, 1);
+}
+
+void RemoteFileOperationsTest::remoteDirectoryCountClosesOnFailureAndCancellation()
+{
+    int failedCloses = 0;
+    rfm::ssh::RemoteDirectoryCountJob failed(
+        72, QStringLiteral("/unreadable"),
+        [] {
+            return rfm::ssh::RemoteDirectoryCountRead{
+                rfm::ssh::RemoteDirectoryCountReadState::Error, {}, 4};
+        },
+        [&failedCloses] { ++failedCloses; }, [](const QString&) { return false; });
+    QCOMPARE(failed.step(), rfm::ssh::RemoteDirectoryCountState::Failed);
+    QCOMPARE(failed.error(), 4);
+    QCOMPARE(failedCloses, 1);
+
+    int cancelledCloses = 0;
+    {
+        rfm::ssh::RemoteDirectoryCountJob cancelled(
+            73, QStringLiteral("/obsolete"),
+            [] {
+                return rfm::ssh::RemoteDirectoryCountRead{
+                    rfm::ssh::RemoteDirectoryCountReadState::Entry, QStringLiteral("entry"), 0};
+            },
+            [&cancelledCloses] { ++cancelledCloses; }, [](const QString&) { return false; });
+        cancelled.cancel();
+        QCOMPARE(cancelledCloses, 1);
+        QCOMPARE(cancelled.step(), rfm::ssh::RemoteDirectoryCountState::Cancelled);
+    }
+    QCOMPARE(cancelledCloses, 1);
 }
 
 void RemoteFileOperationsTest::copyStatusProtocolIsDeterministic()

@@ -305,6 +305,8 @@ MainWindow::MainWindow(QWidget* parent, QString operationHistoryDirectory,
             &rfm::ssh::SshSession::listDirectory);
     connect(this, &MainWindow::remoteDirectoryCountRequested, m_sshSession,
             &rfm::ssh::SshSession::countDirectoryEntries);
+    connect(this, &MainWindow::remoteDirectoryCountCancelled, m_sshSession,
+            &rfm::ssh::SshSession::cancelDirectoryCount);
     connect(this, &MainWindow::remoteStorageRequested, m_sshSession,
             &rfm::ssh::SshSession::listStorageVolumes);
     connect(this, &MainWindow::remoteStorageProbeRequested, m_sshSession,
@@ -680,6 +682,7 @@ void MainWindow::createWorkspaceTabs()
                 m_splitViewAction->setChecked(m_workspaceTabs->activeWorkspace()->isSplit());
                 if (!visible) {
                     cancelDirectoryRequests(paneId);
+                    cancelRemoteDirectoryCounts(paneId);
                     updateOperationActions();
                     return;
                 }
@@ -1828,9 +1831,13 @@ void MainWindow::handleDirectoryListed(quint64 requestId, const QString& path,
                                  rfm::core::FileSource::Ssh, request.connectionGeneration);
     FileBrowserPane* const pane = m_workspaceTabs->pane(request.paneId);
     if (expected && pane != nullptr && !pane->isHidden()) {
+        const rfm::core::BrowserLocation location{rfm::core::FileSource::Ssh,
+                                                  activeRemoteMachineId(), path};
+        if (pane->currentLocation() != location) {
+            cancelRemoteDirectoryCounts(request.paneId);
+        }
         const QString displayPath = remoteDisplayUrl(m_activeProfile, path);
-        pane->showDirectory({rfm::core::FileSource::Ssh, activeRemoteMachineId(), path},
-                            displayPath, entries, request.navigation);
+        pane->showDirectory(location, displayPath, entries, request.navigation);
         pane->setProperty("connectionGeneration", QVariant::fromValue(m_connectionGeneration));
         m_expectedDirectoryRequests.remove(request.paneId);
         setPaneBusy(request.paneId, false);
@@ -3408,6 +3415,7 @@ void MainWindow::handleLocalDirectoryListed(quint64 requestId, const QString& pa
     }
     const rfm::core::BrowserLocation location{rfm::core::FileSource::Local,
                                               QString::fromLatin1(rfm::core::LocalMachineId), path};
+    cancelRemoteDirectoryCounts(request.paneId);
     pane->showDirectory(location, QUrl::fromLocalFile(path).toDisplayString(), entries,
                         request.navigation);
     pane->setTransferContext(m_applicationInstanceId, {}, request.paneId);
@@ -3777,6 +3785,7 @@ bool MainWindow::isExpectedPaneNavigation(quint64 paneId, quint64 navigationGene
 void MainWindow::removePaneContexts(quint64 paneId)
 {
     cancelDirectoryRequests(paneId);
+    cancelRemoteDirectoryCounts(paneId);
     // Retain the active request ID until its reply releases the serialized SSH queue.
     m_directoryRequests.removeIf(
         [paneId](const auto& entry) { return entry.value().paneId == paneId; });
@@ -3832,6 +3841,26 @@ void MainWindow::cancelDirectoryRequests(quint64 paneId)
         m_localDirectoryRequests.remove(localRequestId);
     }
     setPaneBusy(paneId, false);
+}
+
+void MainWindow::cancelRemoteDirectoryCounts(quint64 paneId)
+{
+    QList<quint64> cancelled;
+    for (auto iterator = m_directoryCountRequests.cbegin();
+         iterator != m_directoryCountRequests.cend(); ++iterator) {
+        if (iterator.value().paneId == paneId &&
+            iterator.value().location.source == rfm::core::FileSource::Ssh) {
+            cancelled.push_back(iterator.key());
+        }
+    }
+    for (const quint64 requestId : std::as_const(cancelled)) {
+        const DirectoryCountRequest request = m_directoryCountRequests.value(requestId);
+        if (FileBrowserPane* const pane = m_workspaceTabs->pane(request.paneId); pane != nullptr) {
+            pane->cancelDirectoryItemCount(request.location, request.generation, request.name);
+        }
+        m_directoryCountRequests.remove(requestId);
+        emit remoteDirectoryCountCancelled(requestId);
+    }
 }
 
 QString MainWindow::listingStatusMessage(const QString& path, PaneNavigation navigation) const

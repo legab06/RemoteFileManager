@@ -79,6 +79,7 @@ class MainWindow final : public QMainWindow
     void directoryRequested(quint64 requestId, QString path);
     void localDirectoryRequested(quint64 requestId, QString path);
     void remoteDirectoryCountRequested(quint64 requestId, QString path);
+    void remoteDirectoryCountCancelled(quint64 requestId);
     void localDirectoryCountRequested(quint64 requestId, QString path);
     void localFileOperationRequested(rfm::core::LocalFileOperationRequest request);
     void localVolumesRequested();
@@ -287,6 +288,7 @@ class MainWindow final : public QMainWindow
                                                 rfm::core::FileSource source,
                                                 quint64 connectionGeneration = 0) const;
     void cancelDirectoryRequests(quint64 paneId);
+    void cancelRemoteDirectoryCounts(quint64 paneId);
     void removePaneContexts(quint64 paneId);
     void setPaneBusy(quint64 paneId, bool busy, const QString& message = {},
                      int messageTimeout = 0);

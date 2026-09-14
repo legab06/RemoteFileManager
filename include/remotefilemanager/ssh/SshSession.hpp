@@ -47,6 +47,7 @@ class SshSession final : public QObject
     void cancelPasswordAuthentication();
     void listDirectory(quint64 requestId, QString path);
     void countDirectoryEntries(quint64 requestId, QString path);
+    void cancelDirectoryCount(quint64 requestId);
     void listStorageVolumes(quint64 requestId);
     void probeStorageMounts(quint64 requestId);
     void operateVolume(rfm::core::VolumeOperationRequest request);
@@ -129,6 +130,9 @@ class SshSession final : public QObject
     void scheduleRemoteDeleteSafetyProbe(bool activityAvailable = true);
     void finishPendingRemoteDeleteForDisconnect(const QString& error);
     void stagePendingRemoteDeleteForTesting(quint64 id, QList<rfm::core::RemoteSelection> sources);
+    void startNextDirectoryCount();
+    void processDirectoryCountStep();
+    void scheduleDirectoryCountStep();
     void processTransferStep();
     void scheduleTransferStep();
     void processCopyStep();

@@ -407,6 +407,10 @@ erreur si le système ne peut pas l’ouvrir.
 - SFTP sert à lister, lire les métadonnées, transférer et renommer lorsque le protocole le permet.
 - Sur Linux distant, SFTP lit également `/proc/self/mountinfo` et `/sys/dev/block` en
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
+- Le comptage affiché pour les dossiers distants parcourt SFTP par lots bornés dans le worker
+  SSH. Chaque lot rend la main à sa boucle d'évènements ; un refresh de la même localisation
+  conserve le count actif, tandis qu'un changement de localisation, un panneau masqué ou retiré
+  annule le request ID devenu obsolète et ferme son handle SFTP.
 - La suppression récursive distante reste fail-closed face aux frontières de montage. Sous
   Linux, `/proc/self/mountinfo` correctement lu et validé est la preuve privilégiée : il
   détecte les mount points réels et les bind mounts ; une donnée absente ou malformée ne

@@ -14,6 +14,7 @@
 #include "remotefilemanager/ssh/RemoteCopyCapabilityProbe.hpp"
 #include "remotefilemanager/ssh/RemoteCopyCommand.hpp"
 #include "remotefilemanager/ssh/RemoteDeleteSafetyProbe.hpp"
+#include "remotefilemanager/ssh/RemoteDirectoryCountJob.hpp"
 #include "remotefilemanager/ssh/RemoteStorageCapabilityProbe.hpp"
 #include "remotefilemanager/ssh/RemoteStorageScanner.hpp"
 #include "remotefilemanager/ssh/RemoteVolumeService.hpp"
@@ -1953,6 +1954,11 @@ struct PendingRemoteDelete {
     bool recursive{false};
 };
 
+struct PendingDirectoryCountRequest {
+    quint64 id{0};
+    QString path;
+};
+
 bool isTerminalTransferState(rfm::core::TransferState state)
 {
     return state == rfm::core::TransferState::Completed ||
@@ -2008,6 +2014,9 @@ class SshSession::Impl final
 
     void reset()
     {
+        activeDirectoryCount.reset();
+        pendingDirectoryCounts.clear();
+        directoryCountStepScheduled = false;
         remoteCopyCapabilityProcess.reset();
         remoteCopyCapabilityPollScheduler.cancel();
         storageCapabilityProcess.reset();
@@ -2099,6 +2108,8 @@ class SshSession::Impl final
     rfm::ssh::SshCommandPollScheduler remoteDeleteSafetyPollScheduler;
     rfm::ssh::RemoteStorageCapabilityLifecycle storageCapabilityLifecycle;
     std::optional<PendingRemoteDelete> pendingRemoteDelete;
+    std::unique_ptr<rfm::ssh::RemoteDirectoryCountJob> activeDirectoryCount;
+    QQueue<PendingDirectoryCountRequest> pendingDirectoryCounts;
     rfm::ssh::SshCommandPollScheduler volumePollScheduler;
     sftp_file storageProbeFile{nullptr};
     QByteArray storageProbeData;
@@ -2111,6 +2122,7 @@ class SshSession::Impl final
     bool copyStepScheduled{false};
     bool storageStepScheduled{false};
     bool storageProbeStepScheduled{false};
+    bool directoryCountStepScheduled{false};
     bool shuttingDown{false};
     bool disconnecting{false};
     quint64 nextAuthenticationToken{0};
@@ -2773,40 +2785,106 @@ void SshSession::countDirectoryEntries(quint64 requestId, QString path)
         emit directoryCountFailed(requestId, path);
         return;
     }
-    const QByteArray encodedPath = path.toUtf8();
+    m_impl->pendingDirectoryCounts.enqueue({requestId, std::move(path)});
+    startNextDirectoryCount();
+}
+
+void SshSession::cancelDirectoryCount(quint64 requestId)
+{
+    if (m_impl->activeDirectoryCount != nullptr &&
+        m_impl->activeDirectoryCount->id() == requestId) {
+        m_impl->activeDirectoryCount.reset();
+        startNextDirectoryCount();
+        return;
+    }
+    m_impl->pendingDirectoryCounts.removeIf(
+        [requestId](const PendingDirectoryCountRequest& request) {
+            return request.id == requestId;
+        });
+}
+
+void SshSession::startNextDirectoryCount()
+{
+    if (m_impl->activeDirectoryCount != nullptr || m_impl->sftp == nullptr ||
+        m_impl->pendingDirectoryCounts.isEmpty()) {
+        return;
+    }
+    const PendingDirectoryCountRequest request = m_impl->pendingDirectoryCounts.dequeue();
+    const QByteArray encodedPath = request.path.toUtf8();
     sftp_dir directory = sftp_opendir(m_impl->sftp, encodedPath.constData());
     if (directory == nullptr) {
         const int directoryError = sftp_get_error(m_impl->sftp);
-        emit directoryCountFailed(requestId, path);
+        emit directoryCountFailed(request.id, request.path);
         if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
             ssh_is_connected(m_impl->session) == 0) {
-            fail(tr("The SSH connection was lost while opening %1.").arg(path));
+            fail(tr("The SSH connection was lost while opening %1.").arg(request.path));
+            return;
         }
+        QMetaObject::invokeMethod(this, &SshSession::startNextDirectoryCount, Qt::QueuedConnection);
         return;
     }
+    const sftp_session sftp = m_impl->sftp;
+    m_impl->activeDirectoryCount = std::make_unique<rfm::ssh::RemoteDirectoryCountJob>(
+        request.id, request.path,
+        [sftp, directory] {
+            sftp_attributes attributes = sftp_readdir(sftp, directory);
+            if (attributes == nullptr) {
+                return rfm::ssh::RemoteDirectoryCountRead{
+                    sftp_dir_eof(directory) != 0 ? rfm::ssh::RemoteDirectoryCountReadState::End
+                                                 : rfm::ssh::RemoteDirectoryCountReadState::Error,
+                    {},
+                    sftp_get_error(sftp)};
+            }
+            const QString name = QString::fromUtf8(attributes->name);
+            sftp_attributes_free(attributes);
+            return rfm::ssh::RemoteDirectoryCountRead{
+                rfm::ssh::RemoteDirectoryCountReadState::Entry, name, SSH_FX_OK};
+        },
+        [directory] { sftp_closedir(directory); },
+        [this, path = request.path](const QString& name) {
+            return m_impl->activeCopyJob != nullptr &&
+                   m_impl->activeCopyJob->hidesListingEntry(path, name);
+        });
+    scheduleDirectoryCountStep();
+}
 
-    quint64 count = 0;
-    while (sftp_attributes attributes = sftp_readdir(m_impl->sftp, directory)) {
-        const QString name = QString::fromUtf8(attributes->name);
-        if (name != QStringLiteral(".") && name != QStringLiteral("..") &&
-            (m_impl->activeCopyJob == nullptr ||
-             !m_impl->activeCopyJob->hidesListingEntry(path, name))) {
-            ++count;
-        }
-        sftp_attributes_free(attributes);
+void SshSession::scheduleDirectoryCountStep()
+{
+    if (m_impl->activeDirectoryCount != nullptr && !m_impl->directoryCountStepScheduled) {
+        m_impl->directoryCountStepScheduled = true;
+        QMetaObject::invokeMethod(this, &SshSession::processDirectoryCountStep,
+                                  Qt::QueuedConnection);
     }
-    const int directoryError =
-        sftp_dir_eof(directory) == 0 ? sftp_get_error(m_impl->sftp) : SSH_FX_OK;
-    sftp_closedir(directory);
-    if (directoryError != SSH_FX_OK) {
+}
+
+void SshSession::processDirectoryCountStep()
+{
+    m_impl->directoryCountStepScheduled = false;
+    if (m_impl->activeDirectoryCount == nullptr) {
+        startNextDirectoryCount();
+        return;
+    }
+    const rfm::ssh::RemoteDirectoryCountState state = m_impl->activeDirectoryCount->step();
+    if (state == rfm::ssh::RemoteDirectoryCountState::Pending) {
+        scheduleDirectoryCountStep();
+        return;
+    }
+    const quint64 requestId = m_impl->activeDirectoryCount->id();
+    const QString path = m_impl->activeDirectoryCount->path();
+    const quint64 count = m_impl->activeDirectoryCount->count();
+    const int directoryError = m_impl->activeDirectoryCount->error();
+    m_impl->activeDirectoryCount.reset();
+    if (state == rfm::ssh::RemoteDirectoryCountState::Completed) {
+        emit directoryCounted(requestId, path, count);
+    } else if (state == rfm::ssh::RemoteDirectoryCountState::Failed) {
         emit directoryCountFailed(requestId, path);
         if (isFatalSftpError(directoryError) || m_impl->session == nullptr ||
             ssh_is_connected(m_impl->session) == 0) {
             fail(tr("The SSH connection was lost while reading %1.").arg(path));
+            return;
         }
-        return;
     }
-    emit directoryCounted(requestId, path, count);
+    startNextDirectoryCount();
 }
 
 void SshSession::listStorageVolumes(quint64 requestId)
@@ -3576,6 +3654,8 @@ void SshSession::shutdownTransfers()
 {
     cancelStorageProbe();
     cancelStorageScan();
+    m_impl->activeDirectoryCount.reset();
+    m_impl->pendingDirectoryCounts.clear();
     m_impl->shuttingDown = true;
     if (m_impl->activeTransferJob != nullptr) {
         if (!m_impl->activeTransferJob->isFinished()) {
@@ -3686,6 +3766,8 @@ void SshSession::disconnectFromHost()
 {
     cancelStorageProbe();
     cancelStorageScan();
+    m_impl->activeDirectoryCount.reset();
+    m_impl->pendingDirectoryCounts.clear();
     m_impl->remoteCopyCapabilityProcess.reset();
     m_impl->remoteCopyCapabilityPollScheduler.cancel();
     m_impl->remoteCopyExecutionCapabilities = {};

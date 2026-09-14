@@ -71,6 +71,8 @@ class FileBrowserPane final : public QWidget
     void setPendingSelectionNames(QStringList names);
     void setDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
                                const QString& name, std::optional<quint64> count);
+    void cancelDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
+                                  const QString& name);
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
     void setTransferContext(QString applicationInstanceId,
