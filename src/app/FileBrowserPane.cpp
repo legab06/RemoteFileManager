@@ -991,6 +991,9 @@ void FileBrowserPane::handleSortIndicatorChanged(int logicalIndex, Qt::SortOrder
 
 void FileBrowserPane::applySortState()
 {
+    if (m_directoryRender.has_value()) {
+        return;
+    }
     m_applyingSortState = true;
     QHeaderView* const header = m_fileTable->horizontalHeader();
     if (m_sortColumn < 0 || m_sortColumn >= m_fileTable->columnCount()) {
@@ -1010,6 +1013,9 @@ void FileBrowserPane::applySortState()
 
 void FileBrowserPane::restoreNaturalOrder()
 {
+    if (m_directoryRender.has_value()) {
+        return;
+    }
     if (m_fileTable->rowCount() < 2) {
         return;
     }
@@ -1036,6 +1042,7 @@ void FileBrowserPane::restoreNaturalOrder()
         };
         return naturalIndex(first) < naturalIndex(second);
     });
+    const bool sortingEnabled = m_fileTable->isSortingEnabled();
     m_fileTable->setSortingEnabled(false);
     for (int row = 0; row < rows.size(); ++row) {
         for (int column = 0; column < rows.at(row).size(); ++column) {
@@ -1051,7 +1058,7 @@ void FileBrowserPane::restoreNaturalOrder()
                                                       QItemSelectionModel::Rows);
         }
     }
-    m_fileTable->setSortingEnabled(true);
+    m_fileTable->setSortingEnabled(sortingEnabled);
     updateHiddenRows();
 }
 
@@ -1774,20 +1781,33 @@ void FileBrowserPane::setDirectoryItemCount(const rfm::core::BrowserLocation& lo
 }
 
 void FileBrowserPane::cancelDirectoryItemCount(const rfm::core::BrowserLocation& location,
-                                               quint64 generation, const QString& name)
+                                               quint64 generation, const QString& name,
+                                               bool preservePending)
 {
     if (location == m_activeDirectoryCountLocation &&
         generation == m_activeDirectoryCountGeneration && name == m_activeDirectoryCountName) {
+        if (preservePending && !m_pendingDirectoryCountNames.contains(name)) {
+            m_pendingDirectoryCountNames.prepend(name);
+        }
         m_activeDirectoryCountLocation = {};
         m_activeDirectoryCountName.clear();
         m_activeDirectoryCountGeneration = 0;
     }
 }
 
+void FileBrowserPane::resumeDirectoryItemCounts()
+{
+    m_directoryItemCountsSuspended = false;
+    requestNextDirectoryItemCount();
+}
+
+void FileBrowserPane::suspendDirectoryItemCounts() { m_directoryItemCountsSuspended = true; }
+
 void FileBrowserPane::requestNextDirectoryItemCount()
 {
-    if (m_directoryRender.has_value() || !m_activeDirectoryCountName.isEmpty() ||
-        m_pendingDirectoryCountNames.isEmpty() || !m_currentLocation.isValid()) {
+    if (m_directoryItemCountsSuspended || m_directoryRender.has_value() ||
+        !m_activeDirectoryCountName.isEmpty() || m_pendingDirectoryCountNames.isEmpty() ||
+        !m_currentLocation.isValid()) {
         return;
     }
     m_activeDirectoryCountLocation = m_currentLocation;

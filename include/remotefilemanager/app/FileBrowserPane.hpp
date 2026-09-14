@@ -75,7 +75,9 @@ class FileBrowserPane final : public QWidget
     void setDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
                                const QString& name, std::optional<quint64> count);
     void cancelDirectoryItemCount(const rfm::core::BrowserLocation& location, quint64 generation,
-                                  const QString& name);
+                                  const QString& name, bool preservePending = false);
+    void suspendDirectoryItemCounts();
+    void resumeDirectoryItemCounts();
     void setInteractionEnabled(bool enabled);
     void setActiveAppearance(bool active);
     void setTransferContext(QString applicationInstanceId,
@@ -163,6 +165,7 @@ class FileBrowserPane final : public QWidget
     QString m_activeDirectoryCountName;
     quint64 m_directoryCountGeneration{0};
     quint64 m_activeDirectoryCountGeneration{0};
+    bool m_directoryItemCountsSuspended{false};
     QList<rfm::core::BrowserLocation> m_backHistory;
     QList<rfm::core::BrowserLocation> m_forwardHistory;
     QString m_applicationInstanceId;

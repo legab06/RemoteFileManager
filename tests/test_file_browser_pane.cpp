@@ -53,6 +53,7 @@ class FileBrowserPaneTest final : public QObject
     void preservesSshDirectoryCountsAcrossRefresh();
     void rendersLargeDirectoryInCooperativeBatches();
     void replacesObsoleteDirectoryRender();
+    void keepsSortingDisabledUntilLargeDirectoryRenderFinishes();
     void rendersSmallDirectorySynchronously();
     void rubberBandSelectsMultipleLocalRows();
     void controlRubberBandTogglesRemoteRows();
@@ -1185,6 +1186,49 @@ void FileBrowserPaneTest::replacesObsoleteDirectoryRender()
     QCOMPARE(pane.fileTable()->rowCount(), 2);
     QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("new-one.txt"));
     QCOMPARE(pane.fileTable()->item(1, 0)->text(), QStringLiteral("new-two.txt"));
+}
+
+void FileBrowserPaneTest::keepsSortingDisabledUntilLargeDirectoryRenderFinishes()
+{
+    QList<rfm::core::RemoteEntry> entries;
+    entries.reserve(513);
+    for (int index = 0; index < 513; ++index) {
+        entries.push_back({QStringLiteral("entry-%1").arg(513 - index, 4, 10, QLatin1Char{'0'}),
+                           static_cast<quint64>(index),
+                           {},
+                           false,
+                           false,
+                           false});
+    }
+
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+    QCOMPARE(pane.fileTable()->rowCount(), 64);
+    QVERIFY(!pane.fileTable()->isSortingEnabled());
+
+    QHeaderView* const header = pane.fileTable()->horizontalHeader();
+    header->setSortIndicator(0, Qt::DescendingOrder);
+    QCOMPARE(header->sortIndicatorSection(), 0);
+    QCOMPARE(header->sortIndicatorOrder(), Qt::DescendingOrder);
+    QVERIFY(!pane.fileTable()->isSortingEnabled());
+
+    QTRY_COMPARE(pane.fileTable()->rowCount(), entries.size());
+    QVERIFY(pane.fileTable()->isSortingEnabled());
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("entry-0513"));
+
+    pane.showDirectory(QStringLiteral("/srv"), QStringLiteral("/srv"), entries);
+    QCOMPARE(pane.fileTable()->rowCount(), 64);
+    header->setSortIndicator(0, Qt::DescendingOrder);
+    header->setSortIndicator(0, Qt::AscendingOrder);
+    header->setSortIndicator(-1, Qt::AscendingOrder);
+    QVERIFY(!pane.fileTable()->isSortingEnabled());
+    QTRY_COMPARE(pane.fileTable()->rowCount(), entries.size());
+    QCOMPARE(header->sortIndicatorSection(), -1);
+    QVERIFY(!header->isSortIndicatorShown());
+    QCOMPARE(pane.fileTable()->item(0, 0)->text(), QStringLiteral("entry-0513"));
+    QCOMPARE(pane.fileTable()->item(512, 0)->text(), QStringLiteral("entry-0001"));
 }
 
 void FileBrowserPaneTest::rendersSmallDirectorySynchronously()

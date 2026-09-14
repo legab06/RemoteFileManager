@@ -512,6 +512,7 @@ class MainWindowTest final : public QObject
     void refreshTimerIsConnectionAwareAndCoalescesListings();
     void manualRefreshRelistsWithoutRebuildingIdenticalRemoteDirectory();
     void keepsRemoteDirectoryCountAcrossSameLocationRefresh();
+    void suspendsRemoteDirectoryCountsWhilePaneIsHidden();
     void refreshesRemoteDirectoryWhenListingChanges_data();
     void refreshesRemoteDirectoryWhenListingChanges();
     void keepsLargeRemoteDirectoryRenderForIdenticalListing();
@@ -3749,6 +3750,7 @@ void MainWindowTest::keepsRemoteDirectoryCountAcrossSameLocationRefresh()
         &window, "handleDirectoryListed", Qt::DirectConnection, Q_ARG(quint64, listingRequestId),
         Q_ARG(QString, QStringLiteral("/srv")), Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
     QCOMPARE(countCancellations.size(), 0);
+    QCOMPARE(countRequests.size(), 1);
 
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleDirectoryCounted", Qt::DirectConnection, Q_ARG(quint64, countRequestId),
@@ -3758,6 +3760,48 @@ void MainWindowTest::keepsRemoteDirectoryCountAcrossSameLocationRefresh()
     auto* const pane = window.findChild<rfm::app::FileBrowserPane*>();
     QVERIFY(pane != nullptr);
     QCOMPARE(pane->fileTable()->item(0, 1)->text(), QStringLiteral("99 items"));
+}
+
+void MainWindowTest::suspendsRemoteDirectoryCountsWhilePaneIsHidden()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy countRequests(&window, &rfm::app::MainWindow::remoteDirectoryCountRequested);
+    QSignalSpy countCancellations(&window, &rfm::app::MainWindow::remoteDirectoryCountCancelled);
+    const QList<rfm::core::RemoteEntry> entries{
+        {QStringLiteral("first"), 0, {}, true, false, false},
+        {QStringLiteral("second"), 0, {}, true, false, false}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("/srv")),
+                                      Q_ARG(QList<rfm::core::RemoteEntry>, entries)));
+    QTRY_COMPARE(countRequests.size(), 1);
+
+    auto* const tabs = window.findChild<rfm::app::WorkspaceTabs*>();
+    QVERIFY(tabs != nullptr);
+    auto* const workspace = tabs->activeWorkspace();
+    QVERIFY(workspace != nullptr);
+    auto* const remotePane = workspace->activePane();
+    workspace->setSplit(true);
+    workspace->activateOtherPane();
+    workspace->setSplit(false);
+    QTRY_COMPARE(countCancellations.size(), 1);
+    QCoreApplication::processEvents();
+    QCOMPARE(countRequests.size(), 1);
+
+    workspace->setSplit(true);
+    QTRY_COMPARE(countRequests.size(), 2);
+    QCOMPARE(countRequests.at(1).at(1).toString(), QStringLiteral("/srv/first"));
+    QVERIFY(!remotePane->isHidden());
+
+    const quint64 resumedRequestId = countRequests.at(1).at(0).toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleDirectoryCounted", Qt::DirectConnection, Q_ARG(quint64, resumedRequestId),
+        Q_ARG(QString, QStringLiteral("/srv/first")), Q_ARG(quint64, 7)));
+    workspace->setSplit(false);
+    QCoreApplication::processEvents();
+    QCOMPARE(countRequests.size(), 2);
 }
 
 void MainWindowTest::refreshesRemoteDirectoryWhenListingChanges_data()

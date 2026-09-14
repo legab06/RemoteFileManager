@@ -288,7 +288,7 @@ class MainWindow final : public QMainWindow
                                                 rfm::core::FileSource source,
                                                 quint64 connectionGeneration = 0) const;
     void cancelDirectoryRequests(quint64 paneId);
-    void cancelRemoteDirectoryCounts(quint64 paneId);
+    void cancelRemoteDirectoryCounts(quint64 paneId, bool preservePending = false);
     void removePaneContexts(quint64 paneId);
     void setPaneBusy(quint64 paneId, bool busy, const QString& message = {},
                      int messageTimeout = 0);

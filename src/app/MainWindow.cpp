@@ -681,8 +681,12 @@ void MainWindow::createWorkspaceTabs()
                 const QSignalBlocker blocker(m_splitViewAction);
                 m_splitViewAction->setChecked(m_workspaceTabs->activeWorkspace()->isSplit());
                 if (!visible) {
+                    if (FileBrowserPane* const pane = m_workspaceTabs->pane(paneId);
+                        pane != nullptr) {
+                        pane->suspendDirectoryItemCounts();
+                    }
                     cancelDirectoryRequests(paneId);
-                    cancelRemoteDirectoryCounts(paneId);
+                    cancelRemoteDirectoryCounts(paneId, true);
                     updateOperationActions();
                     return;
                 }
@@ -700,6 +704,7 @@ void MainWindow::createWorkspaceTabs()
                     requestLocationListing(paneId, activePane->currentLocation(), true,
                                            PaneNavigation::Initial);
                 }
+                pane->resumeDirectoryItemCounts();
                 updateOperationActions();
             });
 }
@@ -3845,7 +3850,7 @@ void MainWindow::cancelDirectoryRequests(quint64 paneId)
     setPaneBusy(paneId, false);
 }
 
-void MainWindow::cancelRemoteDirectoryCounts(quint64 paneId)
+void MainWindow::cancelRemoteDirectoryCounts(quint64 paneId, bool preservePending)
 {
     QList<quint64> cancelled;
     for (auto iterator = m_directoryCountRequests.cbegin();
@@ -3858,7 +3863,8 @@ void MainWindow::cancelRemoteDirectoryCounts(quint64 paneId)
     for (const quint64 requestId : std::as_const(cancelled)) {
         const DirectoryCountRequest request = m_directoryCountRequests.value(requestId);
         if (FileBrowserPane* const pane = m_workspaceTabs->pane(request.paneId); pane != nullptr) {
-            pane->cancelDirectoryItemCount(request.location, request.generation, request.name);
+            pane->cancelDirectoryItemCount(request.location, request.generation, request.name,
+                                           preservePending);
         }
         m_directoryCountRequests.remove(requestId);
         emit remoteDirectoryCountCancelled(requestId);
