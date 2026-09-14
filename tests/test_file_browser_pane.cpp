@@ -61,6 +61,13 @@ class FileBrowserPaneTest final : public QObject
     void dragWithActionModifierPreservesMultipleSelection_data();
     void dragWithActionModifierPreservesMultipleSelection();
     void emitsNavigationIntentions();
+    void pathEditNavigatesAndRestoresCommittedRemoteLocation();
+    void pathEditAcceptsCurrentSftpUri();
+    void pathEditRejectsForeignOrUnsupportedSftpUri_data();
+    void pathEditRejectsForeignOrUnsupportedSftpUri();
+    void pathEditAcceptsLocalFileUri();
+    void pathEditRejectsEncodedNulQueryAndFragmentLocalFileUris();
+    void pathEditExpandsLocalHomeAndRejectsRelativePaths();
     void requestsOpeningLocalFilesWithoutChangingDirectoryOrSshBehavior();
     void preparesContextSelectionBeforeEmittingIntent();
     void buildsPropertiesForTheEntryUnderTheContextClick();
@@ -1454,6 +1461,184 @@ void FileBrowserPaneTest::emitsNavigationIntentions()
     QVERIFY(QMetaObject::invokeMethod(pane.fileTable(), "cellDoubleClicked", Qt::DirectConnection,
                                       Q_ARG(int, 1), Q_ARG(int, 0)));
     QCOMPARE(navigation.size(), 0);
+}
+
+void FileBrowserPaneTest::pathEditNavigatesAndRestoresCommittedRemoteLocation()
+{
+    const rfm::core::BrowserLocation initialLocation{
+        rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/home/user")};
+    const QString initialDisplay = QStringLiteral("sftp://user@host/home/user");
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    pane.showDirectory(initialLocation, initialDisplay, {}, rfm::app::PaneNavigation::Initial);
+    QVERIFY(!pane.pathEdit()->isReadOnly());
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    pane.pathEdit()->setFocus();
+    pane.pathEdit()->setText(QStringLiteral("/mnt/storage"));
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(navigation.constFirst().at(0).value<rfm::core::BrowserLocation>(),
+             (rfm::core::BrowserLocation{rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                                         QStringLiteral("/mnt/storage")}));
+    QCOMPARE(navigation.constFirst().at(1).value<rfm::app::PaneNavigation>(),
+             rfm::app::PaneNavigation::Normal);
+    QCOMPARE(pane.pathEdit()->text(), initialDisplay);
+
+    const QString acceptedDisplay = QStringLiteral("sftp://user@host/mnt/storage");
+    pane.showDirectory(
+        {rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/mnt/storage")},
+        acceptedDisplay, {}, rfm::app::PaneNavigation::Normal);
+    QCOMPARE(pane.pathEdit()->text(), acceptedDisplay);
+
+    pane.pathEdit()->setText(QStringLiteral("/missing"));
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+    QCOMPARE(navigation.size(), 2);
+    QCOMPARE(pane.pathEdit()->text(), acceptedDisplay);
+
+    pane.pathEdit()->setText(QStringLiteral("/draft"));
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Escape);
+    QCOMPARE(pane.pathEdit()->text(), acceptedDisplay);
+}
+
+void FileBrowserPaneTest::pathEditAcceptsCurrentSftpUri()
+{
+    const rfm::core::BrowserLocation initialLocation{
+        rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/home/user")};
+    const QString initialDisplay = QStringLiteral("sftp://user@host:22/home/user");
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory(initialLocation, initialDisplay, {}, rfm::app::PaneNavigation::Initial);
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    pane.pathEdit()->setText(QStringLiteral("sftp://user@HOST:22/home/user/test"));
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(navigation.constFirst().at(0).value<rfm::core::BrowserLocation>(),
+             (rfm::core::BrowserLocation{rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                                         QStringLiteral("/home/user/test")}));
+    QCOMPARE(pane.pathEdit()->text(), initialDisplay);
+
+    const QString acceptedDisplay = QStringLiteral("sftp://user@host:22/home/user/test");
+    pane.showDirectory({rfm::core::FileSource::Ssh, QStringLiteral("remote-id"),
+                        QStringLiteral("/home/user/test")},
+                       acceptedDisplay, {}, rfm::app::PaneNavigation::Normal);
+    QCOMPARE(pane.pathEdit()->text(), acceptedDisplay);
+    QCOMPARE(pane.currentPath(), QStringLiteral("/home/user/test"));
+}
+
+void FileBrowserPaneTest::pathEditRejectsForeignOrUnsupportedSftpUri_data()
+{
+    QTest::addColumn<QString>("enteredPath");
+
+    QTest::newRow("other-host") << QStringLiteral("sftp://user@other.test:22/home/user/test");
+    QTest::newRow("other-port") << QStringLiteral("sftp://user@host:2222/home/user/test");
+    QTest::newRow("other-user") << QStringLiteral("sftp://other@host:22/home/user/test");
+    QTest::newRow("unsupported-scheme") << QStringLiteral("ssh://user@host:22/home/user/test");
+    QTest::newRow("encoded-nul") << QStringLiteral("sftp://user@host:22/home/user/test%00foo");
+}
+
+void FileBrowserPaneTest::pathEditRejectsForeignOrUnsupportedSftpUri()
+{
+    QFETCH(QString, enteredPath);
+
+    const rfm::core::BrowserLocation initialLocation{
+        rfm::core::FileSource::Ssh, QStringLiteral("remote-id"), QStringLiteral("/home/user")};
+    const QString initialDisplay = QStringLiteral("sftp://user@host:22/home/user");
+    rfm::app::FileBrowserPane pane;
+    pane.showDirectory(initialLocation, initialDisplay, {}, rfm::app::PaneNavigation::Initial);
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    pane.pathEdit()->setText(enteredPath);
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+
+    QCOMPARE(navigation.size(), 0);
+    QCOMPARE(pane.currentLocation(), initialLocation);
+    QCOMPARE(pane.pathEdit()->text(), initialDisplay);
+}
+
+void FileBrowserPaneTest::pathEditAcceptsLocalFileUri()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString initialPath = temporary.path();
+    const QString targetPath = QDir(initialPath).filePath(QStringLiteral("test"));
+    const rfm::core::BrowserLocation initialLocation{
+        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId), initialPath};
+    rfm::app::FileBrowserPane pane;
+    const QString initialDisplay = QUrl::fromLocalFile(initialPath).toDisplayString();
+    pane.showDirectory(initialLocation, initialDisplay, {}, rfm::app::PaneNavigation::Initial);
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    pane.pathEdit()->setText(QUrl::fromLocalFile(targetPath).toDisplayString());
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(navigation.constFirst().at(0).value<rfm::core::BrowserLocation>(),
+             (rfm::core::BrowserLocation{rfm::core::FileSource::Local,
+                                         QString::fromLatin1(rfm::core::LocalMachineId),
+                                         QDir::cleanPath(targetPath)}));
+    QCOMPARE(pane.pathEdit()->text(), initialDisplay);
+}
+
+void FileBrowserPaneTest::pathEditRejectsEncodedNulQueryAndFragmentLocalFileUris()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString initialPath = temporary.path();
+    const rfm::core::BrowserLocation initialLocation{
+        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId), initialPath};
+    rfm::app::FileBrowserPane pane;
+    const QString initialDisplay = QUrl::fromLocalFile(initialPath).toDisplayString();
+    pane.showDirectory(initialLocation, initialDisplay, {}, rfm::app::PaneNavigation::Initial);
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    QUrl queryUrl = QUrl::fromLocalFile(QDir(initialPath).filePath(QStringLiteral("test")));
+    queryUrl.setQuery(QStringLiteral("query"));
+    QUrl fragmentUrl = QUrl::fromLocalFile(QDir(initialPath).filePath(QStringLiteral("test")));
+    fragmentUrl.setFragment(QStringLiteral("fragment"));
+    const QString encodedPath =
+        QUrl::fromLocalFile(QDir(initialPath).filePath(QStringLiteral("test")))
+            .toString(QUrl::FullyEncoded);
+    for (const QString& enteredPath :
+         {encodedPath + QStringLiteral("%00foo"), queryUrl.toString(QUrl::FullyEncoded),
+          fragmentUrl.toString(QUrl::FullyEncoded)}) {
+        pane.pathEdit()->setText(enteredPath);
+        QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+
+        QCOMPARE(navigation.size(), 0);
+        QCOMPARE(pane.currentLocation(), initialLocation);
+        QCOMPARE(pane.pathEdit()->text(), initialDisplay);
+    }
+}
+
+void FileBrowserPaneTest::pathEditExpandsLocalHomeAndRejectsRelativePaths()
+{
+    const rfm::core::BrowserLocation initialLocation{rfm::core::FileSource::Local,
+                                                     QString::fromLatin1(rfm::core::LocalMachineId),
+                                                     QStringLiteral("/tmp")};
+    rfm::app::FileBrowserPane pane;
+    pane.resize(640, 320);
+    pane.show();
+    pane.showDirectory(initialLocation, QStringLiteral("file:///tmp"), {},
+                       rfm::app::PaneNavigation::Initial);
+    QSignalSpy navigation(&pane, &rfm::app::FileBrowserPane::locationNavigationRequested);
+
+    pane.pathEdit()->setFocus();
+    pane.pathEdit()->setText(QStringLiteral("~/Documents"));
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+    QCOMPARE(navigation.size(), 1);
+    const auto requested = navigation.constFirst().at(0).value<rfm::core::BrowserLocation>();
+    QCOMPARE(requested.source, rfm::core::FileSource::Local);
+    QCOMPARE(requested.machineId, QString::fromLatin1(rfm::core::LocalMachineId));
+    QCOMPARE(requested.path, QDir::cleanPath(QDir(QDir::homePath()).filePath("Documents")));
+    QCOMPARE(pane.pathEdit()->text(), QStringLiteral("file:///tmp"));
+
+    pane.pathEdit()->setText(QStringLiteral("relative/path"));
+    QTest::keyClick(pane.pathEdit(), Qt::Key_Return);
+    QCOMPARE(navigation.size(), 1);
+    QCOMPARE(pane.pathEdit()->text(), QStringLiteral("file:///tmp"));
 }
 
 void FileBrowserPaneTest::requestsOpeningLocalFilesWithoutChangingDirectoryOrSshBehavior()
