@@ -368,6 +368,7 @@ class MainWindow final : public QMainWindow
         quint64 paneId{0};
         QString path;
         PaneNavigation navigation{PaneNavigation::Refresh};
+        bool retryDirectoryCounts{false};
         bool treeRequest{false};
         QString profileId;
         quint64 connectionGeneration{0};

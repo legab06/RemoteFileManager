@@ -1590,7 +1590,8 @@ void FileBrowserPane::processDirectoryRenderStep()
                 ? std::numeric_limits<qint64>::max()
                 : static_cast<qint64>(entry.size);
         const bool countableDirectory = entry.directory && !entry.symbolicLink;
-        if (countableDirectory) {
+        if (countableDirectory && !m_pendingDirectoryCountNames.contains(entry.name) &&
+            entry.name != m_activeDirectoryCountName) {
             m_pendingDirectoryCountNames.push_back(entry.name);
         }
         const auto preservedCount = render.preservedDirectoryCounts.constFind(entry.name);
@@ -1793,6 +1794,31 @@ void FileBrowserPane::cancelDirectoryItemCount(const rfm::core::BrowserLocation&
         m_activeDirectoryCountName.clear();
         m_activeDirectoryCountGeneration = 0;
     }
+}
+
+void FileBrowserPane::retryUnknownDirectoryItemCounts()
+{
+    if (!m_currentLocation.isValid()) {
+        return;
+    }
+    QSet<QString> scheduledNames(m_pendingDirectoryCountNames.cbegin(),
+                                 m_pendingDirectoryCountNames.cend());
+    if (!m_activeDirectoryCountName.isEmpty()) {
+        scheduledNames.insert(m_activeDirectoryCountName);
+    }
+    for (int row = 0; row < m_fileTable->rowCount(); ++row) {
+        const QTableWidgetItem* const nameItem = m_fileTable->item(row, 0);
+        const QTableWidgetItem* const sizeItem = m_fileTable->item(row, 1);
+        if (nameItem == nullptr || sizeItem == nullptr || !nameItem->data(Qt::UserRole).toBool() ||
+            nameItem->data(Qt::UserRole + 1).toBool() ||
+            sizeItem->data(SortValueKnownRole).toBool() ||
+            scheduledNames.contains(nameItem->text())) {
+            continue;
+        }
+        m_pendingDirectoryCountNames.push_back(nameItem->text());
+        scheduledNames.insert(nameItem->text());
+    }
+    requestNextDirectoryItemCount();
 }
 
 void FileBrowserPane::resumeDirectoryItemCounts()

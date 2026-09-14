@@ -46,8 +46,23 @@
 #include <optional>
 #include <utility>
 
+namespace rfm::ssh
+{
+
+enum class RemoteMountInfoState { Unavailable, Available, Invalid };
+
+struct RemoteMountInfoResult {
+    RemoteMountInfoState state{RemoteMountInfoState::Unavailable};
+    QByteArray contents;
+};
+
+} // namespace rfm::ssh
+
 namespace
 {
+
+using rfm::ssh::RemoteMountInfoResult;
+using rfm::ssh::RemoteMountInfoState;
 
 QEvent::Type volumeAuthenticationEventType()
 {
@@ -165,13 +180,6 @@ std::optional<quint64> remoteFileSystemId(sftp_session sftp, const QString& path
     sftp_statvfs_free(attributes);
     return id == 0 ? std::nullopt : std::optional<quint64>{id};
 }
-
-enum class RemoteMountInfoState { Unavailable, Available, Invalid };
-
-struct RemoteMountInfoResult {
-    RemoteMountInfoState state{RemoteMountInfoState::Unavailable};
-    QByteArray contents;
-};
 
 RemoteMountInfoResult remoteMountInfo(sftp_session sftp)
 {
@@ -2830,7 +2838,8 @@ void SshSession::processRemoteDeleteSafetyProbe()
         poll.result.has_value()
             ? rfm::ssh::RemoteDeleteSafetyProbe::windowsMountPointStates(*poll.result)
             : QHash<QString, rfm::core::RemoteMountPointState>{};
-    startRemoteRemoveJob(pending.id, std::move(pending.sources), pending.recursive, windowsStates);
+    startRemoteRemoveJob(pending.id, std::move(pending.sources), pending.recursive,
+                         std::move(pending.mountInfo), windowsStates);
 }
 
 void SshSession::finishPendingRemoteDeleteForDisconnect(const QString& error)
@@ -2848,15 +2857,16 @@ void SshSession::finishPendingRemoteDeleteForDisconnect(const QString& error)
 
 void SshSession::startRemoteRemoveJob(
     quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive,
-    QHash<QString, rfm::core::RemoteMountPointState> windowsStates)
+    RemoteMountInfoResult mountInfo, QHash<QString, rfm::core::RemoteMountPointState> windowsStates)
 {
     if (m_impl->sftp == nullptr) {
         emit operationFinished(
             rfm::ssh::detail::rejectedRemoteRemoval(id, sources, tr("No active SFTP connection.")));
         return;
     }
-    const RemoteMountInfoResult mountInfo =
-        recursive ? remoteMountInfo(m_impl->sftp) : RemoteMountInfoResult{};
+    if (!recursive) {
+        mountInfo = {};
+    }
     m_impl->remoteRemoveBackend =
         std::make_unique<SftpRemoteRemoveBackend>(m_impl->sftp, mountInfo, windowsStates);
     m_impl->testRemoteRemoveBackend = false;
@@ -3724,7 +3734,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
     for (const rfm::core::RemoteSelection& source : std::as_const(sources)) {
         const QString path = rfm::core::RemotePath::normalize(source.path);
         if (rfm::core::RemotePath::isProtected(path)) {
-            startRemoteRemoveJob(id, std::move(sources), recursive, {});
+            startRemoteRemoveJob(id, std::move(sources), recursive, std::move(mountInfo), {});
             return;
         }
         if (source.directory) {
@@ -3737,7 +3747,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
         m_impl->currentServerCapabilities.storage.windowsPowerShell ==
             rfm::core::CapabilitySupport::Supported;
     if (!windowsProbeAvailable) {
-        startRemoteRemoveJob(id, std::move(sources), recursive, {});
+        startRemoteRemoveJob(id, std::move(sources), recursive, std::move(mountInfo), {});
         return;
     }
 
@@ -3745,7 +3755,7 @@ void SshSession::removeEntries(quint64 id, QList<rfm::core::RemoteSelection> sou
     m_impl->remoteDeleteSafetyProcess = std::make_unique<SshCommandProcess>(m_impl->session);
     if (command.isEmpty() || !m_impl->remoteDeleteSafetyProcess->start(command)) {
         m_impl->remoteDeleteSafetyProcess.reset();
-        startRemoteRemoveJob(id, std::move(sources), recursive, {});
+        startRemoteRemoveJob(id, std::move(sources), recursive, std::move(mountInfo), {});
         return;
     }
     m_impl->pendingRemoteDelete = {id, std::move(sources), mountInfo, recursive};

@@ -412,8 +412,11 @@ erreur si le système ne peut pas l’ouvrir.
   lecture seule pour découvrir les volumes, sans commande shell ni privilège accru.
 - Le comptage affiché pour les dossiers distants parcourt SFTP par lots bornés dans le worker
   SSH. Chaque lot rend la main à sa boucle d'évènements ; un refresh de la même localisation
-  conserve le count actif, tandis qu'un changement de localisation, un panneau masqué ou retiré
-  annule le request ID devenu obsolète et ferme son handle SFTP.
+  conserve le count actif. Un auto-refresh identique ne relance aucun count ; un F5 identique
+  retente uniquement les counts absents ou échoués, sans recompter ceux déjà connus. Un changement
+  de localisation ou le retrait d'un panneau annule le request ID devenu obsolète et ferme son
+  handle SFTP ; un panneau masqué temporairement suspend ses counts en attente et les reprend à
+  sa réapparition.
 - La suppression récursive distante reste fail-closed face aux frontières de montage. Sous
   Linux, `/proc/self/mountinfo` correctement lu et validé est la preuve privilégiée : il
   détecte les mount points réels et les bind mounts ; une donnée absente ou malformée ne
@@ -423,8 +426,9 @@ erreur si le système ne peut pas l’ouvrir.
   PowerShell n'est lancé que lorsque les capabilities runtime l'ont déjà établi comme
   supporté ; son parcours est en lecture seule et un reparse point est une frontière. Une
   erreur, un timeout ou un résultat incomplet reste `Unknown`, donc refuse la suppression
-  récursive. Les fichiers réguliers ne traversent pas d'arbre et ne requièrent pas ce
-  preflight de frontières.
+  récursive. Le snapshot SFTP obtenu au preflight est transmis au job et réutilisé après le
+  probe Windows ; il n'est pas relu avant la suppression. Les fichiers réguliers ne traversent
+  pas d'arbre et ne requièrent pas ce preflight de frontières.
 - Les copies entre deux chemins du même serveur restent côté serveur pour éviter un aller-retour des données par le client.
 - `cp` n’expose pas nativement une progression exploitable. Une copie active affiche donc une
   progression indéterminée honnête ; aucun pourcentage n'est estimé ou fabriqué.

@@ -29,6 +29,7 @@ namespace rfm::ssh
 
 enum class PasswordAuthenticationReason;
 class RemoteRemoveBackend;
+struct RemoteMountInfoResult;
 
 class SshSessionTransferTest;
 
@@ -134,6 +135,7 @@ class SshSession final : public QObject
     void scheduleRemoteDeleteSafetyProbe(bool activityAvailable = true);
     void finishPendingRemoteDeleteForDisconnect(const QString& error);
     void startRemoteRemoveJob(quint64 id, QList<rfm::core::RemoteSelection> sources, bool recursive,
+                              RemoteMountInfoResult mountInfo,
                               QHash<QString, rfm::core::RemoteMountPointState> windowsStates);
     void processRemoteRemoveStep();
     void scheduleRemoteRemoveStep();

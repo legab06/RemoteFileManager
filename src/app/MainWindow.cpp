@@ -1845,6 +1845,8 @@ void MainWindow::handleDirectoryListed(quint64 requestId, const QString& path,
             const QString displayPath = remoteDisplayUrl(m_activeProfile, path);
             pane->showDirectory(location, displayPath, entries, request.navigation);
             pane->setProperty("connectionGeneration", QVariant::fromValue(m_connectionGeneration));
+        } else if (request.retryDirectoryCounts) {
+            pane->retryUnknownDirectoryItemCounts();
         }
         m_expectedDirectoryRequests.remove(request.paneId);
         setPaneBusy(request.paneId, false);
@@ -3301,6 +3303,7 @@ void MainWindow::requestDirectoryListing(quint64 paneId, const QString& path, bo
     request.paneId = paneId;
     request.path = path;
     request.navigation = navigation;
+    request.retryDirectoryCounts = showBusy && navigation == PaneNavigation::Refresh;
     request.connectionGeneration = m_connectionGeneration;
     request.navigationGeneration = navigationGeneration;
     m_directoryRequests.insert(requestId, std::move(request));

@@ -3,6 +3,8 @@
 #include "remotefilemanager/core/RemoteFileOperations.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 
+#include <QCoreApplication>
+
 #include <memory>
 #include <vector>
 
@@ -115,13 +117,14 @@ class RemoteRemoveJob final
                 return;
             }
             if (!rfm::core::RemotePath::isValidName(read.name)) {
-                finishPreflightFailure(
-                    QStringLiteral("The remote removal tree contains an invalid entry name."));
+                finishPreflightFailure(QCoreApplication::translate(
+                    "RemoteDelete", "The remote removal tree contains an invalid entry name."));
                 return;
             }
             const QString path = rfm::core::RemotePath::join(frame.path, read.name);
             if (path.isEmpty() || rfm::core::RemotePath::isProtected(path)) {
-                finishPreflightFailure(QStringLiteral("Invalid or protected remote path."));
+                finishPreflightFailure(QCoreApplication::translate(
+                    "RemoteDelete", "Invalid or protected remote path."));
                 return;
             }
             if (!read.directory) {
@@ -145,7 +148,8 @@ class RemoteRemoveJob final
         const rfm::core::RemoteSelection& source = m_sources.at(sourceIndex);
         const QString path = rfm::core::RemotePath::normalize(source.path);
         if (path.isEmpty() || rfm::core::RemotePath::isProtected(path)) {
-            finishPreflightFailure(QStringLiteral("Invalid or protected remote path."));
+            finishPreflightFailure(
+                QCoreApplication::translate("RemoteDelete", "Invalid or protected remote path."));
             return;
         }
         if (!source.directory) {
@@ -153,8 +157,8 @@ class RemoteRemoveJob final
             return;
         }
         if (!m_recursive) {
-            finishPreflightFailure(
-                QStringLiteral("Deleting a folder requires recursive confirmation."));
+            finishPreflightFailure(QCoreApplication::translate(
+                "RemoteDelete", "Deleting a folder requires recursive confirmation."));
             return;
         }
         openPreflightDirectory(path, sourceIndex);
@@ -226,23 +230,27 @@ class RemoteRemoveJob final
         }
         switch (result.error) {
         case rfm::core::RemoteBackendError::NotFound:
-            return QStringLiteral("The remote item was not found.");
+            return QCoreApplication::translate("RemoteDelete", "The remote item was not found.");
         case rfm::core::RemoteBackendError::AlreadyExists:
-            return QStringLiteral("A remote item already exists at this destination.");
+            return QCoreApplication::translate("RemoteDelete",
+                                               "A remote item already exists at this destination.");
         case rfm::core::RemoteBackendError::PermissionDenied:
-            return QStringLiteral("Permission denied by the server.");
+            return QCoreApplication::translate("RemoteDelete", "Permission denied by the server.");
         case rfm::core::RemoteBackendError::Unsupported:
-            return QStringLiteral("This operation is not supported by the server.");
+            return QCoreApplication::translate("RemoteDelete",
+                                               "This operation is not supported by the server.");
         case rfm::core::RemoteBackendError::InvalidPath:
-            return QStringLiteral("Invalid or protected remote path.");
+            return QCoreApplication::translate("RemoteDelete", "Invalid or protected remote path.");
         case rfm::core::RemoteBackendError::CrossDevice:
-            return QStringLiteral("The source and destination are on different filesystems.");
+            return QCoreApplication::translate(
+                "RemoteDelete", "The source and destination are on different filesystems.");
         case rfm::core::RemoteBackendError::Failure:
-            return QStringLiteral("The remote operation failed.");
+            return QCoreApplication::translate("RemoteDelete", "The remote operation failed.");
         case rfm::core::RemoteBackendError::None:
-            return QStringLiteral("The remote removal preflight failed.");
+            return QCoreApplication::translate("RemoteDelete",
+                                               "The remote removal preflight failed.");
         }
-        return QStringLiteral("The remote removal preflight failed.");
+        return QCoreApplication::translate("RemoteDelete", "The remote removal preflight failed.");
     }
 
     RemoteRemoveBackend& m_backend;
