@@ -1,5 +1,6 @@
 #include "remotefilemanager/app/NavigationTree.hpp"
 
+#include <QAbstractItemDelegate>
 #include <QDir>
 #include <QFileIconProvider>
 #include <QFileInfo>
@@ -9,12 +10,14 @@
 #include <QSet>
 #include <QSignalSpy>
 #include <QStandardPaths>
+#include <QStyleOptionViewItem>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextDocument>
 #include <QToolButton>
 #include <QTreeWidget>
 
+#include <cmath>
 #include <utility>
 
 class NavigationTreeTest final : public QObject
@@ -39,6 +42,9 @@ class NavigationTreeTest final : public QObject
     void preservesLoadedTreeStateDuringStorageRefresh();
     void escapesTooltipMetadataAndDisambiguatesLabels();
     void exposesOnlyAppropriateLocalVolumeActions();
+    void calculatesDisplayableStorageUsage();
+    void calculatesStorageUsageBarGeometry();
+    void adjustsOnlyRowsWithDisplayableStorageUsage();
     void showsPerVolumeBusyStates();
     void opensVolumeOnlyFromRefreshedMountPoint();
     void toleratesVolumeDisappearingDuringOperation();
@@ -129,6 +135,17 @@ contextActionsFor(rfm::app::NavigationTree& navigation, QTreeWidgetItem* item)
     navigation.tree()->scrollToItem(item);
     QApplication::processEvents();
     return navigation.contextActionsAt(navigation.tree()->visualItemRect(item).center());
+}
+
+QSize itemSizeHint(QTreeWidget* tree, QTreeWidgetItem* item)
+{
+    const QModelIndex index = tree->indexFromItem(item);
+    QStyleOptionViewItem option;
+    option.initFrom(tree);
+    option.font = item->font(0);
+    option.fontMetrics = QFontMetrics(option.font);
+    option.decorationSize = tree->iconSize();
+    return tree->itemDelegate()->sizeHint(option, index);
 }
 
 rfm::app::RemoteMachineDescriptor remoteMachine(const QString& id,
@@ -1000,6 +1017,111 @@ void NavigationTreeTest::exposesOnlyAppropriateLocalVolumeActions()
     QVERIFY(!unmountButton->isVisibleTo(&navigation));
 }
 
+void NavigationTreeTest::calculatesDisplayableStorageUsage()
+{
+    rfm::core::StorageVolume volume;
+    volume.mounted = true;
+    volume.bytesTotal = 100;
+    volume.bytesAvailable = 25;
+    auto usage = rfm::core::storageUsage(volume);
+    QVERIFY(usage.has_value());
+    QCOMPARE(usage->used, quint64{75});
+    QCOMPARE(usage->available, quint64{25});
+    QCOMPARE(usage->percentage, 75);
+
+    volume.bytesAvailable = 75;
+    usage = rfm::core::storageUsage(volume);
+    QVERIFY(usage.has_value());
+    QCOMPARE(usage->percentage, 25);
+
+    volume.bytesAvailable = 50;
+    usage = rfm::core::storageUsage(volume);
+    QVERIFY(usage.has_value());
+    QCOMPARE(usage->percentage, 50);
+
+    volume.bytesAvailable = 0;
+    usage = rfm::core::storageUsage(volume);
+    QVERIFY(usage.has_value());
+    QCOMPARE(usage->percentage, 100);
+
+    volume.bytesAvailable = volume.bytesTotal;
+    usage = rfm::core::storageUsage(volume);
+    QVERIFY(usage.has_value());
+    QCOMPARE(usage->percentage, 0);
+
+    volume.bytesAvailable = std::nullopt;
+    QVERIFY(!rfm::core::storageUsage(volume).has_value());
+
+    volume.bytesTotal = 0;
+    volume.bytesAvailable = 0;
+    QVERIFY(!rfm::core::storageUsage(volume).has_value());
+
+    volume.bytesTotal = 100;
+    volume.bytesAvailable = 101;
+    QVERIFY(!rfm::core::storageUsage(volume).has_value());
+
+    volume.bytesAvailable = 50;
+    volume.mounted = false;
+    QVERIFY(!rfm::core::storageUsage(volume).has_value());
+}
+
+void NavigationTreeTest::calculatesStorageUsageBarGeometry()
+{
+    const QRect itemRect(10, 20, 200, 38);
+    const auto empty = rfm::app::detail::storageUsageBarGeometry(itemRect, 42, 0);
+    const auto quarter = rfm::app::detail::storageUsageBarGeometry(itemRect, 42, 25);
+    const auto full = rfm::app::detail::storageUsageBarGeometry(itemRect, 42, 100);
+    QVERIFY(empty.has_value());
+    QVERIFY(quarter.has_value());
+    QVERIFY(full.has_value());
+    QCOMPARE(empty->track, quarter->track);
+    QCOMPARE(quarter->track, full->track);
+    QCOMPARE(empty->track.left(), 42);
+    QCOMPARE(empty->track.right(), itemRect.right() - 4);
+    QCOMPARE(empty->track.height(), 4);
+    QCOMPARE(empty->filledWidth, 0);
+    QCOMPARE(quarter->filledWidth, static_cast<int>(std::lround(empty->track.width() * 0.25)));
+    QCOMPARE(full->filledWidth, full->track.width());
+
+    QVERIFY(!rfm::app::detail::storageUsageBarGeometry(QRect(0, 0, 70, 38), 40, 50).has_value());
+}
+
+void NavigationTreeTest::adjustsOnlyRowsWithDisplayableStorageUsage()
+{
+    QTemporaryDir usageMount;
+    QTemporaryDir unknownMount;
+    QVERIFY(usageMount.isValid());
+    QVERIFY(unknownMount.isValid());
+
+    rfm::core::StorageVolume usage =
+        storageVolume(QStringLiteral("Usage"), usageMount.path(), rfm::core::StorageKind::Internal);
+    usage.device = QStringLiteral("/dev/usage");
+    usage.bytesTotal = 1024;
+    usage.bytesAvailable = 512;
+    rfm::core::StorageVolume unknown = storageVolume(QStringLiteral("Unknown"), unknownMount.path(),
+                                                     rfm::core::StorageKind::Internal);
+    unknown.device = QStringLiteral("/dev/unknown");
+    unknown.bytesTotal = 1024;
+
+    rfm::app::NavigationTree navigation;
+    navigation.setStorageVolumes({usage, unknown});
+    QTreeWidget* const tree = navigation.tree();
+    QTreeWidgetItem* const machine = localPlacesRoot(tree);
+    QTreeWidgetItem* const home = childNamed(machine, QStringLiteral("Home"));
+    QTreeWidgetItem* const usageItem = volumeItemByDevice(machine, usage.device);
+    QTreeWidgetItem* const unknownItem = volumeItemByDevice(machine, unknown.device);
+    QVERIFY(home != nullptr);
+    QVERIFY(usageItem != nullptr);
+    QVERIFY(unknownItem != nullptr);
+    QVERIFY(!tree->uniformRowHeights());
+
+    const QSize normalHint = itemSizeHint(tree, home);
+    const QSize unknownHint = itemSizeHint(tree, unknownItem);
+    const QSize usageHint = itemSizeHint(tree, usageItem);
+    QCOMPARE(unknownHint.height(), normalHint.height());
+    QVERIFY(usageHint.height() > normalHint.height());
+}
+
 void NavigationTreeTest::showsPerVolumeBusyStates()
 {
     QTemporaryDir mountedPath;
@@ -1026,6 +1148,8 @@ void NavigationTreeTest::showsPerVolumeBusyStates()
     navigation.setLocalVolumeOperation(volume.device, std::nullopt);
     volume.rootPath = mountedPath.path();
     volume.mounted = true;
+    volume.bytesTotal = 1024;
+    volume.bytesAvailable = 512;
     navigation.setStorageVolumes({volume});
     external = childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("External devices"));
     navigation.tree()->setCurrentItem(external->child(0));

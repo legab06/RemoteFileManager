@@ -85,6 +85,7 @@ add_library(
     app/PasswordAuthenticationDialog.cpp
     app/ServerProfileForm.cpp
     app/ServerProfileDialog.cpp
+    app/StoragePropertiesDialog.cpp
     app/OperationPanel.cpp
     app/TransferRequestFactory.cpp
     app/VolumeAuthenticationDialog.cpp
@@ -98,6 +99,7 @@ add_library(
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/PasswordAuthenticationDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileForm.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/ServerProfileDialog.hpp
+    ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/StoragePropertiesDialog.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/OperationPanel.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/TransferRequestFactory.hpp
     ${PROJECT_SOURCE_DIR}/include/remotefilemanager/app/VolumeAuthenticationDialog.hpp

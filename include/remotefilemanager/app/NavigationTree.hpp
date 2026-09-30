@@ -6,6 +6,7 @@
 #include "remotefilemanager/core/VolumeService.hpp"
 
 #include <QHash>
+#include <QRect>
 #include <QWidget>
 
 #include <optional>
@@ -37,6 +38,17 @@ struct SelectedStorageVolume {
     QString machineId;
     bool local{false};
 };
+
+namespace detail
+{
+struct StorageUsageBarGeometry {
+    QRect track;
+    int filledWidth{0};
+};
+
+[[nodiscard]] std::optional<StorageUsageBarGeometry>
+storageUsageBarGeometry(const QRect& itemRect, int textLeft, int percentage);
+} // namespace detail
 
 class NavigationTree final : public QWidget
 {

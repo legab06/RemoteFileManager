@@ -137,6 +137,12 @@ rfm_set_project_warnings(rfm_server_profile_dialog_tests)
 add_test(NAME ui.server_profile_dialog COMMAND rfm_server_profile_dialog_tests)
 set_tests_properties(ui.server_profile_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+qt_add_executable(rfm_storage_properties_dialog_tests test_storage_properties_dialog.cpp)
+target_link_libraries(rfm_storage_properties_dialog_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
+rfm_set_project_warnings(rfm_storage_properties_dialog_tests)
+add_test(NAME ui.storage_properties_dialog COMMAND rfm_storage_properties_dialog_tests)
+set_tests_properties(ui.storage_properties_dialog PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(rfm_password_authentication_dialog_tests test_password_authentication_dialog.cpp)
 target_link_libraries(rfm_password_authentication_dialog_tests PRIVATE Qt6::Test RemoteFileManager::Ui)
 rfm_set_project_warnings(rfm_password_authentication_dialog_tests)
