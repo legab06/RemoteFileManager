@@ -92,6 +92,7 @@ class LocalFileSystemTest final : public QObject
     void deduplicatesMultipleAttachmentsOfOneStorage();
     void reportsPortableMountedVolumes();
     void buildsVolumesAndFingerprintFromOneSnapshot();
+    void propagatesAvailableSpaceWithoutChangingFingerprint();
     void filtersTechnicalMountsAndDeduplicatesMountedDevices();
     void discoversUnmountedUsbPartitionWithoutTechnicalDuplicates();
     void keepsMountedVolumeWhenBlockDiscoveryReportsItToo();
@@ -1021,6 +1022,71 @@ void LocalFileSystemTest::buildsVolumesAndFingerprintFromOneSnapshot()
     QCOMPARE(firstResult.fingerprint, unchangedResult.fingerprint);
     QCOMPARE(secondResult.volumes.size(), 2);
     QVERIFY(firstResult.fingerprint != secondResult.fingerprint);
+}
+
+void LocalFileSystemTest::propagatesAvailableSpaceWithoutChangingFingerprint()
+{
+    QTemporaryDir availableMount;
+    QTemporaryDir fullMount;
+    QTemporaryDir unknownMount;
+    QVERIFY(availableMount.isValid());
+    QVERIFY(fullMount.isValid());
+    QVERIFY(unknownMount.isValid());
+
+    QList<rfm::core::LocalStorageMount> mounts{{availableMount.path(),
+                                                QStringLiteral("/dev/available"),
+                                                QByteArrayLiteral("ext4"),
+                                                QStringLiteral("AVAILABLE"),
+                                                1024,
+                                                false,
+                                                true,
+                                                true,
+                                                {},
+                                                256},
+                                               {fullMount.path(),
+                                                QStringLiteral("/dev/full"),
+                                                QByteArrayLiteral("ext4"),
+                                                QStringLiteral("FULL"),
+                                                2048,
+                                                false,
+                                                true,
+                                                true,
+                                                {},
+                                                0},
+                                               {unknownMount.path(),
+                                                QStringLiteral("/dev/unknown"),
+                                                QByteArrayLiteral("ext4"),
+                                                QStringLiteral("UNKNOWN"),
+                                                4096,
+                                                false,
+                                                true,
+                                                true,
+                                                {},
+                                                -1}};
+
+    const rfm::core::LocalStorageSnapshot snapshot =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(mounts);
+    QCOMPARE(snapshot.volumes.size(), 3);
+    const auto volumeForDevice = [&snapshot](const QString& device) {
+        return std::ranges::find_if(
+            snapshot.volumes,
+            [&device](const rfm::core::StorageVolume& volume) { return volume.device == device; });
+    };
+    const auto available = volumeForDevice(QStringLiteral("/dev/available"));
+    const auto full = volumeForDevice(QStringLiteral("/dev/full"));
+    const auto unknown = volumeForDevice(QStringLiteral("/dev/unknown"));
+    QVERIFY(available != snapshot.volumes.cend());
+    QVERIFY(full != snapshot.volumes.cend());
+    QVERIFY(unknown != snapshot.volumes.cend());
+    QCOMPARE(available->bytesTotal, quint64{1024});
+    QCOMPARE(available->bytesAvailable, std::optional<quint64>{256});
+    QCOMPARE(full->bytesAvailable, std::optional<quint64>{0});
+    QVERIFY(!unknown->bytesAvailable.has_value());
+
+    mounts[0].bytesAvailable = 128;
+    const rfm::core::LocalStorageSnapshot changedSpace =
+        rfm::core::LocalFileSystem::makeStorageSnapshot(mounts);
+    QCOMPARE(snapshot.fingerprint, changedSpace.fingerprint);
 }
 
 void LocalFileSystemTest::filtersTechnicalMountsAndDeduplicatesMountedDevices()

@@ -102,12 +102,13 @@ struct LocalStorageMount {
     LocalStorageMount() = default;
     LocalStorageMount(QString rootPathValue, QString deviceValue, QByteArray fileSystemTypeValue,
                       QString fileSystemLabelValue, qint64 bytesTotalValue, bool readOnlyValue,
-                      bool validValue, bool readyValue, QString deviceNumberValue = {})
+                      bool validValue, bool readyValue, QString deviceNumberValue = {},
+                      qint64 bytesAvailableValue = -1)
         : rootPath(std::move(rootPathValue)), device(std::move(deviceValue)),
           fileSystemType(std::move(fileSystemTypeValue)),
           fileSystemLabel(std::move(fileSystemLabelValue)), bytesTotal(bytesTotalValue),
           readOnly(readOnlyValue), valid(validValue), ready(readyValue),
-          deviceNumber(std::move(deviceNumberValue))
+          deviceNumber(std::move(deviceNumberValue)), bytesAvailable(bytesAvailableValue)
     {}
 
     QString rootPath;
@@ -119,6 +120,8 @@ struct LocalStorageMount {
     bool valid{false};
     bool ready{false};
     QString deviceNumber;
+    // Raw QStorageInfo value. Negative means that the information is unavailable.
+    qint64 bytesAvailable{-1};
 };
 
 struct LocalStorageSnapshot {

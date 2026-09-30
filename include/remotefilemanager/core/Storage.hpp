@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <optional>
 #include <utility>
 
 namespace rfm::core
@@ -52,11 +53,12 @@ struct StorageVolume {
                   QByteArray fileSystemTypeValue, quint64 bytesTotalValue, StorageKind kindValue,
                   bool removableValue, bool ejectableValue, bool readOnlyValue,
                   QString fileSystemLabelValue = {}, QString deviceModelValue = {},
-                  bool mountedValue = true, QString deviceNumberValue = {})
+                  bool mountedValue = true, QString deviceNumberValue = {},
+                  std::optional<quint64> bytesAvailableValue = std::nullopt)
         : displayName(std::move(displayNameValue)), rootPath(std::move(rootPathValue)),
           device(std::move(deviceValue)), fileSystemType(std::move(fileSystemTypeValue)),
-          bytesTotal(bytesTotalValue), kind(kindValue), removable(removableValue),
-          ejectable(ejectableValue), readOnly(readOnlyValue),
+          bytesTotal(bytesTotalValue), bytesAvailable(bytesAvailableValue), kind(kindValue),
+          removable(removableValue), ejectable(ejectableValue), readOnly(readOnlyValue),
           fileSystemLabel(std::move(fileSystemLabelValue)),
           deviceModel(std::move(deviceModelValue)), mounted(mountedValue),
           deviceNumber(std::move(deviceNumberValue))
@@ -70,6 +72,8 @@ struct StorageVolume {
     QString device;
     QByteArray fileSystemType;
     quint64 bytesTotal{0};
+    // Space available to the current user. Zero is a valid value; nullopt means unavailable.
+    std::optional<quint64> bytesAvailable;
     StorageKind kind{StorageKind::Unknown};
     bool removable{false};
     bool ejectable{false};
@@ -140,7 +144,8 @@ storageDeviceEvidence(const QList<StorageTopologyNode>& ancestry, bool blockDevi
 [[nodiscard]] StorageVolume makeStorageVolume(const LinuxMountInfo& mount,
                                               const StorageDeviceEvidence& device,
                                               const QString& fileSystemLabel = {},
-                                              quint64 bytesTotal = 0);
+                                              quint64 bytesTotal = 0,
+                                              std::optional<quint64> bytesAvailable = std::nullopt);
 [[nodiscard]] QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents);
 [[nodiscard]] QList<LinuxBlockDevice> parseLinuxBlockDevices(const QByteArray& contents);
 [[nodiscard]] QList<StorageVolume>

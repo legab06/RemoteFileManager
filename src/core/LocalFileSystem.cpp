@@ -88,7 +88,8 @@ QList<LocalStorageMount> mountedStorageSnapshot()
         snapshot.push_back({storage.rootPath(), QFile::decodeName(storage.device()),
                             storage.fileSystemType(), storage.name(), storage.bytesTotal(),
                             storage.isReadOnly(), storage.isValid(), storage.isReady(),
-                            localDeviceNumber(QFile::decodeName(storage.device()))});
+                            localDeviceNumber(QFile::decodeName(storage.device())),
+                            storage.bytesAvailable()});
     }
     return snapshot;
 }
@@ -884,6 +885,9 @@ LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot,
         volume.device = device;
         volume.fileSystemType = storage.fileSystemType;
         volume.bytesTotal = signedTotal > 0 ? static_cast<quint64>(signedTotal) : quint64{0};
+        if (storage.bytesAvailable >= 0) {
+            volume.bytesAvailable = static_cast<quint64>(storage.bytesAvailable);
+        }
         volume.kind = classifyStorage(evidence);
         volume.removable = platformDetails.removable;
         volume.ejectable = platformDetails.ejectable;

@@ -371,7 +371,8 @@ StorageKind classifyStorage(const StorageClassificationEvidence& evidence)
 }
 
 StorageVolume makeStorageVolume(const LinuxMountInfo& mount, const StorageDeviceEvidence& device,
-                                const QString& fileSystemLabel, quint64 bytesTotal)
+                                const QString& fileSystemLabel, quint64 bytesTotal,
+                                std::optional<quint64> bytesAvailable)
 {
     const StorageClassificationEvidence classification{mount.rootPath == QStringLiteral("/"),
                                                        isNetworkFileSystem(mount.fileSystemType),
@@ -384,6 +385,7 @@ StorageVolume makeStorageVolume(const LinuxMountInfo& mount, const StorageDevice
     volume.device = mount.device;
     volume.fileSystemType = mount.fileSystemType;
     volume.bytesTotal = bytesTotal;
+    volume.bytesAvailable = bytesAvailable;
     volume.kind = classifyStorage(classification);
     volume.removable = device.removable;
     volume.ejectable = device.ejectable;

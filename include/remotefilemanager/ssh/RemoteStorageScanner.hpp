@@ -6,6 +6,7 @@
 #include <QSet>
 
 #include <memory>
+#include <optional>
 
 namespace rfm::ssh
 {
@@ -50,9 +51,16 @@ struct RemoteStorageTopologyResult {
 };
 
 struct RemoteStorageSizeResult {
-    quint64 bytes{0};
+    std::optional<quint64> bytesTotal;
+    std::optional<quint64> bytesAvailable;
     RemoteStorageError error{RemoteStorageError::None};
 };
+
+namespace detail
+{
+[[nodiscard]] RemoteStorageSizeResult
+calculateRemoteStorageSize(quint64 blocks, quint64 blocksAvailable, quint64 fragmentSize);
+} // namespace detail
 
 class RemoteStorageReader
 {

@@ -96,6 +96,9 @@ distinctes :
 - `removable` indique que le média peut être retiré du lecteur ;
 - `ejectable` prépare une capacité d'éjection explicitement détectée.
 
+Il transporte aussi l'espace disponible pour l'utilisateur courant sous forme
+optionnelle, afin de distinguer une information absente d'un volume plein à zéro octet.
+
 Un SSD USB peut ainsi être `External` avec `removable == false`. Inversement, le
 caractère amovible ne suffit jamais à lui seul à imposer la catégorie `External`.
 `ejectable` reste actuellement faux lorsque la plateforme ne fournit pas une preuve
@@ -173,10 +176,14 @@ distante actuelle est un collecteur Linux isolé ; un autre OS distant pourra fo
 un collecteur différent sans modifier le modèle ou les règles de classification.
 Le collecteur Linux distant associe les liens de `/dev/disk/by-label` aux périphériques
 de `mountinfo`, lit le modèle dans la même ascendance sysfs et demande la capacité avec
-`statvfs` SFTP. Chacune de ces métadonnées est optionnelle et possède les fallbacks du
-modèle commun. `mountinfo` est lu par fragments : une étape du scanner effectue au plus
-un `sftp_read`, puis rend la main au worker avant le fragment suivant. Le handle est
-fermé et le snapshot abandonné lors d'une annulation, d'une déconnexion ou du shutdown.
+`statvfs` SFTP. La capacité utilise `f_blocks`, l'espace disponible utilise `f_bavail`
+et tous deux sont multipliés par `f_frsize` avec des contrôles d'overflow indépendants.
+Le collecteur local utilise de même `QStorageInfo::bytesAvailable()`, et non
+`bytesFree()`. Chacune de ces métadonnées est optionnelle et possède les fallbacks du
+modèle commun. L'espace disponible, trop volatil, ne participe pas à l'empreinte de
+topologie. `mountinfo` est lu par fragments : une étape du scanner effectue au plus un
+`sftp_read`, puis rend la main au worker avant le fragment suivant. Le handle est fermé
+et le snapshot abandonné lors d'une annulation, d'une déconnexion ou du shutdown.
 Le parseur conserve l'identifiant, le parent, la racine et les champs optionnels d'un
 montage. Une pile d'overmounts est résolue par les relations `parentId` plutôt que par
 l'ordre numérique réutilisable des IDs. Une sous-racine démontrable d'un filesystem

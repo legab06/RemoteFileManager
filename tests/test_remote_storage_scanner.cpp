@@ -3,6 +3,7 @@
 #include <QTest>
 
 #include <algorithm>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -117,7 +118,7 @@ class FakeRemoteStorageReader final : public rfm::ssh::RemoteStorageReader
     rfm::ssh::RemoteStorageSizeResult storageSize(const QString&) override
     {
         ++sizeReads;
-        return {4096, rfm::ssh::RemoteStorageError::None};
+        return sizeResult;
     }
 
     bool connectionAlive() const override { return alive; }
@@ -125,6 +126,8 @@ class FakeRemoteStorageReader final : public rfm::ssh::RemoteStorageReader
     QByteArray mountInfo;
     QHash<QString, QByteArray> fileContents;
     rfm::ssh::RemoteStorageError mountInfoError{rfm::ssh::RemoteStorageError::None};
+    rfm::ssh::RemoteStorageSizeResult sizeResult{quint64{4096}, quint64{1024},
+                                                 rfm::ssh::RemoteStorageError::None};
     qsizetype mountInfoFragmentSize{4096};
     qsizetype mountInfoOffset{0};
     QList<QPair<QString, QString>> labels;
@@ -175,7 +178,10 @@ class RemoteStorageScannerTest final : public QObject
     Q_OBJECT
 
   private slots:
+    void calculatesStatVfsSpaceSafely();
     void yieldsAndCompletesAClassifiedScan();
+    void keepsVolumeWhenStorageStatisticsAreUnavailable();
+    void dropsSnapshotWhenStorageStatisticsLoseConnection();
     void streamsShortMountInfoReadsAndCancelsBetweenSteps();
     void cancellationDropsAnyPartialSnapshot();
     void connectionLossDropsAnyPartialSnapshot();
@@ -189,6 +195,34 @@ class RemoteStorageScannerTest final : public QObject
     void sharesLsblkParsingAndAddsUnmountedDevices();
     void keepsMountedDiscoveryWhenLsblkIsUnavailable();
 };
+
+void RemoteStorageScannerTest::calculatesStatVfsSpaceSafely()
+{
+    const rfm::ssh::RemoteStorageSizeResult regular =
+        rfm::ssh::detail::calculateRemoteStorageSize(10, 3, 4096);
+    QCOMPARE(regular.bytesTotal, std::optional<quint64>{40960});
+    QCOMPARE(regular.bytesAvailable, std::optional<quint64>{12288});
+
+    const rfm::ssh::RemoteStorageSizeResult full =
+        rfm::ssh::detail::calculateRemoteStorageSize(10, 0, 4096);
+    QCOMPARE(full.bytesAvailable, std::optional<quint64>{0});
+
+    const quint64 maximum = std::numeric_limits<quint64>::max();
+    const rfm::ssh::RemoteStorageSizeResult totalOverflow =
+        rfm::ssh::detail::calculateRemoteStorageSize(maximum, 1, 2);
+    QVERIFY(!totalOverflow.bytesTotal.has_value());
+    QCOMPARE(totalOverflow.bytesAvailable, std::optional<quint64>{2});
+
+    const rfm::ssh::RemoteStorageSizeResult availableOverflow =
+        rfm::ssh::detail::calculateRemoteStorageSize(1, maximum, 2);
+    QCOMPARE(availableOverflow.bytesTotal, std::optional<quint64>{2});
+    QVERIFY(!availableOverflow.bytesAvailable.has_value());
+
+    const rfm::ssh::RemoteStorageSizeResult invalidFragmentSize =
+        rfm::ssh::detail::calculateRemoteStorageSize(10, 3, 0);
+    QVERIFY(!invalidFragmentSize.bytesTotal.has_value());
+    QVERIFY(!invalidFragmentSize.bytesAvailable.has_value());
+}
 
 void RemoteStorageScannerTest::yieldsAndCompletesAClassifiedScan()
 {
@@ -215,6 +249,37 @@ void RemoteStorageScannerTest::yieldsAndCompletesAClassifiedScan()
     QCOMPARE(volumes.constFirst().displayName, QStringLiteral("/media/usb"));
     QCOMPARE(volumes.constFirst().kind, rfm::core::StorageKind::External);
     QCOMPARE(volumes.constFirst().bytesTotal, quint64{4096});
+    QCOMPARE(volumes.constFirst().bytesAvailable, std::optional<quint64>{1024});
+}
+
+void RemoteStorageScannerTest::keepsVolumeWhenStorageStatisticsAreUnavailable()
+{
+    const QList errors{rfm::ssh::RemoteStorageError::NotFound,
+                       rfm::ssh::RemoteStorageError::PermissionDenied,
+                       rfm::ssh::RemoteStorageError::OtherError};
+    for (const rfm::ssh::RemoteStorageError error : errors) {
+        auto reader = std::make_unique<FakeRemoteStorageReader>();
+        reader->mountInfo = blockMount(24, "8:1", "/media/usb", "/dev/sdb1");
+        reader->sizeResult = {std::nullopt, std::nullopt, error};
+        rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 41);
+
+        QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::Completed);
+        const QList<rfm::core::StorageVolume> volumes = scanner.takeVolumes();
+        QCOMPARE(volumes.size(), 1);
+        QCOMPARE(volumes.constFirst().bytesTotal, quint64{0});
+        QVERIFY(!volumes.constFirst().bytesAvailable.has_value());
+    }
+}
+
+void RemoteStorageScannerTest::dropsSnapshotWhenStorageStatisticsLoseConnection()
+{
+    auto reader = std::make_unique<FakeRemoteStorageReader>();
+    reader->mountInfo = blockMount(24, "8:1", "/media/usb", "/dev/sdb1");
+    reader->sizeResult = {std::nullopt, std::nullopt, rfm::ssh::RemoteStorageError::ConnectionLost};
+    rfm::ssh::RemoteStorageScanner scanner(std::move(reader), 40);
+
+    QCOMPARE(finishScan(scanner).status, rfm::ssh::RemoteStorageScanStatus::ConnectionLost);
+    QVERIFY(scanner.takeVolumes().isEmpty());
 }
 
 void RemoteStorageScannerTest::streamsShortMountInfoReadsAndCancelsBetweenSteps()
