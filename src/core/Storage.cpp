@@ -13,6 +13,7 @@
 #include <QSet>
 
 #include <algorithm>
+#include <cmath>
 
 namespace rfm::core
 {
@@ -276,6 +277,21 @@ bool externallyAttached(const QString& transport, bool removable)
 }
 
 } // namespace
+
+std::optional<StorageUsage> storageUsage(const StorageVolume& volume)
+{
+    if (!volume.mounted || volume.bytesTotal == 0 || !volume.bytesAvailable.has_value() ||
+        *volume.bytesAvailable > volume.bytesTotal) {
+        return std::nullopt;
+    }
+
+    const quint64 available = *volume.bytesAvailable;
+    const quint64 used = volume.bytesTotal - available;
+    const long double ratio =
+        static_cast<long double>(used) / static_cast<long double>(volume.bytesTotal);
+    const int percentage = std::clamp(static_cast<int>(std::lround(100.0L * ratio)), 0, 100);
+    return StorageUsage{used, available, percentage};
+}
 
 bool isNetworkFileSystem(const QByteArray& fileSystemType)
 {

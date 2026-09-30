@@ -160,7 +160,7 @@ class MainWindow final : public QMainWindow
     void connectToSelectedServerProfile();
     Q_INVOKABLE void connectToServerProfile(const QString& id);
     void showPlacesContextMenu(const QPoint& position);
-    void showSelectedPlaceProperties();
+    Q_INVOKABLE void showSelectedPlaceProperties();
     void showContextEntryProperties();
     void showPropertiesDialog(const QString& title, const QString& text);
     void requestDisconnection();

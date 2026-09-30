@@ -7,6 +7,7 @@
 #include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PasswordAuthenticationDialog.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
+#include "remotefilemanager/app/StoragePropertiesDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
 #include "remotefilemanager/app/WorkspaceTabs.hpp"
@@ -1460,6 +1461,11 @@ void MainWindow::showPlacesContextMenu(const QPoint& position)
 
 void MainWindow::showSelectedPlaceProperties()
 {
+    if (const auto selected = m_navigationTree->selectedStorageVolume(); selected.has_value()) {
+        StoragePropertiesDialog dialog(selected->volume, this);
+        dialog.exec();
+        return;
+    }
     showPropertiesDialog(m_navigationTree->selectedPropertiesTitle(),
                          m_navigationTree->selectedPropertiesText());
 }

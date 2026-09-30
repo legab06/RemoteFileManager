@@ -114,6 +114,14 @@ de filesystem, le modèle et la taille. Les valeurs absentes, `Unknown` et les t
 nulles sont omises. Toutes les métadonnées sont normalisées puis converties depuis du
 texte brut afin qu'aucun serveur ne puisse injecter du rich text ou de fausses lignes.
 
+Un volume monté dont la capacité et l'espace disponible sont connus affiche sous son
+nom une jauge compacte calculée à partir de l'instantané existant. Le delegate Qt
+conserve le rendu natif de la ligne et de ses états, puis dessine directement une piste
+et son remplissage avec les rôles `Mid`, `Highlight` et `HighlightedText` de la palette.
+La piste s'étend du début de la zone de texte au bord droit disponible. Une valeur
+absente, une capacité nulle, un volume non monté ou un espace disponible supérieur à la
+capacité masque la jauge sans modifier le texte ni le tooltip.
+
 La classification applique un ordre conservateur. La racine système est `System`, un
 filesystem réseau connu est `Network`, une couche bloc virtuelle reste `Unknown`, un
 transport externe reconnu est `External`, et un autre périphérique bloc physique n'est

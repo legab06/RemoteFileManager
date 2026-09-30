@@ -7,6 +7,7 @@
 #include "remotefilemanager/app/PaneWorkspace.hpp"
 #include "remotefilemanager/app/PasswordAuthenticationDialog.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
+#include "remotefilemanager/app/StoragePropertiesDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
 #include "remotefilemanager/app/WorkspaceTabs.hpp"
@@ -573,6 +574,7 @@ class MainWindowTest final : public QObject
     void unsupportedRemoteStorageProbeIsSilentAndCanRetry();
     void volumeRequestsPreserveDeviceMountPoints();
     void volumeRequestsPreserveInconsistentSiblingEvidence();
+    void placePropertiesUseExpectedDialogsWithoutStorageRequests();
     void volumeOperationSuccessWaitsForSystemRefresh();
     void volumeOperationErrorsRestoreUi_data();
     void volumeOperationErrorsRestoreUi();
@@ -697,6 +699,119 @@ void MainWindowTest::volumeRequestsPreserveInconsistentSiblingEvidence()
                  {QStringLiteral("/mnt/data"), QString{}, QStringLiteral("/mnt/data"), QString{}}));
     QCOMPARE(rfm::core::volumeUnmountTargetMode(request),
              rfm::core::VolumeUnmountTargetMode::Invalid);
+}
+
+void MainWindowTest::placePropertiesUseExpectedDialogsWithoutStorageRequests()
+{
+    QTemporaryDir profileDirectory;
+    QTemporaryDir mountDirectory;
+    QVERIFY(profileDirectory.isValid());
+    QVERIFY(mountDirectory.isValid());
+
+    const rfm::core::ConnectionProfile profile{
+        QStringLiteral("Properties server"), QStringLiteral("properties.example.test"),
+        QStringLiteral("alice"), 22, QStringLiteral("properties-server")};
+    const rfm::core::ServerProfileStore profileStore(profileDirectory.path());
+    QString error;
+    QVERIFY2(profileStore.save({profile}, &error), qPrintable(error));
+
+    rfm::app::MainWindow window(nullptr, {}, profileDirectory.path());
+    auto* const navigation = window.findChild<rfm::app::NavigationTree*>();
+    auto* const tree = navigation != nullptr ? navigation->tree() : nullptr;
+    auto* const refreshTimer = window.findChild<QTimer*>(QStringLiteral("autoRefreshTimer"));
+    QVERIFY(navigation != nullptr);
+    QVERIFY(tree != nullptr);
+    QVERIFY(refreshTimer != nullptr);
+    refreshTimer->stop();
+
+    QSignalSpy localRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
+    QSignalSpy localProbes(&window, &rfm::app::MainWindow::localStorageProbeRequested);
+    QSignalSpy remoteRefreshes(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy remoteProbes(&window, &rfm::app::MainWindow::remoteStorageProbeRequested);
+
+    rfm::core::StorageVolume volume;
+    volume.displayName = QStringLiteral("Snapshot volume");
+    volume.rootPath = mountDirectory.path();
+    volume.device = QStringLiteral("/dev/snapshot1");
+    volume.fileSystemType = QByteArrayLiteral("ext4");
+    volume.fileSystemLabel = QStringLiteral("Snapshot label");
+    volume.deviceModel = QStringLiteral("Snapshot model");
+    volume.bytesTotal = 1000;
+    volume.bytesAvailable = 250;
+    volume.mounted = true;
+    navigation->setStorageVolumes({volume});
+    QTreeWidgetItem* const volumeItem = volumeItemByDevice(localPlacesRoot(tree), volume.device);
+    QVERIFY(volumeItem != nullptr);
+    tree->setCurrentItem(volumeItem);
+
+    bool volumeDialogInspected = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto* const dialog =
+            qobject_cast<rfm::app::StoragePropertiesDialog*>(QApplication::activeModalWidget());
+        QVERIFY(dialog != nullptr);
+        QCOMPARE(dialog->findChild<QLabel*>(QStringLiteral("storageDeviceValue"))->text(),
+                 volume.device);
+        QCOMPARE(dialog->findChild<QLabel*>(QStringLiteral("storageUsedValue"))->text(),
+                 QLocale{}.formattedDataSize(750, 1, QLocale::DataSizeTraditionalFormat));
+        QCOMPARE(dialog->findChild<QProgressBar*>(QStringLiteral("storageUsageBar"))->value(), 75);
+        volumeDialogInspected = true;
+        dialog->reject();
+    });
+    QVERIFY(
+        QMetaObject::invokeMethod(&window, "showSelectedPlaceProperties", Qt::DirectConnection));
+    QVERIFY(volumeDialogInspected);
+
+    QTreeWidgetItem* const home = childNamed(localPlacesRoot(tree), QStringLiteral("Home"));
+    QVERIFY(home != nullptr);
+    tree->setCurrentItem(home);
+    bool folderDialogInspected = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto* const messageBox = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+        QVERIFY(messageBox != nullptr);
+        QVERIFY(qobject_cast<rfm::app::StoragePropertiesDialog*>(messageBox) == nullptr);
+        QCOMPARE(messageBox->textFormat(), Qt::PlainText);
+        folderDialogInspected = true;
+        messageBox->accept();
+    });
+    QVERIFY(
+        QMetaObject::invokeMethod(&window, "showSelectedPlaceProperties", Qt::DirectConnection));
+    QVERIFY(folderDialogInspected);
+
+    window.show();
+    QTest::qWait(1);
+    QTreeWidgetItem* const server = serverProfileItem(tree, 0);
+    QVERIFY(server != nullptr);
+    tree->scrollToItem(server);
+    bool serverDialogInspected = false;
+    QTimer::singleShot(0, &window, [&] {
+        auto* const menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+        QVERIFY(menu != nullptr);
+        QAction* propertyAction = nullptr;
+        for (QAction* action : menu->actions()) {
+            if (action->text() == QStringLiteral("Properties")) {
+                propertyAction = action;
+                break;
+            }
+        }
+        QVERIFY(propertyAction != nullptr);
+        QTimer::singleShot(0, &window, [&] {
+            auto* const dialog =
+                qobject_cast<rfm::app::ServerProfileDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog != nullptr);
+            serverDialogInspected = true;
+            dialog->reject();
+        });
+        propertyAction->trigger();
+    });
+    const QPoint serverPosition = tree->visualItemRect(server).center();
+    QVERIFY(QMetaObject::invokeMethod(tree, "customContextMenuRequested", Qt::DirectConnection,
+                                      Q_ARG(QPoint, serverPosition)));
+    QVERIFY(serverDialogInspected);
+
+    QCOMPARE(localRefreshes.size(), 0);
+    QCOMPARE(localProbes.size(), 0);
+    QCOMPARE(remoteRefreshes.size(), 0);
+    QCOMPARE(remoteProbes.size(), 0);
 }
 
 void MainWindowTest::mainRefreshWorksWithoutConnectionAndUpdatesOpenTree()

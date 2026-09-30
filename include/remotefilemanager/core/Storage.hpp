@@ -86,6 +86,16 @@ struct StorageVolume {
     QString deviceNumber;
 };
 
+struct StorageUsage {
+    quint64 used{0};
+    quint64 available{0};
+    int percentage{0};
+};
+
+// Returns a displayable usage snapshot only when the mounted volume contains
+// complete and internally consistent capacity information.
+[[nodiscard]] std::optional<StorageUsage> storageUsage(const StorageVolume& volume);
+
 // Common representation of one lsblk JSON object. Acquisition is platform/backend-specific;
 // parsing and conversion to StorageVolume are shared by local and SSH discovery.
 struct LinuxBlockDevice {
