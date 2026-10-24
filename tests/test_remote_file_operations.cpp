@@ -1188,7 +1188,8 @@ void RemoteFileOperationsTest::remoteRemovePreservesGuardsAndCleansUpOnFailureOr
     QVERIFY(failed.calls.isEmpty());
 
     FakeRemoteRemoveBackend deletionFailure;
-    deletionFailure.entries.insert(QStringLiteral("/tree"), {{QStringLiteral("file"), false}});
+    deletionFailure.entries.insert(QStringLiteral("/tree"), {{QStringLiteral("removed"), false},
+                                                             {QStringLiteral("file"), false}});
     deletionFailure.removeResults.insert(
         QStringLiteral("unlink:/tree/file"),
         {rfm::core::RemoteBackendError::PermissionDenied, QStringLiteral("permission denied")});
@@ -1198,7 +1199,9 @@ void RemoteFileOperationsTest::remoteRemovePreservesGuardsAndCleansUpOnFailureOr
         deletionFailureJob.step();
     }
     QVERIFY(!deletionFailureJob.result().allSucceeded());
-    QCOMPARE(deletionFailure.calls, QStringList{QStringLiteral("unlink:/tree/file")});
+    QVERIFY(deletionFailureJob.result().items.constFirst().storageModified);
+    QCOMPARE(deletionFailure.calls, QStringList({QStringLiteral("unlink:/tree/removed"),
+                                                 QStringLiteral("unlink:/tree/file")}));
 
     FakeRemoteRemoveBackend cancelled;
     QList<QPair<QString, bool>> pendingEntries;
@@ -2554,7 +2557,9 @@ void RemoteFileOperationsTest::movesSelectionAndReportsPartialFailure()
         QStringLiteral("archive"));
     QCOMPARE(result.items.size(), 2);
     QVERIFY(result.items.at(0).success);
+    QVERIFY(result.items.at(0).storageModified);
     QVERIFY(!result.items.at(1).success);
+    QVERIFY(!result.items.at(1).storageModified);
     QVERIFY(result.items.at(1).error.contains(QStringLiteral("Permission")));
 }
 
@@ -2568,7 +2573,9 @@ void RemoteFileOperationsTest::copiesOnServerOrReportsUnsupported()
         7, {{QStringLiteral("src/a.txt"), false}, {QStringLiteral("src/folder"), true}},
         QStringLiteral("backup"));
     QVERIFY(result.items.at(0).success);
+    QVERIFY(result.items.at(0).storageModified);
     QVERIFY(!result.items.at(1).success);
+    QVERIFY(!result.items.at(1).storageModified);
     QVERIFY(result.items.at(1).error.contains(QStringLiteral("not supported")));
     QVERIFY(backend.calls.contains(QStringLiteral("copy:src/a.txt:backup/a.txt:f")));
     QVERIFY(backend.calls.contains(QStringLiteral("copy:src/folder:backup/folder:r")));
@@ -2636,7 +2643,9 @@ void RemoteFileOperationsTest::removesFileAndRecursiveTreeWithGuards()
         11, {{QStringLiteral("trash/ok.txt"), false}, {QStringLiteral("trash/denied.txt"), false}},
         false);
     QVERIFY(partial.items.at(0).success);
+    QVERIFY(partial.items.at(0).storageModified);
     QVERIFY(!partial.items.at(1).success);
+    QVERIFY(!partial.items.at(1).storageModified);
 }
 
 void RemoteFileOperationsTest::allowsRegularFilesWithoutMountProof()

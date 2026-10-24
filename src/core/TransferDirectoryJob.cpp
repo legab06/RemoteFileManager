@@ -254,9 +254,9 @@ void TransferDirectoryJob::readRemoteDirectoryEntry()
         return;
     }
     const QString remoteSource = RemotePath::join(m_currentRemoteDirectory.source, entry->name);
-    const LocalDownloadPathResult localDestination = LocalDownloadPath::child(
-        m_localDestinationRoot, m_currentRemoteDirectory.destination, entry->name,
-        m_localPathFlavor);
+    const LocalDownloadPathResult localDestination =
+        LocalDownloadPath::child(m_localDestinationRoot, m_currentRemoteDirectory.destination,
+                                 entry->name, m_localPathFlavor);
     if (!localDestination.succeeded()) {
         fail(localDestination.error, remoteSource);
         return;
@@ -319,6 +319,7 @@ void TransferDirectoryJob::createRootDirectory()
              m_request.destination);
         return;
     }
+    m_progress.destinationModified = true;
     m_phase = Phase::CreateDirectories;
 }
 
@@ -341,6 +342,7 @@ void TransferDirectoryJob::createNextDirectory()
              path);
         return;
     }
+    m_progress.destinationModified = true;
     ++m_directoryIndex;
 }
 
@@ -350,6 +352,8 @@ void TransferDirectoryJob::updateFromChild()
     m_progress.transferredBytes = m_completedBytes + childProgress.transferredBytes;
     m_progress.bytesPerSecond = childProgress.bytesPerSecond;
     m_progress.currentItem = childProgress.source;
+    m_progress.destinationModified =
+        m_progress.destinationModified || childProgress.destinationModified;
 }
 
 void TransferDirectoryJob::transferNextFileStep()

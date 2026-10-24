@@ -55,6 +55,8 @@ class NavigationTree final : public QWidget
     Q_OBJECT
 
   public:
+    static constexpr int VolumeRole = Qt::UserRole + 6;
+
     enum class NodeKind {
         LocalCategory,
         RemoteCategory,
@@ -131,7 +133,6 @@ class NavigationTree final : public QWidget
     static constexpr int LoadedRole = Qt::UserRole + 3;
     static constexpr int ActiveRole = Qt::UserRole + 4;
     static constexpr int SavedProfileIdRole = Qt::UserRole + 5;
-    static constexpr int VolumeRole = Qt::UserRole + 6;
     static constexpr int StorageIdentityRole = Qt::UserRole + 7;
     static constexpr int BaseTextRole = Qt::UserRole + 8;
     static constexpr int HiddenRole = Qt::UserRole + 9;

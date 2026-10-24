@@ -215,7 +215,7 @@ class PlacesItemDelegate final : public QStyledItemDelegate
   private:
     [[nodiscard]] static std::optional<int> usagePercentage(const QModelIndex& index)
     {
-        const QVariant data = index.data(Qt::UserRole + 6);
+        const QVariant data = index.data(NavigationTree::VolumeRole);
         if (!data.isValid() || !data.canConvert<rfm::core::StorageVolume>()) {
             return std::nullopt;
         }
@@ -276,11 +276,16 @@ QIcon placeIcon(PlaceKind kind, const QWidget* widget)
 PlaceKind placeKindForRemoteName(const QString& name)
 {
     const QString folded = name.toCaseFolded();
-    if (folded == QStringLiteral("desktop")) return PlaceKind::Desktop;
-    if (folded == QStringLiteral("documents")) return PlaceKind::Documents;
-    if (folded == QStringLiteral("downloads")) return PlaceKind::Downloads;
-    if (folded == QStringLiteral("music")) return PlaceKind::Music;
-    if (folded == QStringLiteral("pictures")) return PlaceKind::Pictures;
+    if (folded == QStringLiteral("desktop"))
+        return PlaceKind::Desktop;
+    if (folded == QStringLiteral("documents"))
+        return PlaceKind::Documents;
+    if (folded == QStringLiteral("downloads"))
+        return PlaceKind::Downloads;
+    if (folded == QStringLiteral("music"))
+        return PlaceKind::Music;
+    if (folded == QStringLiteral("pictures"))
+        return PlaceKind::Pictures;
     if (folded == QStringLiteral("videos") || folded == QStringLiteral("movies"))
         return PlaceKind::Videos;
     return PlaceKind::Folder;
@@ -760,9 +765,8 @@ bool NavigationTree::hasLoadedLocalDirectory(const QString& path) const
     const QString normalizedPath = normalizedLocalPath(path);
     QList<QTreeWidgetItem*> items = matchingItems(NodeKind::LocalLocation, normalizedPath);
     items += matchingItems(NodeKind::LocalDirectory, normalizedPath);
-    return std::ranges::any_of(items, [](const QTreeWidgetItem* item) {
-        return item->data(0, LoadedRole).toBool();
-    });
+    return std::ranges::any_of(
+        items, [](const QTreeWidgetItem* item) { return item->data(0, LoadedRole).toBool(); });
 }
 
 QList<rfm::core::StorageVolume>
@@ -1122,11 +1126,11 @@ void NavigationTree::buildLocalPlaces()
         addLazyPlaceholder(item);
         return item;
     };
-    QTreeWidgetItem* const home =
-        addLocation(m_localCategoryItem, tr("Home"),
-                    QStandardPaths::writableLocation(QStandardPaths::HomeLocation), PlaceKind::Home);
-    QSet<QString> paths{comparableLocalPath(
-        QStandardPaths::writableLocation(QStandardPaths::HomeLocation))};
+    QTreeWidgetItem* const home = addLocation(
+        m_localCategoryItem, tr("Home"),
+        QStandardPaths::writableLocation(QStandardPaths::HomeLocation), PlaceKind::Home);
+    QSet<QString> paths{
+        comparableLocalPath(QStandardPaths::writableLocation(QStandardPaths::HomeLocation))};
     if (home != nullptr) {
         for (const StandardLocalPlace& place : standardLocalPlaces) {
             const QString path = QStandardPaths::writableLocation(place.location);
@@ -1167,9 +1171,9 @@ void NavigationTree::rebuildServers()
             auto* const editButton = new QToolButton(m_tree);
             editButton->setObjectName(QStringLiteral("placesEditServerButton"));
             editButton->setProperty("profileId", savedProfileId);
-            editButton->setIcon(QIcon::fromTheme(
-                QStringLiteral("document-edit"),
-                style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
+            editButton->setIcon(
+                QIcon::fromTheme(QStringLiteral("document-edit"),
+                                 style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
             editButton->setAutoRaise(true);
             editButton->setFocusPolicy(Qt::NoFocus);
             editButton->setToolTip(tr("Edit server"));

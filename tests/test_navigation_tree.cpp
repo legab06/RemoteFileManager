@@ -54,6 +54,8 @@ class NavigationTreeTest final : public QObject
 namespace
 {
 
+static_assert(rfm::app::NavigationTree::VolumeRole == Qt::UserRole + 6);
+
 rfm::core::StorageVolume storageVolume(const QString& name, const QString& rootPath,
                                        rfm::core::StorageKind kind, bool removable = false)
 {
@@ -101,8 +103,10 @@ QTreeWidgetItem* volumeItemByDevice(QTreeWidgetItem* root, const QString& device
     if (root == nullptr) {
         return nullptr;
     }
-    if (root->data(0, Qt::UserRole + 6).isValid() &&
-        root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().device == device) {
+    if (root->data(0, rfm::app::NavigationTree::VolumeRole).isValid() &&
+        root->data(0, rfm::app::NavigationTree::VolumeRole)
+                .value<rfm::core::StorageVolume>()
+                .device == device) {
         return root;
     }
     for (int index = 0; index < root->childCount(); ++index) {
@@ -119,8 +123,10 @@ QList<QTreeWidgetItem*> volumeItemsByDevice(QTreeWidgetItem* root, const QString
     if (root == nullptr) {
         return matches;
     }
-    if (root->data(0, Qt::UserRole + 6).isValid() &&
-        root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().device == device) {
+    if (root->data(0, rfm::app::NavigationTree::VolumeRole).isValid() &&
+        root->data(0, rfm::app::NavigationTree::VolumeRole)
+                .value<rfm::core::StorageVolume>()
+                .device == device) {
         matches.push_back(root);
     }
     for (int index = 0; index < root->childCount(); ++index) {
@@ -184,8 +190,7 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
     // Vérification que la colonne 1 est bien fixe (pas ResizeToContents)
     QVERIFY(tree->header()->sectionResizeMode(1) != QHeaderView::ResizeToContents);
     QVERIFY(tree->itemWidget(localCategory, 1) == nullptr);
-    auto* const addServer =
-        qobject_cast<QToolButton*>(tree->itemWidget(remoteCategory, 1));
+    auto* const addServer = qobject_cast<QToolButton*>(tree->itemWidget(remoteCategory, 1));
     QVERIFY(addServer != nullptr);
     QCOMPARE(addServer->toolTip(), QStringLiteral("New connection"));
     QCOMPARE(addServer->accessibleName(), QStringLiteral("New connection"));
@@ -267,15 +272,15 @@ void NavigationTreeTest::buildsMachinesProfilesAndMachineScopedVolumes()
     QVERIFY(editServer->isVisibleTo(tree));
     QVERIFY(tree->columnWidth(1) >= editServer->sizeHint().width());
     tree->setCurrentItem(home);
-    QTest::mouseClick(tree->viewport(), Qt::LeftButton,
-                      Qt::NoModifier, tree->visualItemRect(localCategory).center());
+    QTest::mouseClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier,
+                      tree->visualItemRect(localCategory).center());
     QCOMPARE(tree->currentItem(), home);
-    QTest::mouseDClick(tree->viewport(), Qt::LeftButton,
-                       Qt::NoModifier, tree->visualItemRect(localCategory).center());
+    QTest::mouseDClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier,
+                       tree->visualItemRect(localCategory).center());
     QVERIFY(localCategory->isExpanded());
     QVERIFY(!tree->visualItemRect(home).isEmpty());
-    QTest::mouseDClick(tree->viewport(), Qt::LeftButton,
-                       Qt::NoModifier, tree->visualItemRect(remoteCategory).center());
+    QTest::mouseDClick(tree->viewport(), Qt::LeftButton, Qt::NoModifier,
+                       tree->visualItemRect(remoteCategory).center());
     QVERIFY(remoteCategory->isExpanded());
     QVERIFY(!tree->visualItemRect(server).isEmpty());
 
@@ -299,12 +304,13 @@ void NavigationTreeTest::organizesLocalPlacesUnderHome()
     QVERIFY(childNamed(machine, QStringLiteral("Downloads")) == nullptr);
 
     const QList<QStandardPaths::StandardLocation> locations{
-        QStandardPaths::DesktopLocation, QStandardPaths::DocumentsLocation,
+        QStandardPaths::DesktopLocation,  QStandardPaths::DocumentsLocation,
         QStandardPaths::DownloadLocation, QStandardPaths::MusicLocation,
         QStandardPaths::PicturesLocation, QStandardPaths::MoviesLocation};
     for (const auto location : locations) {
         const QString path = QStandardPaths::writableLocation(location);
-        if (!path.isEmpty() && QFileInfo(path).isDir() && QDir::cleanPath(path) != QDir::homePath()) {
+        if (!path.isEmpty() && QFileInfo(path).isDir() &&
+            QDir::cleanPath(path) != QDir::homePath()) {
             bool found = false;
             for (int index = 0; index < home->childCount(); ++index) {
                 if (home->child(index)->data(0, Qt::UserRole + 1).toString() ==
@@ -337,9 +343,8 @@ void NavigationTreeTest::classifiesLocalizedMoviesPathWithoutClassifyingVideosNa
     }
 
     rfm::app::NavigationTree navigation;
-    navigation.setLocalDirectory(
-        homePath, {{moviesInfo.fileName(), 0, {}, true, false, false},
-                   {QStringLiteral("videos"), 0, {}, true, false, false}});
+    navigation.setLocalDirectory(homePath, {{moviesInfo.fileName(), 0, {}, true, false, false},
+                                            {QStringLiteral("videos"), 0, {}, true, false, false}});
     QTreeWidgetItem* const home =
         childNamed(localPlacesRoot(navigation.tree()), QStringLiteral("Home"));
     QVERIFY(home != nullptr);
@@ -350,12 +355,10 @@ void NavigationTreeTest::classifiesLocalizedMoviesPathWithoutClassifyingVideosNa
 
     QFileIconProvider provider;
     const QIcon folder = provider.icon(QFileIconProvider::Folder);
-    const QImage expectedMovies = QIcon::fromTheme(QStringLiteral("folder-videos"), folder)
-                                      .pixmap(16, 16)
-                                      .toImage();
-    const QImage expectedFolder = QIcon::fromTheme(QStringLiteral("folder"), folder)
-                                      .pixmap(16, 16)
-                                      .toImage();
+    const QImage expectedMovies =
+        QIcon::fromTheme(QStringLiteral("folder-videos"), folder).pixmap(16, 16).toImage();
+    const QImage expectedFolder =
+        QIcon::fromTheme(QStringLiteral("folder"), folder).pixmap(16, 16).toImage();
     QCOMPARE(movies->icon(0).pixmap(16, 16).toImage(), expectedMovies);
     QCOMPARE(genericVideos->icon(0).pixmap(16, 16).toImage(), expectedFolder);
 }
@@ -371,11 +374,10 @@ void NavigationTreeTest::showsRealRemoteHomeChildrenAndFiltersHidden()
     QVERIFY(childNamed(server, QStringLiteral("/")) != nullptr);
     QVERIFY(childNamed(server, QStringLiteral("Volumes")) != nullptr);
 
-    navigation.setRemoteDirectory(
-        QStringLiteral("remote-id"), QStringLiteral("/home/alice"),
-        {{QStringLiteral("Documents"), 0, {}, true, false, false},
-         {QStringLiteral(".ssh"), 0, {}, true, false, true},
-         {QStringLiteral("ordinary"), 0, {}, true, false, false}});
+    navigation.setRemoteDirectory(QStringLiteral("remote-id"), QStringLiteral("/home/alice"),
+                                  {{QStringLiteral("Documents"), 0, {}, true, false, false},
+                                   {QStringLiteral(".ssh"), 0, {}, true, false, true},
+                                   {QStringLiteral("ordinary"), 0, {}, true, false, false}});
     QCOMPARE(home->childCount(), 3);
     QVERIFY(!childNamed(home, QStringLiteral("Documents"))->icon(0).isNull());
     QVERIFY(childNamed(home, QStringLiteral(".ssh"))->isHidden());
@@ -597,8 +599,8 @@ void NavigationTreeTest::exposesContextActionsForItemUnderCursor()
 
     navigation.tree()->setCurrentItem(online);
     QCOMPARE(contextActionsFor(navigation, offline),
-             QList<ContextAction>({ContextAction::Connect, ContextAction::Properties,
-                                   ContextAction::RemoveServer}));
+             QList<ContextAction>(
+                 {ContextAction::Connect, ContextAction::Properties, ContextAction::RemoveServer}));
     QCOMPARE(contextActionsFor(navigation, online),
              QList<ContextAction>({ContextAction::Disconnect, ContextAction::Properties,
                                    ContextAction::RemoveServer}));
@@ -612,8 +614,9 @@ void NavigationTreeTest::exposesContextActionsForItemUnderCursor()
     QCOMPARE(contextActionsFor(navigation, availableItem),
              QList<ContextAction>({ContextAction::Mount, ContextAction::Properties}));
 
-    QCOMPARE(contextActionsFor(navigation, categoryNamed(navigation.tree(), QStringLiteral("Local"))),
-             QList<ContextAction>{});
+    QCOMPARE(
+        contextActionsFor(navigation, categoryNamed(navigation.tree(), QStringLiteral("Local"))),
+        QList<ContextAction>{});
     QCOMPARE(contextActionsFor(navigation, machine), QList<ContextAction>{});
     QCOMPARE(contextActionsFor(navigation, servers), QList<ContextAction>{});
     QCOMPARE(contextActionsFor(navigation, childNamed(machine, QStringLiteral("Volumes"))),
@@ -714,7 +717,9 @@ void NavigationTreeTest::preservesRemoteMountpointsForOneDevice()
     QCOMPARE(items.size(), 2);
     QSet<QString> paths;
     for (QTreeWidgetItem* const item : std::as_const(items)) {
-        paths.insert(item->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().rootPath);
+        paths.insert(item->data(0, rfm::app::NavigationTree::VolumeRole)
+                         .value<rfm::core::StorageVolume>()
+                         .rootPath);
     }
     QCOMPARE(paths, QSet<QString>({QStringLiteral("/mnt/data-a"), QStringLiteral("/mnt/data-b")}));
 
@@ -736,9 +741,11 @@ void NavigationTreeTest::preservesRemoteMountpointsForOneDevice()
     navigation.setRemoteStorageVolumes(QStringLiteral("remote-id"), {changed});
     items = volumeItemsByDevice(server, first.device);
     QCOMPARE(items.size(), 1);
-    QCOMPARE(
-        items.constFirst()->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().rootPath,
-        QStringLiteral("/mnt/data-c"));
+    QCOMPARE(items.constFirst()
+                 ->data(0, rfm::app::NavigationTree::VolumeRole)
+                 .value<rfm::core::StorageVolume>()
+                 .rootPath,
+             QStringLiteral("/mnt/data-c"));
 
     rfm::core::StorageVolume available = first;
     available.rootPath.clear();

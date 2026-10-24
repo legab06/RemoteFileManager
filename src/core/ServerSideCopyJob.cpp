@@ -90,6 +90,7 @@ void ServerSideCopyJob::failTransport(QString error)
         if (!current.success) {
             current.error = error;
             if (m_stagingOwned && !m_stagingDirectory.isEmpty()) {
+                current.storageModified = true;
                 current.error +=
                     QStringLiteral(" Temporary %1 staging may remain at %2; its contents are "
                                    "indeterminate because cleanup was not attempted after the "
@@ -388,6 +389,7 @@ void ServerSideCopyJob::finishItem(const RemoteBackendResult& result)
 {
     RemoteItemResult& item = m_result.items.last();
     item.success = result.succeeded();
+    item.storageModified = item.storageModified || item.success;
     item.error = describeError(result);
     if (item.success) {
         completeCurrentItemByteProgress(result);
@@ -463,6 +465,8 @@ void ServerSideCopyJob::finishCleanup(const RemoteBackendResult& cleanupResult)
 {
     if (cleanupResult.succeeded()) {
         m_stagingOwned = false;
+    } else if (!m_result.items.isEmpty() && m_stagingOwned) {
+        m_result.items.last().storageModified = true;
     }
 
     const CleanupContinuation continuation = m_cleanupContinuation;
@@ -656,6 +660,7 @@ void ServerSideCopyJob::step()
                     .arg(describeError(promoted));
             beginCleanup(CleanupContinuation::FinishFailure, contextual);
         } else {
+            m_result.items.last().storageModified = true;
             if (m_operationKind == RemoteOperationKind::Move) {
                 beginCleanup(CleanupContinuation::RemoveSource, {});
             } else {
@@ -802,6 +807,7 @@ void ServerSideCopyJob::finishCancellation(const RemoteBackendResult& result)
                            "because process termination could not be confirmed: %2")
                 .arg(m_stagingDirectory, failure);
         m_result.items.last().error = detail;
+        m_result.items.last().storageModified = true;
         m_progress.currentItem.clear();
         m_progress.cancellationSupported = false;
         m_progress.state = OperationState::Failed;

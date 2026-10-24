@@ -403,8 +403,10 @@ QTreeWidgetItem* volumeItemByDevice(QTreeWidgetItem* root, const QString& device
     if (root == nullptr) {
         return nullptr;
     }
-    if (root->data(0, Qt::UserRole + 6).isValid() &&
-        root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().device == device) {
+    if (root->data(0, rfm::app::NavigationTree::VolumeRole).isValid() &&
+        root->data(0, rfm::app::NavigationTree::VolumeRole)
+                .value<rfm::core::StorageVolume>()
+                .device == device) {
         return root;
     }
     for (int index = 0; index < root->childCount(); ++index) {
@@ -421,8 +423,9 @@ QTreeWidgetItem* volumeItemByDeviceAndPath(QTreeWidgetItem* root, const QString&
     if (root == nullptr) {
         return nullptr;
     }
-    if (root->data(0, Qt::UserRole + 6).isValid()) {
-        const auto volume = root->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>();
+    if (root->data(0, rfm::app::NavigationTree::VolumeRole).isValid()) {
+        const auto volume =
+            root->data(0, rfm::app::NavigationTree::VolumeRole).value<rfm::core::StorageVolume>();
         if (volume.device == device && volume.rootPath == path) {
             return root;
         }
@@ -520,6 +523,8 @@ class MainWindowTest final : public QObject
     void keepsLargeRemoteDirectoryRenderForIdenticalListing();
     void replacesLargeRemoteDirectoryRenderForChangedListing();
     void refreshesAfterCompletedUpload();
+    void refreshesLocalStorageAfterPersistentOperationResults();
+    void refreshesRemoteStorageAfterPersistentOperationResults();
     void localAndRemoteNavigationShowOpeningStatusMessage();
     void manualRefreshShowsStatusMessage();
     void crossSourceMoveUnsupportedReplacesRefreshMessage();
@@ -2875,8 +2880,7 @@ void MainWindowTest::savesManualServerOnlyAfterSuccessAndAvoidsDuplicates()
     storageCapabilities.windowsPowerShell = rfm::core::CapabilitySupport::Supported;
     storageCapabilities.windowsGetVolume = rfm::core::CapabilitySupport::Supported;
     storageCapabilities.windowsGetDisk = rfm::core::CapabilitySupport::Supported;
-    storageCapabilities.provider =
-        rfm::core::selectRemoteStorageProvider(storageCapabilities);
+    storageCapabilities.provider = rfm::core::selectRemoteStorageProvider(storageCapabilities);
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleRemoteStorageCapabilitiesDetected", Qt::DirectConnection,
         Q_ARG(rfm::core::ConnectionProfile, temporaryProfile),
@@ -4166,6 +4170,188 @@ void MainWindowTest::refreshesAfterCompletedUpload()
                                       Q_ARG(rfm::core::TransferProgress, download)));
     QVERIFY(!debounce->isActive());
     QCOMPARE(requested.size(), 0);
+}
+
+void MainWindowTest::refreshesLocalStorageAfterPersistentOperationResults()
+{
+    QTemporaryDir temporary;
+    QVERIFY(temporary.isValid());
+    const QString source = QDir(temporary.path()).filePath(QStringLiteral("source"));
+    const QString destination = QDir(temporary.path()).filePath(QStringLiteral("destination"));
+    QVERIFY(QDir().mkpath(source));
+    QVERIFY(QDir().mkpath(destination));
+    QFile file(QDir(source).filePath(QStringLiteral("file.txt")));
+    QVERIFY(file.open(QIODevice::WriteOnly));
+    QCOMPARE(file.write("data"), qint64{4});
+    file.close();
+
+    rfm::app::MainWindow window;
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localFileOperationRequested, nullptr,
+                        nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localDirectoryRequested, nullptr, nullptr);
+    QSignalSpy storageRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::localFileOperationRequested);
+    showLocalSplit(window, source, destination, {{QStringLiteral("file.txt"), 4, {}, false, false}},
+                   {});
+    auto* const sourcePane = window.findChild<rfm::app::PaneWorkspace*>()->primaryPane();
+    auto* const copy = window.findChild<QAction*>(QStringLiteral("copyToOtherPaneAction"));
+    const auto startCopy = [&] {
+        sourcePane->fileTable()->selectRow(0);
+        copy->trigger();
+        return operations.constLast().constFirst().value<rfm::core::LocalFileOperationRequest>();
+    };
+
+    const auto completedRequest = startCopy();
+    const rfm::core::LocalFileOperationResult completed{
+        completedRequest.id,
+        completedRequest.kind,
+        {{completedRequest.sourcePaths.constFirst(),
+          QDir(destination).filePath(QStringLiteral("file.txt")),
+          true,
+          {},
+          rfm::core::LocalFileOperationOutcome::Succeeded,
+          true}},
+        false};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::LocalFileOperationResult, completed)));
+    QCOMPARE(storageRefreshes.size(), 1);
+
+    // A duplicate terminal result has no live operation context and must not schedule twice.
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::LocalFileOperationResult, completed)));
+    QCOMPARE(storageRefreshes.size(), 1);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+
+    const auto failedRequest = startCopy();
+    const rfm::core::LocalFileOperationResult failed{
+        failedRequest.id,
+        failedRequest.kind,
+        {{failedRequest.sourcePaths.constFirst(),
+          QDir(destination).filePath(QStringLiteral("file.txt")), false,
+          QStringLiteral("permission denied"), rfm::core::LocalFileOperationOutcome::Failed,
+          false}},
+        false};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::LocalFileOperationResult, failed)));
+    QCOMPARE(storageRefreshes.size(), 1);
+
+    const auto partialRequest = startCopy();
+    const rfm::core::LocalFileOperationResult partial{
+        partialRequest.id,
+        partialRequest.kind,
+        {{partialRequest.sourcePaths.constFirst(),
+          QDir(destination).filePath(QStringLiteral("file.txt")), false,
+          QStringLiteral("cleanup failed"), rfm::core::LocalFileOperationOutcome::Failed, true}},
+        true};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::LocalFileOperationResult, partial)));
+    QCOMPARE(storageRefreshes.size(), 2);
+
+    // A second mutation during the active scan is coalesced into one follow-up scan.
+    const auto duringScanRequest = startCopy();
+    auto duringScan = completed;
+    duringScan.id = duringScanRequest.id;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleLocalFileOperationResult",
+                                      Qt::DirectConnection,
+                                      Q_ARG(rfm::core::LocalFileOperationResult, duringScan)));
+    QCOMPARE(storageRefreshes.size(), 2);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+    QCOMPARE(storageRefreshes.size(), 3);
+}
+
+void MainWindowTest::refreshesRemoteStorageAfterPersistentOperationResults()
+{
+    rfm::app::MainWindow window;
+    QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
+    QObject::disconnect(&window, &rfm::app::MainWindow::createDirectoryRequested, nullptr, nullptr);
+    QSignalSpy storageRefreshes(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    QSignalSpy operations(&window, &rfm::app::MainWindow::createDirectoryRequested);
+    setConnectionIdentity(window, QStringLiteral("storage-a.example.test"));
+    QCOMPARE(storageRefreshes.size(), 1);
+    const quint64 initialRefresh = storageRefreshes.constFirst().constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, initialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+
+    auto* const create = window.findChild<QAction*>(QStringLiteral("createDirectoryAction"));
+    const auto startCreate = [&](const QString& name) {
+        QTimer::singleShot(0, [name] {
+            auto* const dialog = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+            QVERIFY(dialog != nullptr);
+            dialog->setTextValue(name);
+            dialog->accept();
+        });
+        create->trigger();
+        return operations.constLast().constFirst().toULongLong();
+    };
+
+    const quint64 completedId = startCreate(QStringLiteral("created"));
+    const rfm::core::RemoteOperationResult completed{
+        completedId,
+        rfm::core::RemoteOperationKind::CreateDirectory,
+        {{QString{}, QStringLiteral("created"), true, {}, true}}};
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, completed)));
+    QCOMPARE(storageRefreshes.size(), 2);
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, completed)));
+    QCOMPARE(storageRefreshes.size(), 2);
+    const quint64 completedRefresh = storageRefreshes.at(1).constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+        Q_ARG(quint64, completedRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+
+    const quint64 failedId = startCreate(QStringLiteral("failed"));
+    const rfm::core::RemoteOperationResult failed{
+        failedId,
+        rfm::core::RemoteOperationKind::CreateDirectory,
+        {{QString{}, QStringLiteral("failed"), false, QStringLiteral("permission denied"), false}}};
+    QTimer::singleShot(0, [] {
+        if (auto* const message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            message->accept();
+        }
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, failed)));
+    QCOMPARE(storageRefreshes.size(), 2);
+
+    const quint64 partialId = startCreate(QStringLiteral("partial"));
+    auto partial = failed;
+    partial.id = partialId;
+    partial.items[0].storageModified = true;
+    QTimer::singleShot(0, [] {
+        if (auto* const message = qobject_cast<QMessageBox*>(QApplication::activeModalWidget())) {
+            message->accept();
+        }
+    });
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, partial)));
+    QCOMPARE(storageRefreshes.size(), 3);
+    const quint64 partialRefresh = storageRefreshes.at(2).constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection, Q_ARG(quint64, partialRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+
+    const quint64 staleId = startCreate(QStringLiteral("stale"));
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    setConnectionIdentity(window, QStringLiteral("storage-b.example.test"));
+    QCOMPARE(storageRefreshes.size(), 4);
+    auto stale = completed;
+    stale.id = staleId;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleOperationResult", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::RemoteOperationResult, stale)));
+    QCOMPARE(storageRefreshes.size(), 4);
 }
 
 void MainWindowTest::manualRefreshShowsStatusMessage()
@@ -5772,8 +5958,8 @@ void MainWindowTest::remoteDragDropRoutesModifierIntentionsToExistingRequests()
                               rfm::core::RemoteOperationKind expectedKind) {
         const Qt::DropAction expectedDropAction =
             expectedKind == rfm::core::RemoteOperationKind::Copy ? Qt::CopyAction : Qt::MoveAction;
-        QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
-                              modifiers);
+        QDragEnterEvent enter(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime,
+                              Qt::LeftButton, modifiers);
         QApplication::sendEvent(destinationPane->fileTable()->viewport(), &enter);
         QVERIFY(enter.isAccepted());
         QCOMPARE(enter.dropAction(), expectedDropAction);
@@ -5868,8 +6054,8 @@ void MainWindowTest::remoteCrossFilesystemPreflightRoutesOriginalDrop()
     const QPoint background(10, destinationPane->fileTable()->viewport()->height() - 2);
     QList<QVariant> request;
     const auto beginDrop = [&] {
-        QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
-                              Qt::NoModifier);
+        QDragEnterEvent enter(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime,
+                              Qt::LeftButton, Qt::NoModifier);
         QApplication::sendEvent(destinationPane->fileTable()->viewport(), &enter);
         QVERIFY(enter.isAccepted());
         QCOMPARE(enter.dropAction(), Qt::CopyAction);
@@ -6005,8 +6191,8 @@ void MainWindowTest::localDragDropRoutesModifierIntentionsToExistingRequests()
     QMimeData mime;
     mime.setData(rfm::core::InternalTransferMimeType, sourcePane->createInternalDragData());
     const QPoint background(10, destinationPane->fileTable()->viewport()->height() - 2);
-    QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
-                          modifiers);
+    QDragEnterEvent enter(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime,
+                          Qt::LeftButton, modifiers);
     QApplication::sendEvent(destinationPane->fileTable()->viewport(), &enter);
     QVERIFY(enter.isAccepted());
     QCOMPARE(enter.dropAction(), expectedDropAction);
@@ -6121,10 +6307,15 @@ void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
     rfm::app::MainWindow window;
     QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
+    QSignalSpy storageRefreshes(&window, &rfm::app::MainWindow::remoteStorageRequested);
+    setConnectionIdentity(window, QStringLiteral("uploads.example.test"),
+                          QStringLiteral("test-user"), QStringLiteral("/uploads"));
+    QCOMPARE(storageRefreshes.size(), 1);
+    const quint64 initialStorageRefresh = storageRefreshes.constFirst().constFirst().toULongLong();
     QVERIFY(QMetaObject::invokeMethod(
-        &window, "showRemoteDirectory", Qt::DirectConnection,
-        Q_ARG(QString, QStringLiteral("/uploads")),
-        Q_ARG(QList<rfm::core::RemoteEntry>, QList<rfm::core::RemoteEntry>{})));
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+        Q_ARG(quint64, initialStorageRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
     auto* const workspace = window.findChild<rfm::app::PaneWorkspace*>();
     QVERIFY(workspace != nullptr);
     auto* const sourcePane = workspace->primaryPane();
@@ -6175,9 +6366,11 @@ void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
     uploadCompleted.source = firstUpload.source;
     uploadCompleted.destination = firstUpload.destination;
     uploadCompleted.direction = firstUpload.direction;
+    uploadCompleted.destinationModified = true;
     window.statusBar()->showMessage(QStringLiteral("Transfer completed"));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, uploadCompleted)));
+    QCOMPARE(storageRefreshes.size(), 2);
     QVERIFY(debounce->isActive());
     debounce->stop();
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
@@ -6193,8 +6386,15 @@ void MainWindowTest::localToSshDragDropQueuesExistingUploadsAndRejectsMove()
     uploadAfterNavigation.source = secondUpload.source;
     uploadAfterNavigation.destination = secondUpload.destination;
     uploadAfterNavigation.direction = secondUpload.direction;
+    uploadAfterNavigation.destinationModified = true;
+    const quint64 firstOperationRefresh = storageRefreshes.at(1).constFirst().toULongLong();
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleRemoteStorageVolumes", Qt::DirectConnection,
+        Q_ARG(quint64, firstOperationRefresh),
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, uploadAfterNavigation)));
+    QCOMPARE(storageRefreshes.size(), 3);
     QVERIFY(!debounce->isActive());
 
     QVERIFY(QMetaObject::invokeMethod(
@@ -6222,6 +6422,8 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
     };
 
     rfm::app::MainWindow window;
+    waitForInitialLocalStorageRefresh(window);
+    QObject::disconnect(&window, &rfm::app::MainWindow::localVolumesRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::remoteStorageRequested, nullptr, nullptr);
     QObject::disconnect(&window, &rfm::app::MainWindow::directoryRequested, nullptr, nullptr);
     QVERIFY(QMetaObject::invokeMethod(&window, "showRemoteDirectory", Qt::DirectConnection,
@@ -6245,6 +6447,7 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
     QObject::disconnect(&window, &rfm::app::MainWindow::transferRequested, nullptr, nullptr);
     QSignalSpy transfers(&window, &rfm::app::MainWindow::transferRequested);
     QSignalSpy removes(&window, &rfm::app::MainWindow::removeRequested);
+    QSignalSpy storageRefreshes(&window, &rfm::app::MainWindow::localVolumesRequested);
 
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleInternalDrop", Qt::DirectConnection,
@@ -6283,8 +6486,10 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
     downloadCompleted.source = firstDownload.source;
     downloadCompleted.destination = firstDownload.destination;
     downloadCompleted.direction = firstDownload.direction;
+    downloadCompleted.destinationModified = true;
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, downloadCompleted)));
+    QCOMPARE(storageRefreshes.size(), 1);
     QVERIFY(debounce->isActive());
     debounce->stop();
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
@@ -6300,8 +6505,14 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
     downloadAfterNavigation.source = secondDownload.source;
     downloadAfterNavigation.destination = secondDownload.destination;
     downloadAfterNavigation.direction = secondDownload.direction;
+    downloadAfterNavigation.destinationModified = true;
     QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
                                       Q_ARG(rfm::core::TransferProgress, downloadAfterNavigation)));
+    QCOMPARE(storageRefreshes.size(), 1);
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+    QCOMPARE(storageRefreshes.size(), 2);
     QVERIFY(debounce->isActive());
     destinationPane->showDirectory(
         {rfm::core::FileSource::Local, rfm::core::LocalMachineId, otherDirectory}, otherDirectory,
@@ -6310,14 +6521,32 @@ void MainWindowTest::sshToLocalDragDropQueuesExistingDownloadsAndRejectsStaleSes
     QVERIFY(QMetaObject::invokeMethod(debounce, "timeout", Qt::DirectConnection));
     QCOMPARE(localRefreshes.size(), 0);
 
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleLocalStorageVolumes", Qt::DirectConnection,
+        Q_ARG(QList<rfm::core::StorageVolume>, QList<rfm::core::StorageVolume>{})));
+    QVERIFY(QMetaObject::invokeMethod(
+        &window, "handleInternalDrop", Qt::DirectConnection,
+        Q_ARG(rfm::core::InternalTransferPayload, *sshPayload),
+        Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
+        Q_ARG(quint64, destinationPaneId), Q_ARG(QString, otherDirectory), Q_ARG(bool, false)));
+    QCOMPARE(transfers.size(), 4);
+    const auto staleDownload = transfers.at(2).constFirst().value<rfm::core::TransferRequest>();
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));
+    auto lateProgress = progress(staleDownload.id, rfm::core::TransferState::Completed, 1, 1);
+    lateProgress.source = staleDownload.source;
+    lateProgress.destination = staleDownload.destination;
+    lateProgress.direction = staleDownload.direction;
+    lateProgress.destinationModified = true;
+    QVERIFY(QMetaObject::invokeMethod(&window, "handleTransferProgress", Qt::DirectConnection,
+                                      Q_ARG(rfm::core::TransferProgress, lateProgress)));
+    QCOMPARE(storageRefreshes.size(), 2);
     QVERIFY(QMetaObject::invokeMethod(
         &window, "handleInternalDrop", Qt::DirectConnection,
         Q_ARG(rfm::core::InternalTransferPayload, *sshPayload),
         Q_ARG(rfm::core::InternalTransferAction, rfm::core::InternalTransferAction::Copy),
         Q_ARG(quint64, destinationPaneId), Q_ARG(QString, destinationDirectory),
         Q_ARG(bool, true)));
-    QCOMPARE(transfers.size(), 2);
+    QCOMPARE(transfers.size(), 4);
     QCOMPARE(removes.size(), 0);
 }
 
@@ -7475,7 +7704,9 @@ void MainWindowTest::remoteDisconnectAfterCommandBeforeRefreshKeepsObservedModel
     QTreeWidgetItem* const stillObserved =
         volumeItemByDevice(remoteCategoryItem(navigation->tree()), available.device);
     QVERIFY(stillObserved != nullptr);
-    QCOMPARE(stillObserved->data(0, Qt::UserRole + 6).value<rfm::core::StorageVolume>().mounted,
+    QCOMPARE(stillObserved->data(0, rfm::app::NavigationTree::VolumeRole)
+                 .value<rfm::core::StorageVolume>()
+                 .mounted,
              false);
 
     QVERIFY(QMetaObject::invokeMethod(&window, "handleDisconnected", Qt::DirectConnection));

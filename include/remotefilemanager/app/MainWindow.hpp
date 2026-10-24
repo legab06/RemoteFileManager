@@ -152,8 +152,9 @@ class MainWindow final : public QMainWindow
                                                       rfm::core::ServerCapabilities capabilities);
     Q_INVOKABLE void handleRemoteCopyExecutionCapabilitiesDetected(
         rfm::core::RemoteCopyExecutionCapabilities capabilities);
-    Q_INVOKABLE void handleRemoteStorageCapabilitiesDetected(
-        rfm::core::ConnectionProfile profile, rfm::core::RemoteStorageCapabilities capabilities);
+    Q_INVOKABLE void
+    handleRemoteStorageCapabilitiesDetected(rfm::core::ConnectionProfile profile,
+                                            rfm::core::RemoteStorageCapabilities capabilities);
     void associateServerCapabilities(const rfm::core::ConnectionProfile& previousProfile,
                                      const rfm::core::ConnectionProfile& savedProfile);
     void removeSelectedServerProfile();
@@ -265,6 +266,8 @@ class MainWindow final : public QMainWindow
     volumeOperationErrorMessage(const rfm::core::VolumeOperationResult& result) const;
     void openRemoteTreeLocation(const QString& profileId, const QString& path);
     void refreshStorage();
+    void refreshLocalStorage();
+    void refreshRemoteStorage();
     Q_INVOKABLE void probeStorage();
     void probeLocalStorage();
     void probeRemoteStorage();
@@ -411,6 +414,7 @@ class MainWindow final : public QMainWindow
         quint64 destinationPaneId{0};
         QString sourceDirectory;
         QString destinationDirectory;
+        quint64 connectionGeneration{0};
     };
     QHash<quint64, OperationContext> m_operationContexts;
     QHash<quint64, OperationContext> m_localOperationContexts;

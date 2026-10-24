@@ -55,11 +55,11 @@ class LocalFileOperationBackend
 
 struct LocalFileOperationRequest {
     LocalFileOperationRequest() = default;
-    LocalFileOperationRequest(quint64 operationId, LocalFileOperationKind operationKind,
-                              QString operationParentPath, QStringList operationSourcePaths,
-                              QString operationNewName, QString operationDestinationDirectory = {},
-                              LocalCollisionPolicy operationCollisionPolicy =
-                                  LocalCollisionPolicy::Fail)
+    LocalFileOperationRequest(
+        quint64 operationId, LocalFileOperationKind operationKind, QString operationParentPath,
+        QStringList operationSourcePaths, QString operationNewName,
+        QString operationDestinationDirectory = {},
+        LocalCollisionPolicy operationCollisionPolicy = LocalCollisionPolicy::Fail)
         : id(operationId), kind(operationKind), parentPath(std::move(operationParentPath)),
           sourcePaths(std::move(operationSourcePaths)), newName(std::move(operationNewName)),
           destinationDirectory(std::move(operationDestinationDirectory)),
@@ -81,6 +81,8 @@ struct LocalFileOperationItemResult {
     bool success{false};
     QString error;
     LocalFileOperationOutcome outcome{LocalFileOperationOutcome::Failed};
+    // Includes persistent partial changes and cleanup/rollback remnants on failure.
+    bool storageModified{false};
 };
 
 struct LocalFileOperationResult {

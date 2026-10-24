@@ -203,7 +203,7 @@ void FileBrowserPaneTest::preservesMosaicClickSelectionAsDetailsRowSelection()
     rfm::app::FileBrowserPane pane;
     pane.resize(480, 320);
     pane.showDirectory({rfm::core::FileSource::Local,
-                       QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
+                        QString::fromLatin1(rfm::core::LocalMachineId), QStringLiteral("/fixture")},
                        QStringLiteral("/fixture"),
                        {{QStringLiteral("one.txt"), 1, {}, false, false, false},
                         {QStringLiteral("two.txt"), 2, {}, false, false, false},
@@ -260,8 +260,8 @@ void FileBrowserPaneTest::mosaicZoomHandlesWheelAndBounds()
     const auto wheel = [mosaic](int delta, Qt::KeyboardModifiers modifiers) {
         QWheelEvent event(mosaic->viewport()->rect().center(),
                           mosaic->viewport()->mapToGlobal(mosaic->viewport()->rect().center()),
-                          QPoint{}, QPoint{0, delta}, Qt::NoButton, modifiers,
-                          Qt::NoScrollPhase, false);
+                          QPoint{}, QPoint{0, delta}, Qt::NoButton, modifiers, Qt::NoScrollPhase,
+                          false);
         QApplication::sendEvent(mosaic->viewport(), &event);
     };
     wheel(120, Qt::ControlModifier);
@@ -289,9 +289,9 @@ void FileBrowserPaneTest::mosaicZoomIsIndependentAndPersistsAcrossViewSwitch()
 {
     rfm::app::FileBrowserPane first;
     rfm::app::FileBrowserPane second;
-    const auto location = rfm::core::BrowserLocation{
-        rfm::core::FileSource::Local, QString::fromLatin1(rfm::core::LocalMachineId),
-        QStringLiteral("/fixture")};
+    const auto location = rfm::core::BrowserLocation{rfm::core::FileSource::Local,
+                                                     QString::fromLatin1(rfm::core::LocalMachineId),
+                                                     QStringLiteral("/fixture")};
     const QList<rfm::core::RemoteEntry> entries{
         {QStringLiteral("one.txt"), 1, {}, false, false, false}};
     first.showDirectory(location, QStringLiteral("/fixture"), entries);
@@ -302,9 +302,9 @@ void FileBrowserPaneTest::mosaicZoomIsIndependentAndPersistsAcrossViewSwitch()
     auto zoomOnce = [](rfm::app::FileBrowserPane& pane) {
         auto* const view = pane.mosaicView();
         QWheelEvent event(view->viewport()->rect().center(),
-                          view->viewport()->mapToGlobal(view->viewport()->rect().center()), QPoint{},
-                          QPoint{0, 120}, Qt::NoButton, Qt::ControlModifier, Qt::NoScrollPhase,
-                          false);
+                          view->viewport()->mapToGlobal(view->viewport()->rect().center()),
+                          QPoint{}, QPoint{0, 120}, Qt::NoButton, Qt::ControlModifier,
+                          Qt::NoScrollPhase, false);
         QApplication::sendEvent(view->viewport(), &event);
     };
     zoomOnce(first);
@@ -2174,7 +2174,7 @@ void FileBrowserPaneTest::mosaicDropUsesTheExistingTransferPipeline()
     QSignalSpy drops(&destination, &rfm::app::FileBrowserPane::internalDropRequested);
     auto* const mosaic = destination.mosaicView();
     const QPoint position = mosaic->visualRect(mosaic->model()->index(0, 0)).center();
-    QDragEnterEvent enter(position, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
+    QDragEnterEvent enter(QPointF(position), Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
                           Qt::NoModifier);
     QApplication::sendEvent(mosaic->viewport(), &enter);
     QVERIFY(enter.isAccepted());
@@ -2248,7 +2248,7 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
 
     const QPoint childPosition =
         destination.fileTable()->visualItemRect(destination.fileTable()->item(0, 0)).center();
-    QDragEnterEvent childEnter(childPosition, Qt::CopyAction | Qt::MoveAction, &mime,
+    QDragEnterEvent childEnter(QPointF(childPosition), Qt::CopyAction | Qt::MoveAction, &mime,
                                Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &childEnter);
     QVERIFY(childEnter.isAccepted());
@@ -2269,8 +2269,8 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
 
     const QPoint filePosition =
         destination.fileTable()->visualItemRect(destination.fileTable()->item(1, 0)).center();
-    QDragEnterEvent fileEnter(filePosition, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
-                              Qt::ControlModifier);
+    QDragEnterEvent fileEnter(QPointF(filePosition), Qt::CopyAction | Qt::MoveAction, &mime,
+                              Qt::LeftButton, Qt::ControlModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &fileEnter);
     QVERIFY(fileEnter.isAccepted());
     QCOMPARE(fileEnter.dropAction(), Qt::CopyAction);
@@ -2287,8 +2287,8 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QVERIFY(fileArguments.at(3).toBool());
 
     const QPoint emptyPosition(10, destination.fileTable()->viewport()->height() - 2);
-    QDragEnterEvent shiftedEmptyEnter(emptyPosition, Qt::CopyAction | Qt::MoveAction, &mime,
-                                      Qt::LeftButton, Qt::ShiftModifier);
+    QDragEnterEvent shiftedEmptyEnter(QPointF(emptyPosition), Qt::CopyAction | Qt::MoveAction,
+                                      &mime, Qt::LeftButton, Qt::ShiftModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &shiftedEmptyEnter);
     QVERIFY(shiftedEmptyEnter.isAccepted());
     QCOMPARE(shiftedEmptyEnter.dropAction(), Qt::MoveAction);
@@ -2304,7 +2304,7 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QCOMPARE(emptyArguments.at(2).toString(), QStringLiteral("/target"));
     QVERIFY(emptyArguments.at(3).toBool());
 
-    QDragEnterEvent priorityEnter(emptyPosition, Qt::CopyAction | Qt::MoveAction, &mime,
+    QDragEnterEvent priorityEnter(QPointF(emptyPosition), Qt::CopyAction | Qt::MoveAction, &mime,
                                   Qt::LeftButton, Qt::ControlModifier | Qt::ShiftModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &priorityEnter);
     QVERIFY(priorityEnter.isAccepted());
@@ -2322,7 +2322,7 @@ void FileBrowserPaneTest::resolvesDropOnCurrentDirectoryAndSubfolder()
     QVERIFY(priorityArguments.at(3).toBool());
 
     destination.showDirectory(QStringLiteral("/source"), QStringLiteral("/source"), {});
-    QDragEnterEvent invalidEnter(emptyPosition, Qt::CopyAction | Qt::MoveAction, &mime,
+    QDragEnterEvent invalidEnter(QPointF(emptyPosition), Qt::CopyAction | Qt::MoveAction, &mime,
                                  Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(destination.fileTable()->viewport(), &invalidEnter);
     QVERIFY(invalidEnter.isAccepted());
@@ -2393,8 +2393,8 @@ void FileBrowserPaneTest::constructsLocalPayloadAndResolvesLocalDropDestinations
         const Qt::DropAction expectedDropAction =
             expectedAction == rfm::core::InternalTransferAction::Copy ? Qt::CopyAction
                                                                       : Qt::MoveAction;
-        QDragEnterEvent enter(position, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
-                              modifiers);
+        QDragEnterEvent enter(QPointF(position), Qt::CopyAction | Qt::MoveAction, &mime,
+                              Qt::LeftButton, modifiers);
         QApplication::sendEvent(destination.fileTable()->viewport(), &enter);
         QVERIFY(enter.isAccepted());
         QCOMPARE(enter.dropAction(), expectedDropAction);
@@ -2467,23 +2467,24 @@ void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
     QMimeData localMime;
     localMime.setData(rfm::core::InternalTransferMimeType, localData);
     const QPoint background(10, ssh.fileTable()->viewport()->height() - 2);
-    QDragEnterEvent normalEnter(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+    QDragEnterEvent normalEnter(QPointF(background), Qt::CopyAction | Qt::MoveAction, &localMime,
                                 Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(ssh.fileTable()->viewport(), &normalEnter);
     QVERIFY(normalEnter.isAccepted());
     QCOMPARE(normalEnter.dropAction(), Qt::CopyAction);
-    QDragMoveEvent shiftedMove(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+    QDragMoveEvent shiftedMove(QPointF(background), Qt::CopyAction | Qt::MoveAction, &localMime,
                                Qt::LeftButton, Qt::ShiftModifier);
     QApplication::sendEvent(ssh.fileTable()->viewport(), &shiftedMove);
     QVERIFY(!shiftedMove.isAccepted());
     QCOMPARE(shiftedMove.dropAction(), Qt::IgnoreAction);
-    QDragMoveEvent restoredMove(background, Qt::CopyAction | Qt::MoveAction, &localMime,
+    QDragMoveEvent restoredMove(QPointF(background), Qt::CopyAction | Qt::MoveAction, &localMime,
                                 Qt::LeftButton, Qt::NoModifier);
     QApplication::sendEvent(ssh.fileTable()->viewport(), &restoredMove);
     QVERIFY(restoredMove.isAccepted());
     QCOMPARE(restoredMove.dropAction(), Qt::CopyAction);
-    QDragMoveEvent controlShiftMove(background, Qt::CopyAction | Qt::MoveAction, &localMime,
-                                    Qt::LeftButton, Qt::ControlModifier | Qt::ShiftModifier);
+    QDragMoveEvent controlShiftMove(QPointF(background), Qt::CopyAction | Qt::MoveAction,
+                                    &localMime, Qt::LeftButton,
+                                    Qt::ControlModifier | Qt::ShiftModifier);
     QApplication::sendEvent(ssh.fileTable()->viewport(), &controlShiftMove);
     QVERIFY(controlShiftMove.isAccepted());
     QCOMPARE(controlShiftMove.dropAction(), Qt::CopyAction);
@@ -2492,8 +2493,8 @@ void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
                              rfm::core::InternalTransferAction expectedIntent, bool accepted) {
         const QPoint background(10, destination.fileTable()->viewport()->height() - 2);
         QSignalSpy drops(&destination, &rfm::app::FileBrowserPane::internalDropRequested);
-        QDragEnterEvent enter(background, Qt::CopyAction | Qt::MoveAction, &mime, Qt::LeftButton,
-                              modifiers);
+        QDragEnterEvent enter(QPointF(background), Qt::CopyAction | Qt::MoveAction, &mime,
+                              Qt::LeftButton, modifiers);
         QApplication::sendEvent(destination.fileTable()->viewport(), &enter);
         QCOMPARE(enter.isAccepted(), accepted);
         QCOMPARE(enter.dropAction(), expectedAction);
@@ -2550,7 +2551,7 @@ void FileBrowserPaneTest::acceptsCrossSourceCopyIntentionsAndPreservesPayload()
              rfm::core::InternalTransferAction::Copy, true);
 
     local.setTransferContext(QStringLiteral("instance"), {}, 1);
-    QDragEnterEvent staleConnection(QPoint(10, local.fileTable()->viewport()->height() - 2),
+    QDragEnterEvent staleConnection(QPointF(10, local.fileTable()->viewport()->height() - 2),
                                     Qt::CopyAction | Qt::MoveAction, &sshMime, Qt::LeftButton,
                                     Qt::NoModifier);
     QApplication::sendEvent(local.fileTable()->viewport(), &staleConnection);
