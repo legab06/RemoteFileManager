@@ -7,6 +7,7 @@
 #include <QRegularExpression>
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 namespace rfm::ssh
@@ -46,6 +47,22 @@ bool safeDeviceSource(const QString& path)
 }
 
 } // namespace
+
+RemoteStorageSizeResult detail::calculateRemoteStorageSize(quint64 blocks, quint64 blocksAvailable,
+                                                           quint64 fragmentSize)
+{
+    RemoteStorageSizeResult result;
+    if (fragmentSize == 0) {
+        return result;
+    }
+    if (blocks <= std::numeric_limits<quint64>::max() / fragmentSize) {
+        result.bytesTotal = blocks * fragmentSize;
+    }
+    if (blocksAvailable <= std::numeric_limits<quint64>::max() / fragmentSize) {
+        result.bytesAvailable = blocksAvailable * fragmentSize;
+    }
+    return result;
+}
 
 RemoteStorageScanner::RemoteStorageScanner(std::unique_ptr<RemoteStorageReader> reader,
                                            quint64 requestId)
@@ -358,7 +375,8 @@ RemoteStorageScanStep RemoteStorageScanner::step()
         }
         m_volumes.push_back(rfm::core::makeStorageVolume(
             m_currentMount, device, m_labels.value(m_currentDeviceIdentity),
-            size.error == RemoteStorageError::None ? size.bytes : quint64{0}));
+            size.error == RemoteStorageError::None ? size.bytesTotal.value_or(0) : quint64{0},
+            size.error == RemoteStorageError::None ? size.bytesAvailable : std::nullopt));
         ++m_mountIndex;
         m_stage = Stage::BeginMount;
         return {};

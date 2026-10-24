@@ -13,6 +13,7 @@
 #include <QSet>
 
 #include <algorithm>
+#include <cmath>
 
 namespace rfm::core
 {
@@ -277,6 +278,21 @@ bool externallyAttached(const QString& transport, bool removable)
 
 } // namespace
 
+std::optional<StorageUsage> storageUsage(const StorageVolume& volume)
+{
+    if (!volume.mounted || volume.bytesTotal == 0 || !volume.bytesAvailable.has_value() ||
+        *volume.bytesAvailable > volume.bytesTotal) {
+        return std::nullopt;
+    }
+
+    const quint64 available = *volume.bytesAvailable;
+    const quint64 used = volume.bytesTotal - available;
+    const long double ratio =
+        static_cast<long double>(used) / static_cast<long double>(volume.bytesTotal);
+    const int percentage = std::clamp(static_cast<int>(std::lround(100.0L * ratio)), 0, 100);
+    return StorageUsage{used, available, percentage};
+}
+
 bool isNetworkFileSystem(const QByteArray& fileSystemType)
 {
     const QByteArray normalized = fileSystemType.trimmed().toLower();
@@ -371,7 +387,8 @@ StorageKind classifyStorage(const StorageClassificationEvidence& evidence)
 }
 
 StorageVolume makeStorageVolume(const LinuxMountInfo& mount, const StorageDeviceEvidence& device,
-                                const QString& fileSystemLabel, quint64 bytesTotal)
+                                const QString& fileSystemLabel, quint64 bytesTotal,
+                                std::optional<quint64> bytesAvailable)
 {
     const StorageClassificationEvidence classification{mount.rootPath == QStringLiteral("/"),
                                                        isNetworkFileSystem(mount.fileSystemType),
@@ -384,6 +401,7 @@ StorageVolume makeStorageVolume(const LinuxMountInfo& mount, const StorageDevice
     volume.device = mount.device;
     volume.fileSystemType = mount.fileSystemType;
     volume.bytesTotal = bytesTotal;
+    volume.bytesAvailable = bytesAvailable;
     volume.kind = classifyStorage(classification);
     volume.removable = device.removable;
     volume.ejectable = device.ejectable;

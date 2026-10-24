@@ -86,12 +86,14 @@ void TransferFileJob::fail(const QString& error)
     if (m_temporary != nullptr) {
         m_temporary->close();
         if (!m_temporary->remove()) {
+            m_progress.destinationModified = true;
             appendCleanupError(QStringLiteral("The local temporary file remains on disk."));
         }
     }
     if (m_ownsRemoteTemporary) {
         const TransferBackendResult removeResult = m_backend.remove(m_remoteTemporary);
         if (!removeResult.succeeded() && removeResult.error != TransferBackendError::NotFound) {
+            m_progress.destinationModified = true;
             appendCleanupError(QStringLiteral("The remote temporary file may remain."));
         }
     }
@@ -138,11 +140,13 @@ void TransferFileJob::step()
     }
     if (m_phase == Phase::CancelRemoveTemporary) {
         if (m_temporary != nullptr && !m_temporary->remove()) {
+            m_progress.destinationModified = true;
             appendCleanupError(QStringLiteral("The local temporary file remains on disk."));
         }
         if (m_ownsRemoteTemporary) {
             const TransferBackendResult result = m_backend.remove(m_remoteTemporary);
             if (!result.succeeded() && result.error != TransferBackendError::NotFound) {
+                m_progress.destinationModified = true;
                 appendCleanupError(QStringLiteral("The remote temporary file may remain."));
             }
             m_ownsRemoteTemporary = false;
@@ -332,6 +336,7 @@ void TransferFileJob::step()
             return;
         }
         updateSpeed();
+        m_progress.destinationModified = true;
         m_progress.state = TransferState::Completed;
         m_phase = Phase::Finished;
     }

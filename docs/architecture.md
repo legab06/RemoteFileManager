@@ -289,6 +289,12 @@ non de la sélection précédente. Il ne publie que les intentions compatibles a
 type de nœud ; l'ouverture et les opérations de volume réutilisent les signaux de
 `NavigationTree`, tandis que les propriétés d'un serveur enregistré réutilisent son
 dialogue de profil.
+Les propriétés d'un volume reçoivent directement le snapshot `StorageVolume` sélectionné et
+l'affichent dans un dialogue dédié, sans nouvelle découverte locale ou distante. Les métadonnées
+absentes restent omises. La capacité, l'espace utilisé, l'espace disponible et le pourcentage
+proviennent du même helper métier que la mini-jauge de l'arbre : il ne produit un résultat que
+pour un volume monté, avec une capacité non nulle et un espace disponible connu qui ne dépasse
+pas cette capacité. Les autres entrées de Places conservent leur dialogue textuel existant.
 Le navigateur principal conserve aussi le `RemoteEntry` déjà reçu sur chaque ligne :
 son action `Properties` présente cet instantané sans nouveau parcours local récursif
 ni requête SFTP. Le type utilisateur d'un fichier est déduit uniquement de son nom

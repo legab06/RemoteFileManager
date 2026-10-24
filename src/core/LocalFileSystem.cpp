@@ -88,7 +88,8 @@ QList<LocalStorageMount> mountedStorageSnapshot()
         snapshot.push_back({storage.rootPath(), QFile::decodeName(storage.device()),
                             storage.fileSystemType(), storage.name(), storage.bytesTotal(),
                             storage.isReadOnly(), storage.isValid(), storage.isReady(),
-                            localDeviceNumber(QFile::decodeName(storage.device()))});
+                            localDeviceNumber(QFile::decodeName(storage.device())),
+                            storage.bytesAvailable()});
     }
     return snapshot;
 }
@@ -463,20 +464,26 @@ detail::RemovalBoundaryProbe platformRemovalBoundaryProbe()
 #endif
 }
 
-QString removeLocalEntry(const QString& path, const detail::RemovalBoundaryProbe& probe,
-                         bool preflight)
+struct LocalRemovalResult {
+    QString error;
+    bool storageModified{false};
+};
+
+LocalRemovalResult removeLocalEntry(const QString& path, const detail::RemovalBoundaryProbe& probe,
+                                    bool preflight)
 {
     const QFileInfo info(path);
     if (!localEntryExists(info)) {
-        return QObject::tr("The selected local entry no longer exists.");
+        return {QObject::tr("The selected local entry no longer exists."), false};
     }
     // Never probe or enumerate a link target, including dangling symbolic links.
     if (!info.isSymbolicLink()) {
         const detail::RemovalBoundary boundary = probe(path);
         if (boundary != detail::RemovalBoundary::Clear) {
-            return boundary == detail::RemovalBoundary::MountPoint
-                       ? QObject::tr("Deletion refused at local mount boundary: %1").arg(path)
-                       : QObject::tr("Cannot safely verify local mount boundaries: %1").arg(path);
+            return {boundary == detail::RemovalBoundary::MountPoint
+                        ? QObject::tr("Deletion refused at local mount boundary: %1").arg(path)
+                        : QObject::tr("Cannot safely verify local mount boundaries: %1").arg(path),
+                    false};
         }
     }
     if (info.isSymbolicLink() || !info.isDir()) {
@@ -485,11 +492,12 @@ QString removeLocalEntry(const QString& path, const detail::RemovalBoundaryProbe
         }
         QFile file(path);
         if (!file.remove()) {
-            return file.errorString().isEmpty()
-                       ? QObject::tr("The selected local entry could not be deleted.")
-                       : file.errorString();
+            return {file.errorString().isEmpty()
+                        ? QObject::tr("The selected local entry could not be deleted.")
+                        : file.errorString(),
+                    false};
         }
-        return {};
+        return {{}, true};
     }
 
     // QDir's empty list cannot distinguish an empty directory from an enumeration error.
@@ -512,13 +520,16 @@ QString removeLocalEntry(const QString& path, const detail::RemovalBoundaryProbe
         iterator.increment(enumerationError);
     }
     if (enumerationError) {
-        return QObject::tr("Cannot safely enumerate local folder %1: %2")
-            .arg(path, QString::fromLocal8Bit(enumerationError.message()));
+        return {QObject::tr("Cannot safely enumerate local folder %1: %2")
+                    .arg(path, QString::fromLocal8Bit(enumerationError.message())),
+                false};
     }
+    bool storageModified = false;
     for (const QString& child : children) {
-        const QString error = removeLocalEntry(child, probe, preflight);
-        if (!error.isEmpty()) {
-            return error;
+        const LocalRemovalResult removed = removeLocalEntry(child, probe, preflight);
+        storageModified = storageModified || removed.storageModified;
+        if (!removed.error.isEmpty()) {
+            return {removed.error, storageModified};
         }
     }
     if (preflight) {
@@ -526,9 +537,9 @@ QString removeLocalEntry(const QString& path, const detail::RemovalBoundaryProbe
     }
     QDir parent(info.absolutePath());
     if (!parent.rmdir(info.fileName())) {
-        return QObject::tr("The local folder could not be deleted.");
+        return {QObject::tr("The local folder could not be deleted."), storageModified};
     }
-    return {};
+    return {{}, true};
 }
 
 LocalFileOperationItemResult invalidRequestResult(const QString& source, const QString& destination,
@@ -538,10 +549,15 @@ LocalFileOperationItemResult invalidRequestResult(const QString& source, const Q
 }
 
 LocalFileOperationItemResult operationItemResult(const QString& source, const QString& destination,
-                                                 bool success, const QString& error)
+                                                 bool success, const QString& error,
+                                                 bool storageModified = false)
 {
-    return {source, destination, success, error,
-            success ? LocalFileOperationOutcome::Succeeded : LocalFileOperationOutcome::Failed};
+    return {source,
+            destination,
+            success,
+            error,
+            success ? LocalFileOperationOutcome::Succeeded : LocalFileOperationOutcome::Failed,
+            success || storageModified};
 }
 
 } // namespace
@@ -655,10 +671,9 @@ LocalDirectoryResult LocalFileSystem::listDirectory(const QString& path)
     entries.reserve(infos.size());
     for (const QFileInfo& info : infos) {
         const qint64 signedSize = info.size();
-        entries.push_back({info.fileName(),
-                           signedSize > 0 ? static_cast<quint64>(signedSize) : quint64{0},
-                           info.lastModified(), info.isDir(), info.isSymbolicLink(),
-                           info.isHidden()});
+        entries.push_back(
+            {info.fileName(), signedSize > 0 ? static_cast<quint64>(signedSize) : quint64{0},
+             info.lastModified(), info.isDir(), info.isSymbolicLink(), info.isHidden()});
     }
     return {directory.absolutePath(), std::move(entries), {}};
 }
@@ -773,7 +788,7 @@ LocalFileOperationResult detail::executeLocalRemove(const LocalFileOperationRequ
     }
     for (const qsizetype index : validSourceIndexes) {
         auto& item = result.items[index];
-        item.error = removeLocalEntry(item.source, activeProbe, true);
+        item.error = removeLocalEntry(item.source, activeProbe, true).error;
         preflightFailed = preflightFailed || !item.error.isEmpty();
     }
     if (preflightFailed) {
@@ -786,8 +801,9 @@ LocalFileOperationResult detail::executeLocalRemove(const LocalFileOperationRequ
         return result;
     }
     for (auto& item : result.items) {
-        const QString error = removeLocalEntry(item.source, activeProbe, false);
-        item = operationItemResult(item.source, {}, error.isEmpty(), error);
+        const LocalRemovalResult removed = removeLocalEntry(item.source, activeProbe, false);
+        item = operationItemResult(item.source, {}, removed.error.isEmpty(), removed.error,
+                                   removed.storageModified);
     }
     return result;
 }
@@ -809,7 +825,7 @@ detail::RemovalBoundaryProbe detail::linuxRemovalBoundaryProbe(const QByteArray&
             return RemovalBoundary::Unavailable;
         }
         return mountPoints.contains(canonical) ? RemovalBoundary::MountPoint
-                                              : RemovalBoundary::Clear;
+                                               : RemovalBoundary::Clear;
     };
 }
 
@@ -884,6 +900,9 @@ LocalFileSystem::makeStorageSnapshot(const QList<LocalStorageMount>& snapshot,
         volume.device = device;
         volume.fileSystemType = storage.fileSystemType;
         volume.bytesTotal = signedTotal > 0 ? static_cast<quint64>(signedTotal) : quint64{0};
+        if (storage.bytesAvailable >= 0) {
+            volume.bytesAvailable = static_cast<quint64>(storage.bytesAvailable);
+        }
         volume.kind = classifyStorage(evidence);
         volume.removable = platformDetails.removable;
         volume.ejectable = platformDetails.ejectable;
@@ -946,11 +965,10 @@ void LocalFileOperationWorker::execute(LocalFileOperationRequest request)
 {
     const quint64 operationId = request.id;
     emit started(operationId);
-    emit finished(LocalFileSystem::executeOperation(
-        request, nullptr, [this, operationId] {
-            const QMutexLocker lock(&m_cancellationMutex);
-            return m_cancelledOperationIds.contains(operationId);
-        }));
+    emit finished(LocalFileSystem::executeOperation(request, nullptr, [this, operationId] {
+        const QMutexLocker lock(&m_cancellationMutex);
+        return m_cancelledOperationIds.contains(operationId);
+    }));
     const QMutexLocker lock(&m_cancellationMutex);
     m_cancelledOperationIds.remove(operationId);
 }

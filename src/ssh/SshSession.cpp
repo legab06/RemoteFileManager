@@ -494,15 +494,13 @@ class SftpRemoteStorageReader final : public rfm::ssh::RemoteStorageReader
         const QByteArray encodedPath = mountPoint.toUtf8();
         sftp_statvfs_t attributes = sftp_statvfs(m_sftp, encodedPath.constData());
         if (attributes == nullptr) {
-            return {0, storageError(m_session, m_sftp)};
+            return {std::nullopt, std::nullopt, storageError(m_session, m_sftp)};
         }
-        quint64 bytes = 0;
-        if (attributes->f_frsize > 0 &&
-            attributes->f_blocks <= std::numeric_limits<quint64>::max() / attributes->f_frsize) {
-            bytes = attributes->f_blocks * attributes->f_frsize;
-        }
+        const rfm::ssh::RemoteStorageSizeResult result =
+            rfm::ssh::detail::calculateRemoteStorageSize(attributes->f_blocks, attributes->f_bavail,
+                                                         attributes->f_frsize);
         sftp_statvfs_free(attributes);
-        return {bytes, rfm::ssh::RemoteStorageError::None};
+        return result;
     }
 
     bool connectionAlive() const override

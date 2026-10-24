@@ -42,6 +42,9 @@ struct TransferProgress {
     QString currentItem;
     TransferDirection direction{TransferDirection::Upload};
     bool directory{false};
+    // True only when the destination contains a persistent change. Bytes written to a
+    // temporary file do not count if cancellation or failure removes that file successfully.
+    bool destinationModified{false};
 };
 
 } // namespace rfm::core

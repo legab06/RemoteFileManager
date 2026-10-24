@@ -6,7 +6,8 @@
 #include <QString>
 #include <QtGlobal>
 
-namespace rfm::core {
+namespace rfm::core
+{
 
 enum class RemoteBackendError {
     None,
@@ -41,8 +42,9 @@ struct RemoteDirectoryResult {
     QList<QPair<QString, bool>> entries;
 };
 
-class RemoteFileBackend {
-public:
+class RemoteFileBackend
+{
+  public:
     virtual ~RemoteFileBackend() = default;
 
     [[nodiscard]] virtual RemoteProbeResult probe(const QString& path) = 0;
@@ -52,9 +54,8 @@ public:
                                                      const QString& destination) = 0;
     [[nodiscard]] virtual RemoteBackendResult removeFile(const QString& path) = 0;
     [[nodiscard]] virtual RemoteBackendResult removeDirectory(const QString& path) = 0;
-    [[nodiscard]] virtual RemoteBackendResult copyOnServer(const QString& source,
-                                                           const QString& destination,
-                                                           bool recursive) = 0;
+    [[nodiscard]] virtual RemoteBackendResult
+    copyOnServer(const QString& source, const QString& destination, bool recursive) = 0;
 };
 
 enum class RemoteOperationKind { CreateDirectory, Rename, Move, Copy, Remove };
@@ -69,6 +70,8 @@ struct RemoteItemResult {
     QString destination;
     bool success{false};
     QString error;
+    // Includes persistent partial changes and staging remnants on failure or cancellation.
+    bool storageModified{false};
 };
 
 struct RemoteOperationResult {
@@ -79,33 +82,37 @@ struct RemoteOperationResult {
     [[nodiscard]] bool allSucceeded() const;
 };
 
-class RemoteFileOperations final {
-public:
+class RemoteFileOperations final
+{
+  public:
     explicit RemoteFileOperations(RemoteFileBackend& backend);
 
-    [[nodiscard]] RemoteOperationResult createDirectory(
-        quint64 id, const QString& parent, const QString& name);
-    [[nodiscard]] RemoteOperationResult rename(
-        quint64 id, const QString& source, const QString& newName);
-    [[nodiscard]] RemoteOperationResult move(
-        quint64 id, const QList<RemoteSelection>& sources, const QString& destinationDirectory);
-    [[nodiscard]] RemoteOperationResult copy(
-        quint64 id, const QList<RemoteSelection>& sources, const QString& destinationDirectory);
-    [[nodiscard]] RemoteOperationResult remove(
-        quint64 id, const QList<RemoteSelection>& sources, bool recursive);
+    [[nodiscard]] RemoteOperationResult createDirectory(quint64 id, const QString& parent,
+                                                        const QString& name);
+    [[nodiscard]] RemoteOperationResult rename(quint64 id, const QString& source,
+                                               const QString& newName);
+    [[nodiscard]] RemoteOperationResult move(quint64 id, const QList<RemoteSelection>& sources,
+                                             const QString& destinationDirectory);
+    [[nodiscard]] RemoteOperationResult copy(quint64 id, const QList<RemoteSelection>& sources,
+                                             const QString& destinationDirectory);
+    [[nodiscard]] RemoteOperationResult remove(quint64 id, const QList<RemoteSelection>& sources,
+                                               bool recursive);
 
-private:
+  private:
+    struct RemoveResult {
+        RemoteBackendResult result;
+        bool storageModified{false};
+    };
+
     [[nodiscard]] RemoteItemResult transferOne(const RemoteSelection& source,
-                                               const QString& destinationDirectory,
-                                               bool copy);
-    [[nodiscard]] RemoteBackendResult removeTree(
-        const QString& path, bool directory, bool recursive);
+                                               const QString& destinationDirectory, bool copy);
+    [[nodiscard]] RemoveResult removeTree(const QString& path, bool directory, bool recursive);
     [[nodiscard]] static QString describeError(const RemoteBackendResult& result);
 
     RemoteFileBackend& m_backend;
 };
 
-}  // namespace rfm::core
+} // namespace rfm::core
 
 Q_DECLARE_METATYPE(rfm::core::RemoteSelection)
 Q_DECLARE_METATYPE(QList<rfm::core::RemoteSelection>)

@@ -3,6 +3,7 @@
 #include "remotefilemanager/core/BrowserLocation.hpp"
 #include "remotefilemanager/core/RemotePath.hpp"
 
+#include <QApplication>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFileIconProvider>
@@ -14,6 +15,7 @@
 #include <QKeyEvent>
 #include <QLocale>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QSet>
@@ -28,11 +30,47 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <utility>
 
 namespace rfm::app
 {
+namespace
+{
+
+constexpr int storageUsageBarHeight = 4;
+constexpr int storageUsageBarBottomMargin = 3;
+constexpr int storageUsageBarRightMargin = 4;
+constexpr int minimumStorageUsageBarWidth = 36;
+
+} // namespace
+
+namespace detail
+{
+
+std::optional<StorageUsageBarGeometry> storageUsageBarGeometry(const QRect& itemRect, int textLeft,
+                                                               int percentage)
+{
+    const int left = std::max(itemRect.left(), textLeft);
+    const int right = itemRect.right() - storageUsageBarRightMargin;
+    const int width = right - left + 1;
+    if (itemRect.isEmpty() || width < minimumStorageUsageBarWidth ||
+        itemRect.height() < storageUsageBarHeight + storageUsageBarBottomMargin) {
+        return std::nullopt;
+    }
+
+    const int boundedPercentage = std::clamp(percentage, 0, 100);
+    const QRect track(left,
+                      itemRect.bottom() - storageUsageBarBottomMargin - storageUsageBarHeight + 1,
+                      width, storageUsageBarHeight);
+    const int filledWidth = static_cast<int>(
+        std::lround(static_cast<double>(track.width()) * boundedPercentage / 100.0));
+    return StorageUsageBarGeometry{track, std::clamp(filledWidth, 0, track.width())};
+}
+
+} // namespace detail
+
 namespace
 {
 
@@ -119,12 +157,75 @@ class PlacesItemDelegate final : public QStyledItemDelegate
   public:
     using QStyledItemDelegate::QStyledItemDelegate;
 
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+               const QModelIndex& index) const override
+    {
+        QStyledItemDelegate::paint(painter, option, index);
+        const std::optional<int> percentage = usagePercentage(index);
+        if (!percentage.has_value()) {
+            return;
+        }
+
+        QStyleOptionViewItem itemOption(option);
+        initStyleOption(&itemOption, index);
+        const QWidget* const widget = itemOption.widget;
+        const QStyle* const style = widget != nullptr ? widget->style() : QApplication::style();
+        const QRect textRect =
+            style->subElementRect(QStyle::SE_ItemViewItemText, &itemOption, widget);
+        const std::optional<detail::StorageUsageBarGeometry> geometry =
+            detail::storageUsageBarGeometry(itemOption.rect, textRect.left(), *percentage);
+        if (!geometry.has_value() ||
+            geometry->track.top() <= itemOption.rect.top() + itemOption.fontMetrics.height()) {
+            return;
+        }
+
+        constexpr qreal cornerRadius = storageUsageBarHeight / 2.0;
+        const bool selected = itemOption.state.testFlag(QStyle::State_Selected);
+        painter->save();
+        painter->setClipRect(itemOption.rect, Qt::IntersectClip);
+        painter->setRenderHint(QPainter::Antialiasing, true);
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(itemOption.palette.brush(QPalette::Mid));
+        painter->drawRoundedRect(geometry->track, cornerRadius, cornerRadius);
+        if (geometry->filledWidth > 0) {
+            QRect filled = geometry->track;
+            filled.setWidth(geometry->filledWidth);
+            if (itemOption.direction == Qt::RightToLeft) {
+                filled.moveRight(geometry->track.right());
+            }
+            painter->setClipRect(geometry->track, Qt::IntersectClip);
+            painter->setBrush(itemOption.palette.brush(selected ? QPalette::HighlightedText
+                                                                : QPalette::Highlight));
+            painter->drawRoundedRect(filled, cornerRadius, cornerRadius);
+        }
+        painter->restore();
+    }
+
     [[nodiscard]] QSize sizeHint(const QStyleOptionViewItem& option,
                                  const QModelIndex& index) const override
     {
         QSize hint = QStyledItemDelegate::sizeHint(option, index);
         hint.setHeight(std::max(hint.height(), 30));
+        if (usagePercentage(index).has_value()) {
+            hint.rheight() += storageUsageBarHeight + usageBarSpacing(option);
+        }
         return hint;
+    }
+
+  private:
+    [[nodiscard]] static std::optional<int> usagePercentage(const QModelIndex& index)
+    {
+        const QVariant data = index.data(NavigationTree::VolumeRole);
+        if (!data.isValid() || !data.canConvert<rfm::core::StorageVolume>()) {
+            return std::nullopt;
+        }
+        const auto usage = rfm::core::storageUsage(data.value<rfm::core::StorageVolume>());
+        return usage.has_value() ? std::optional<int>{usage->percentage} : std::nullopt;
+    }
+
+    [[nodiscard]] static int usageBarSpacing(const QStyleOptionViewItem& option)
+    {
+        return std::clamp(option.fontMetrics.height() / 5, 2, 4);
     }
 };
 
@@ -175,11 +276,16 @@ QIcon placeIcon(PlaceKind kind, const QWidget* widget)
 PlaceKind placeKindForRemoteName(const QString& name)
 {
     const QString folded = name.toCaseFolded();
-    if (folded == QStringLiteral("desktop")) return PlaceKind::Desktop;
-    if (folded == QStringLiteral("documents")) return PlaceKind::Documents;
-    if (folded == QStringLiteral("downloads")) return PlaceKind::Downloads;
-    if (folded == QStringLiteral("music")) return PlaceKind::Music;
-    if (folded == QStringLiteral("pictures")) return PlaceKind::Pictures;
+    if (folded == QStringLiteral("desktop"))
+        return PlaceKind::Desktop;
+    if (folded == QStringLiteral("documents"))
+        return PlaceKind::Documents;
+    if (folded == QStringLiteral("downloads"))
+        return PlaceKind::Downloads;
+    if (folded == QStringLiteral("music"))
+        return PlaceKind::Music;
+    if (folded == QStringLiteral("pictures"))
+        return PlaceKind::Pictures;
     if (folded == QStringLiteral("videos") || folded == QStringLiteral("movies"))
         return PlaceKind::Videos;
     return PlaceKind::Folder;
@@ -367,7 +473,7 @@ NavigationTree::NavigationTree(QWidget* parent) : QWidget(parent)
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->setAnimated(true);
-    m_tree->setUniformRowHeights(true);
+    m_tree->setUniformRowHeights(false);
     m_tree->setIconSize(QSize(20, 20));
     m_tree->setItemDelegate(new PlacesItemDelegate(m_tree));
     m_tree->header()->setStretchLastSection(false);
@@ -659,9 +765,8 @@ bool NavigationTree::hasLoadedLocalDirectory(const QString& path) const
     const QString normalizedPath = normalizedLocalPath(path);
     QList<QTreeWidgetItem*> items = matchingItems(NodeKind::LocalLocation, normalizedPath);
     items += matchingItems(NodeKind::LocalDirectory, normalizedPath);
-    return std::ranges::any_of(items, [](const QTreeWidgetItem* item) {
-        return item->data(0, LoadedRole).toBool();
-    });
+    return std::ranges::any_of(
+        items, [](const QTreeWidgetItem* item) { return item->data(0, LoadedRole).toBool(); });
 }
 
 QList<rfm::core::StorageVolume>
@@ -1021,11 +1126,11 @@ void NavigationTree::buildLocalPlaces()
         addLazyPlaceholder(item);
         return item;
     };
-    QTreeWidgetItem* const home =
-        addLocation(m_localCategoryItem, tr("Home"),
-                    QStandardPaths::writableLocation(QStandardPaths::HomeLocation), PlaceKind::Home);
-    QSet<QString> paths{comparableLocalPath(
-        QStandardPaths::writableLocation(QStandardPaths::HomeLocation))};
+    QTreeWidgetItem* const home = addLocation(
+        m_localCategoryItem, tr("Home"),
+        QStandardPaths::writableLocation(QStandardPaths::HomeLocation), PlaceKind::Home);
+    QSet<QString> paths{
+        comparableLocalPath(QStandardPaths::writableLocation(QStandardPaths::HomeLocation))};
     if (home != nullptr) {
         for (const StandardLocalPlace& place : standardLocalPlaces) {
             const QString path = QStandardPaths::writableLocation(place.location);
@@ -1066,9 +1171,9 @@ void NavigationTree::rebuildServers()
             auto* const editButton = new QToolButton(m_tree);
             editButton->setObjectName(QStringLiteral("placesEditServerButton"));
             editButton->setProperty("profileId", savedProfileId);
-            editButton->setIcon(QIcon::fromTheme(
-                QStringLiteral("document-edit"),
-                style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
+            editButton->setIcon(
+                QIcon::fromTheme(QStringLiteral("document-edit"),
+                                 style()->standardIcon(QStyle::SP_FileDialogDetailedView)));
             editButton->setAutoRaise(true);
             editButton->setFocusPolicy(Qt::NoFocus);
             editButton->setToolTip(tr("Edit server"));

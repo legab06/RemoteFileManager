@@ -96,6 +96,9 @@ distinctes :
 - `removable` indique que le média peut être retiré du lecteur ;
 - `ejectable` prépare une capacité d'éjection explicitement détectée.
 
+Il transporte aussi l'espace disponible pour l'utilisateur courant sous forme
+optionnelle, afin de distinguer une information absente d'un volume plein à zéro octet.
+
 Un SSD USB peut ainsi être `External` avec `removable == false`. Inversement, le
 caractère amovible ne suffit jamais à lui seul à imposer la catégorie `External`.
 `ejectable` reste actuellement faux lorsque la plateforme ne fournit pas une preuve
@@ -110,6 +113,14 @@ le nom humain puis, lorsqu'ils existent, le périphérique, le point de montage,
 de filesystem, le modèle et la taille. Les valeurs absentes, `Unknown` et les tailles
 nulles sont omises. Toutes les métadonnées sont normalisées puis converties depuis du
 texte brut afin qu'aucun serveur ne puisse injecter du rich text ou de fausses lignes.
+
+Un volume monté dont la capacité et l'espace disponible sont connus affiche sous son
+nom une jauge compacte calculée à partir de l'instantané existant. Le delegate Qt
+conserve le rendu natif de la ligne et de ses états, puis dessine directement une piste
+et son remplissage avec les rôles `Mid`, `Highlight` et `HighlightedText` de la palette.
+La piste s'étend du début de la zone de texte au bord droit disponible. Une valeur
+absente, une capacité nulle, un volume non monté ou un espace disponible supérieur à la
+capacité masque la jauge sans modifier le texte ni le tooltip.
 
 La classification applique un ordre conservateur. La racine système est `System`, un
 filesystem réseau connu est `Network`, une couche bloc virtuelle reste `Unknown`, un
@@ -173,10 +184,14 @@ distante actuelle est un collecteur Linux isolé ; un autre OS distant pourra fo
 un collecteur différent sans modifier le modèle ou les règles de classification.
 Le collecteur Linux distant associe les liens de `/dev/disk/by-label` aux périphériques
 de `mountinfo`, lit le modèle dans la même ascendance sysfs et demande la capacité avec
-`statvfs` SFTP. Chacune de ces métadonnées est optionnelle et possède les fallbacks du
-modèle commun. `mountinfo` est lu par fragments : une étape du scanner effectue au plus
-un `sftp_read`, puis rend la main au worker avant le fragment suivant. Le handle est
-fermé et le snapshot abandonné lors d'une annulation, d'une déconnexion ou du shutdown.
+`statvfs` SFTP. La capacité utilise `f_blocks`, l'espace disponible utilise `f_bavail`
+et tous deux sont multipliés par `f_frsize` avec des contrôles d'overflow indépendants.
+Le collecteur local utilise de même `QStorageInfo::bytesAvailable()`, et non
+`bytesFree()`. Chacune de ces métadonnées est optionnelle et possède les fallbacks du
+modèle commun. L'espace disponible, trop volatil, ne participe pas à l'empreinte de
+topologie. `mountinfo` est lu par fragments : une étape du scanner effectue au plus un
+`sftp_read`, puis rend la main au worker avant le fragment suivant. Le handle est fermé
+et le snapshot abandonné lors d'une annulation, d'une déconnexion ou du shutdown.
 Le parseur conserve l'identifiant, le parent, la racine et les champs optionnels d'un
 montage. Une pile d'overmounts est résolue par les relations `parentId` plutôt que par
 l'ordre numérique réutilisable des IDs. Une sous-racine démontrable d'un filesystem

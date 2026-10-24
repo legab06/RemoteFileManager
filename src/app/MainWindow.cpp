@@ -7,6 +7,7 @@
 #include "remotefilemanager/app/OperationPanel.hpp"
 #include "remotefilemanager/app/PasswordAuthenticationDialog.hpp"
 #include "remotefilemanager/app/ServerProfileDialog.hpp"
+#include "remotefilemanager/app/StoragePropertiesDialog.hpp"
 #include "remotefilemanager/app/TransferRequestFactory.hpp"
 #include "remotefilemanager/app/VolumeAuthenticationDialog.hpp"
 #include "remotefilemanager/app/WorkspaceTabs.hpp"
@@ -594,7 +595,7 @@ void MainWindow::createActions()
     connect(m_viewModeAction, &QAction::triggered, this, [this] {
         FileBrowserPane* const pane = m_workspaceTabs->activePane();
         pane->setViewMode(pane->viewMode() == ViewMode::Details ? ViewMode::Mosaic
-                                                                 : ViewMode::Details);
+                                                                : ViewMode::Details);
     });
     updateViewModeAction();
     m_newTabAction =
@@ -967,19 +968,37 @@ void MainWindow::createPlacesDock()
 
 void MainWindow::refreshStorage()
 {
-    if (!m_localStorageRefreshPending) {
-        m_localStorageRefreshPending = true;
-        emit localVolumesRequested();
+    refreshLocalStorage();
+    refreshRemoteStorage();
+}
+
+void MainWindow::refreshLocalStorage()
+{
+    if (m_localStorageRefreshPending) {
+        m_localStorageRefreshAfterCurrent = true;
+        return;
     }
-    if (m_connected && !m_remoteStorageRefreshPending) {
-        m_remoteStorageProbePending = false;
-        m_remoteStorageProbeRequestId = 0;
-        m_remoteStorageProbeConnectionGeneration = 0;
-        m_remoteStorageRefreshPending = true;
-        m_remoteStorageRequestId = m_nextStorageRequestId++;
-        m_remoteStorageRequestConnectionGeneration = m_connectionGeneration;
-        emit remoteStorageRequested(m_remoteStorageRequestId);
+    m_localStorageRefreshPending = true;
+    emit localVolumesRequested();
+}
+
+void MainWindow::refreshRemoteStorage()
+{
+    if (!m_connected) {
+        return;
     }
+    if (m_remoteStorageRefreshPending) {
+        m_remoteStorageRefreshAfterCurrent = true;
+        return;
+    }
+    m_remoteStorageProbePending = false;
+    m_remoteStorageProbeRequestId = 0;
+    m_remoteStorageProbeConnectionGeneration = 0;
+    m_pendingRemoteStorageFingerprint.clear();
+    m_remoteStorageRefreshPending = true;
+    m_remoteStorageRequestId = m_nextStorageRequestId++;
+    m_remoteStorageRequestConnectionGeneration = m_connectionGeneration;
+    emit remoteStorageRequested(m_remoteStorageRequestId);
 }
 
 void MainWindow::probeStorage()
@@ -1014,7 +1033,7 @@ void MainWindow::handleLocalStorageVolumes(const QList<rfm::core::StorageVolume>
     m_localStorageRefreshPending = false;
     if (m_localStorageRefreshAfterCurrent) {
         m_localStorageRefreshAfterCurrent = false;
-        refreshStorage();
+        refreshLocalStorage();
         return;
     }
 
@@ -1038,7 +1057,7 @@ void MainWindow::handleLocalStorageProbe(quint64 requestId, const QByteArray& fi
     m_localStorageProbePending = false;
     m_localStorageProbeRequestId = 0;
     if (fingerprint != m_localStorageFingerprint) {
-        refreshStorage();
+        refreshLocalStorage();
     }
 }
 
@@ -1053,7 +1072,7 @@ void MainWindow::handleRemoteStorageVolumes(quint64 requestId,
     m_remoteStorageRequestId = 0;
     m_remoteStorageRequestConnectionGeneration = 0;
     if (std::exchange(m_remoteStorageRefreshAfterCurrent, false)) {
-        refreshStorage();
+        refreshRemoteStorage();
         return;
     }
     if (m_connected) {
@@ -1083,7 +1102,7 @@ void MainWindow::handleRemoteStorageUnsupported(quint64 requestId)
     m_remoteStorageRequestConnectionGeneration = 0;
     m_pendingRemoteStorageFingerprint.clear();
     if (std::exchange(m_remoteStorageRefreshAfterCurrent, false) && m_connected) {
-        refreshStorage();
+        refreshRemoteStorage();
     }
 }
 
@@ -1098,7 +1117,7 @@ void MainWindow::handleRemoteStorageError(quint64 requestId, const QString& erro
     m_remoteStorageRequestConnectionGeneration = 0;
     m_pendingRemoteStorageFingerprint.clear();
     if (std::exchange(m_remoteStorageRefreshAfterCurrent, false) && m_connected) {
-        refreshStorage();
+        refreshRemoteStorage();
         return;
     }
     for (const quint64 id : std::as_const(m_remoteVolumeOperationsAwaitingRefresh)) {
@@ -1133,7 +1152,7 @@ void MainWindow::handleRemoteStorageProbe(quint64 requestId, const QByteArray& f
     m_remoteStorageProbeRequestId = 0;
     m_remoteStorageProbeConnectionGeneration = 0;
     if (fingerprint != m_remoteStorageFingerprint) {
-        refreshStorage();
+        refreshRemoteStorage();
     }
 }
 
@@ -1460,6 +1479,11 @@ void MainWindow::showPlacesContextMenu(const QPoint& position)
 
 void MainWindow::showSelectedPlaceProperties()
 {
+    if (const auto selected = m_navigationTree->selectedStorageVolume(); selected.has_value()) {
+        StoragePropertiesDialog dialog(selected->volume, this);
+        dialog.exec();
+        return;
+    }
     showPropertiesDialog(m_navigationTree->selectedPropertiesTitle(),
                          m_navigationTree->selectedPropertiesText());
 }
@@ -2072,7 +2096,8 @@ void MainWindow::createDirectory()
         return;
     }
     setBusy(true, tr("Creating folder %1…").arg(name));
-    m_operationContexts.insert(id, {paneId, paneId, pane->currentPath(), pane->currentPath()});
+    m_operationContexts.insert(
+        id, {paneId, paneId, pane->currentPath(), pane->currentPath(), m_connectionGeneration});
     emit createDirectoryRequested(id, pane->currentPath(), name);
 }
 
@@ -2119,7 +2144,8 @@ void MainWindow::renameSelectedEntry()
         return;
     }
     setBusy(true, tr("Renaming %1…").arg(oldName));
-    m_operationContexts.insert(id, {paneId, paneId, pane->currentPath(), pane->currentPath()});
+    m_operationContexts.insert(
+        id, {paneId, paneId, pane->currentPath(), pane->currentPath(), m_connectionGeneration});
     emit renameRequested(id, selection.constFirst().path, newName);
 }
 
@@ -2567,7 +2593,7 @@ void MainWindow::removeSelectedEntries()
         return;
     }
     setBusy(true, tr("Deleting %1 item(s)…").arg(selection.size()));
-    m_operationContexts.insert(id, {paneId, 0, pane->currentPath(), {}});
+    m_operationContexts.insert(id, {paneId, 0, pane->currentPath(), {}, m_connectionGeneration});
     emit removeRequested(id, selection, recursive);
 }
 
@@ -2677,7 +2703,11 @@ void MainWindow::clearTerminalOperations()
 
 void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& result)
 {
+    const bool hasOperationContext = m_operationContexts.contains(result.id);
     const OperationContext context = m_operationContexts.take(result.id);
+    const bool belongsToCurrentConnection = hasOperationContext && m_connected &&
+                                            context.connectionGeneration != 0 &&
+                                            context.connectionGeneration == m_connectionGeneration;
     const bool trackedRemoteOperation = result.kind == rfm::core::RemoteOperationKind::Copy ||
                                         result.kind == rfm::core::RemoteOperationKind::Move;
     bool operationCancelled = false;
@@ -2707,6 +2737,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
     }
     QStringList failures;
     bool anySuccess = false;
+    bool storageModified = false;
     for (const rfm::core::RemoteItemResult& item : result.items) {
         if (!item.success) {
             const QString label = !item.source.isEmpty() && !item.destination.isEmpty()
@@ -2715,6 +2746,7 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
             failures.push_back(tr("%1: %2").arg(label, item.error));
         }
         anySuccess = anySuccess || item.success;
+        storageModified = storageModified || item.storageModified;
     }
     if (!failures.isEmpty() && !suppressDialog) {
         QMessageBox::warning(this,
@@ -2730,6 +2762,9 @@ void MainWindow::handleOperationResult(const rfm::core::RemoteOperationResult& r
         setBusy(false);
     } else {
         updateConnectionAction();
+    }
+    if (storageModified && belongsToCurrentConnection) {
+        refreshRemoteStorage();
     }
     if (anySuccess) {
         QSet<QString> affectedPaths;
@@ -2864,6 +2899,7 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
     QStringList failures;
     QStringList warnings;
     bool anySuccess = false;
+    bool storageModified = false;
     QStringList selectionNames;
     for (const rfm::core::LocalFileOperationItemResult& item : allItems) {
         if (item.success) {
@@ -2876,8 +2912,10 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
                  result.kind == rfm::core::LocalFileOperationKind::Rename)) {
                 selectionNames.push_back(QFileInfo(item.destination).fileName());
             }
+            storageModified = storageModified || item.storageModified;
             continue;
         }
+        storageModified = storageModified || item.storageModified;
         if (item.outcome == rfm::core::LocalFileOperationOutcome::Skipped) {
             continue;
         }
@@ -2914,6 +2952,9 @@ void MainWindow::handleLocalFileOperationResult(const rfm::core::LocalFileOperat
                             : (!warnings.isEmpty() ? tr("Local operation completed with warnings")
                                                    : tr("Local operation completed")),
         5000);
+    if (storageModified) {
+        refreshLocalStorage();
+    }
     if (!anySuccess || context.sourceDirectory.isEmpty()) {
         return;
     }
@@ -2966,6 +3007,16 @@ void MainWindow::handleTransferProgress(const rfm::core::TransferProgress& progr
     }
     updateConnectionAction();
 
+    const auto refreshContext = m_transferRefreshContexts.constFind(progress.id);
+    const bool currentTransfer = refreshContext != m_transferRefreshContexts.cend() &&
+                                 refreshContext->connection == currentConnectionIdentity();
+    if (terminal && progress.destinationModified && currentTransfer) {
+        if (refreshContext->destination.source == rfm::core::FileSource::Local) {
+            refreshLocalStorage();
+        } else {
+            refreshRemoteStorage();
+        }
+    }
     if (progress.state == rfm::core::TransferState::Completed) {
         scheduleTransferDestinationRefresh(progress.id);
     }
@@ -3108,8 +3159,8 @@ bool MainWindow::startRemoteTransfer(rfm::core::InternalTransferAction action,
         payload.sources.isEmpty()
             ? QString{}
             : rfm::core::RemotePath::parent(payload.sources.constFirst().path);
-    m_operationContexts.insert(
-        id, {payload.sourcePaneId, destinationPaneId, sourceDirectory, destinationDirectory});
+    m_operationContexts.insert(id, {payload.sourcePaneId, destinationPaneId, sourceDirectory,
+                                    destinationDirectory, m_connectionGeneration});
     if (clipboardMove) {
         m_clipboardMoveOperations.insert(id, m_internalClipboard.generation());
     }
@@ -3509,7 +3560,7 @@ void MainWindow::handleVolumeOperationResult(const rfm::core::VolumeOperationRes
             if (m_localStorageRefreshPending) {
                 m_localStorageRefreshAfterCurrent = true;
             } else {
-                refreshStorage();
+                refreshLocalStorage();
             }
         }
         return;
@@ -3524,7 +3575,7 @@ void MainWindow::handleVolumeOperationResult(const rfm::core::VolumeOperationRes
         // an enumeration whose start is known to follow the successful result.
         m_localStorageRefreshAfterCurrent = true;
     } else {
-        refreshStorage();
+        refreshLocalStorage();
     }
 }
 
@@ -3588,7 +3639,7 @@ void MainWindow::handleRemoteVolumeOperationResult(const rfm::core::VolumeOperat
             if (m_remoteStorageRefreshPending) {
                 m_remoteStorageRefreshAfterCurrent = true;
             } else {
-                refreshStorage();
+                refreshRemoteStorage();
             }
         }
         return;
@@ -3601,7 +3652,7 @@ void MainWindow::handleRemoteVolumeOperationResult(const rfm::core::VolumeOperat
     if (m_remoteStorageRefreshPending) {
         m_remoteStorageRefreshAfterCurrent = true;
     } else {
-        refreshStorage();
+        refreshRemoteStorage();
     }
 }
 
@@ -4114,13 +4165,11 @@ void MainWindow::updateViewModeAction()
         return;
     }
     const bool mosaic = pane->viewMode() == ViewMode::Mosaic;
-    const QIcon icon = mosaic
-                           ? QIcon::fromTheme(
-                                 QStringLiteral("view-list-icons"),
-                                 style()->standardIcon(QStyle::SP_FileDialogContentsView))
-                           : QIcon::fromTheme(
-                                 QStringLiteral("view-list-details"),
-                                 style()->standardIcon(QStyle::SP_FileDialogDetailedView));
+    const QIcon icon =
+        mosaic ? QIcon::fromTheme(QStringLiteral("view-list-icons"),
+                                  style()->standardIcon(QStyle::SP_FileDialogContentsView))
+               : QIcon::fromTheme(QStringLiteral("view-list-details"),
+                                  style()->standardIcon(QStyle::SP_FileDialogDetailedView));
     m_viewModeAction->setIcon(icon);
     m_viewModeAction->setToolTip(mosaic ? tr("Switch to Details view")
                                         : tr("Switch to Mosaic view"));
@@ -4166,14 +4215,13 @@ void MainWindow::setBusy(bool busy, const QString& message)
 
 void MainWindow::showAboutDialog()
 {
-    QMessageBox::about(
-        this, tr("About RemoteFileManager"),
-        tr("RemoteFileManager %1\n\n"
-           "A native file manager for browsing, managing and transferring files "
-           "locally and on remote SSH/SFTP servers.\n\n"
-           "Copyright © 2026 Gabriel Albaladejo\n"
-           "Licensed under GNU GPL v3.0 or later.")
-            .arg(QApplication::applicationVersion()));
+    QMessageBox::about(this, tr("About RemoteFileManager"),
+                       tr("RemoteFileManager %1\n\n"
+                          "A native file manager for browsing, managing and transferring files "
+                          "locally and on remote SSH/SFTP servers.\n\n"
+                          "Copyright © 2026 Gabriel Albaladejo\n"
+                          "Licensed under GNU GPL v3.0 or later.")
+                           .arg(QApplication::applicationVersion()));
 }
 
 } // namespace rfm::app

@@ -197,6 +197,7 @@ class RemoteRemoveJob final
             item.error = describe(result);
             return;
         }
+        m_result.items[task.sourceIndex].storageModified = true;
         if (--m_remainingActions[task.sourceIndex] == 0) {
             m_result.items[task.sourceIndex].success = true;
         }

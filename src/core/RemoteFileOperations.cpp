@@ -6,8 +6,10 @@
 
 #include <algorithm>
 
-namespace rfm::core {
-namespace {
+namespace rfm::core
+{
+namespace
+{
 
 QString translated(const char* text)
 {
@@ -28,24 +30,21 @@ RemoteBackendResult collisionResult()
 bool validDestinationDirectory(const QString& path)
 {
     const QString normalized = RemotePath::normalize(path);
-    return !normalized.isEmpty() && normalized != QStringLiteral("..")
-        && !normalized.startsWith(QStringLiteral("../"));
+    return !normalized.isEmpty() && normalized != QStringLiteral("..") &&
+           !normalized.startsWith(QStringLiteral("../"));
 }
 
-}  // namespace
+} // namespace
 
 bool RemoteOperationResult::allSucceeded() const
 {
     return !items.isEmpty() && std::ranges::all_of(items, &RemoteItemResult::success);
 }
 
-RemoteFileOperations::RemoteFileOperations(RemoteFileBackend& backend)
-    : m_backend(backend)
-{
-}
+RemoteFileOperations::RemoteFileOperations(RemoteFileBackend& backend) : m_backend(backend) {}
 
-RemoteOperationResult RemoteFileOperations::createDirectory(
-    quint64 id, const QString& parent, const QString& name)
+RemoteOperationResult RemoteFileOperations::createDirectory(quint64 id, const QString& parent,
+                                                            const QString& name)
 {
     RemoteOperationResult operation{id, RemoteOperationKind::CreateDirectory, {}};
     const QString destination = RemotePath::join(parent, name);
@@ -61,6 +60,7 @@ RemoteOperationResult RemoteFileOperations::createDirectory(
         } else {
             const RemoteBackendResult result = m_backend.createDirectory(destination);
             item.success = result.succeeded();
+            item.storageModified = item.success;
             item.error = describeError(result);
         }
     }
@@ -68,8 +68,8 @@ RemoteOperationResult RemoteFileOperations::createDirectory(
     return operation;
 }
 
-RemoteOperationResult RemoteFileOperations::rename(
-    quint64 id, const QString& source, const QString& newName)
+RemoteOperationResult RemoteFileOperations::rename(quint64 id, const QString& source,
+                                                   const QString& newName)
 {
     RemoteOperationResult operation{id, RemoteOperationKind::Rename, {}};
     const QString normalizedSource = RemotePath::normalize(source);
@@ -88,6 +88,7 @@ RemoteOperationResult RemoteFileOperations::rename(
         } else {
             const RemoteBackendResult result = m_backend.rename(normalizedSource, destination);
             item.success = result.succeeded();
+            item.storageModified = item.success;
             item.error = describeError(result);
         }
     }
@@ -95,8 +96,8 @@ RemoteOperationResult RemoteFileOperations::rename(
     return operation;
 }
 
-RemoteOperationResult RemoteFileOperations::move(
-    quint64 id, const QList<RemoteSelection>& sources, const QString& destinationDirectory)
+RemoteOperationResult RemoteFileOperations::move(quint64 id, const QList<RemoteSelection>& sources,
+                                                 const QString& destinationDirectory)
 {
     RemoteOperationResult operation{id, RemoteOperationKind::Move, {}};
     for (const RemoteSelection& source : sources) {
@@ -105,8 +106,8 @@ RemoteOperationResult RemoteFileOperations::move(
     return operation;
 }
 
-RemoteOperationResult RemoteFileOperations::copy(
-    quint64 id, const QList<RemoteSelection>& sources, const QString& destinationDirectory)
+RemoteOperationResult RemoteFileOperations::copy(quint64 id, const QList<RemoteSelection>& sources,
+                                                 const QString& destinationDirectory)
 {
     RemoteOperationResult operation{id, RemoteOperationKind::Copy, {}};
     for (const RemoteSelection& source : sources) {
@@ -115,37 +116,39 @@ RemoteOperationResult RemoteFileOperations::copy(
     return operation;
 }
 
-RemoteOperationResult RemoteFileOperations::remove(
-    quint64 id, const QList<RemoteSelection>& sources, bool recursive)
+RemoteOperationResult
+RemoteFileOperations::remove(quint64 id, const QList<RemoteSelection>& sources, bool recursive)
 {
     RemoteOperationResult operation{id, RemoteOperationKind::Remove, {}};
     for (const RemoteSelection& source : sources) {
         const QString path = RemotePath::normalize(source.path);
         RemoteItemResult item{path, {}, false, {}};
-        const RemoteBackendResult result = RemotePath::isProtected(path)
-            ? invalidPathResult()
-            : removeTree(path, source.directory, recursive);
-        item.success = result.succeeded();
-        item.error = describeError(result);
+        const RemoveResult removed = RemotePath::isProtected(path)
+                                         ? RemoveResult{invalidPathResult(), false}
+                                         : removeTree(path, source.directory, recursive);
+        item.success = removed.result.succeeded();
+        item.storageModified = removed.storageModified;
+        item.error = describeError(removed.result);
         operation.items.push_back(item);
     }
     return operation;
 }
 
-RemoteItemResult RemoteFileOperations::transferOne(
-    const RemoteSelection& source, const QString& destinationDirectory, bool copy)
+RemoteItemResult RemoteFileOperations::transferOne(const RemoteSelection& source,
+                                                   const QString& destinationDirectory, bool copy)
 {
     const QString normalizedSource = RemotePath::normalize(source.path);
     const QString normalizedDestinationDirectory = RemotePath::normalize(destinationDirectory);
-    const QString destination = RemotePath::join(
-        normalizedDestinationDirectory, RemotePath::fileName(normalizedSource));
+    const QString destination =
+        RemotePath::join(normalizedDestinationDirectory, RemotePath::fileName(normalizedSource));
     RemoteItemResult item{normalizedSource, destination, false, {}};
-    const bool destinationInsideSource = source.directory
-        && (normalizedDestinationDirectory == normalizedSource
-            || normalizedDestinationDirectory.startsWith(normalizedSource + QChar{'/'}));
-    if (RemotePath::isProtected(normalizedSource)
-        || !validDestinationDirectory(normalizedDestinationDirectory) || destination.isEmpty()
-        || normalizedSource == RemotePath::normalize(destination) || destinationInsideSource) {
+    const bool destinationInsideSource =
+        source.directory &&
+        (normalizedDestinationDirectory == normalizedSource ||
+         normalizedDestinationDirectory.startsWith(normalizedSource + QChar{'/'}));
+    if (RemotePath::isProtected(normalizedSource) ||
+        !validDestinationDirectory(normalizedDestinationDirectory) || destination.isEmpty() ||
+        normalizedSource == RemotePath::normalize(destination) || destinationInsideSource) {
         if (normalizedSource == RemotePath::normalize(destination)) {
             item.error = translated("Source and destination are identical.");
         } else if (destinationInsideSource) {
@@ -166,40 +169,46 @@ RemoteItemResult RemoteFileOperations::transferOne(
         return item;
     }
 
-    const RemoteBackendResult result = copy
-        ? m_backend.copyOnServer(normalizedSource, destination, source.directory)
-        : m_backend.rename(normalizedSource, destination);
+    const RemoteBackendResult result =
+        copy ? m_backend.copyOnServer(normalizedSource, destination, source.directory)
+             : m_backend.rename(normalizedSource, destination);
     item.success = result.succeeded();
+    item.storageModified = item.success;
     item.error = describeError(result);
     return item;
 }
 
-RemoteBackendResult RemoteFileOperations::removeTree(
-    const QString& path, bool directory, bool recursive)
+RemoteFileOperations::RemoveResult RemoteFileOperations::removeTree(const QString& path,
+                                                                    bool directory, bool recursive)
 {
     if (!directory) {
-        return m_backend.removeFile(path);
+        const RemoteBackendResult result = m_backend.removeFile(path);
+        return {result, result.succeeded()};
     }
     if (!recursive) {
-        return {RemoteBackendError::Failure,
-                translated("Deleting a folder requires recursive confirmation.")};
+        return {{RemoteBackendError::Failure,
+                 translated("Deleting a folder requires recursive confirmation.")},
+                false};
     }
 
     const RemoteDirectoryResult listing = m_backend.list(path);
     if (!listing.result.succeeded()) {
-        return listing.result;
+        return {listing.result, false};
     }
+    bool storageModified = false;
     for (const auto& [name, childDirectory] : listing.entries) {
         const QString childPath = RemotePath::join(path, name);
         if (childPath.isEmpty() || RemotePath::isProtected(childPath)) {
-            return invalidPathResult();
+            return {invalidPathResult(), storageModified};
         }
-        const RemoteBackendResult childResult = removeTree(childPath, childDirectory, true);
-        if (!childResult.succeeded()) {
-            return childResult;
+        const RemoveResult childResult = removeTree(childPath, childDirectory, true);
+        storageModified = storageModified || childResult.storageModified;
+        if (!childResult.result.succeeded()) {
+            return {childResult.result, storageModified};
         }
     }
-    return m_backend.removeDirectory(path);
+    const RemoteBackendResult result = m_backend.removeDirectory(path);
+    return {result, storageModified || result.succeeded()};
 }
 
 QString RemoteFileOperations::describeError(const RemoteBackendResult& result)
@@ -231,4 +240,4 @@ QString RemoteFileOperations::describeError(const RemoteBackendResult& result)
     return translated("The remote operation failed.");
 }
 
-}  // namespace rfm::core
+} // namespace rfm::core

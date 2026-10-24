@@ -6,6 +6,7 @@
 #include <QString>
 #include <QStringList>
 
+#include <optional>
 #include <utility>
 
 namespace rfm::core
@@ -52,11 +53,12 @@ struct StorageVolume {
                   QByteArray fileSystemTypeValue, quint64 bytesTotalValue, StorageKind kindValue,
                   bool removableValue, bool ejectableValue, bool readOnlyValue,
                   QString fileSystemLabelValue = {}, QString deviceModelValue = {},
-                  bool mountedValue = true, QString deviceNumberValue = {})
+                  bool mountedValue = true, QString deviceNumberValue = {},
+                  std::optional<quint64> bytesAvailableValue = std::nullopt)
         : displayName(std::move(displayNameValue)), rootPath(std::move(rootPathValue)),
           device(std::move(deviceValue)), fileSystemType(std::move(fileSystemTypeValue)),
-          bytesTotal(bytesTotalValue), kind(kindValue), removable(removableValue),
-          ejectable(ejectableValue), readOnly(readOnlyValue),
+          bytesTotal(bytesTotalValue), bytesAvailable(bytesAvailableValue), kind(kindValue),
+          removable(removableValue), ejectable(ejectableValue), readOnly(readOnlyValue),
           fileSystemLabel(std::move(fileSystemLabelValue)),
           deviceModel(std::move(deviceModelValue)), mounted(mountedValue),
           deviceNumber(std::move(deviceNumberValue))
@@ -70,6 +72,8 @@ struct StorageVolume {
     QString device;
     QByteArray fileSystemType;
     quint64 bytesTotal{0};
+    // Space available to the current user. Zero is a valid value; nullopt means unavailable.
+    std::optional<quint64> bytesAvailable;
     StorageKind kind{StorageKind::Unknown};
     bool removable{false};
     bool ejectable{false};
@@ -81,6 +85,16 @@ struct StorageVolume {
     // Stable Linux block identity (major:minor). The device path remains the operation target.
     QString deviceNumber;
 };
+
+struct StorageUsage {
+    quint64 used{0};
+    quint64 available{0};
+    int percentage{0};
+};
+
+// Returns a displayable usage snapshot only when the mounted volume contains
+// complete and internally consistent capacity information.
+[[nodiscard]] std::optional<StorageUsage> storageUsage(const StorageVolume& volume);
 
 // Common representation of one lsblk JSON object. Acquisition is platform/backend-specific;
 // parsing and conversion to StorageVolume are shared by local and SSH discovery.
@@ -140,7 +154,8 @@ storageDeviceEvidence(const QList<StorageTopologyNode>& ancestry, bool blockDevi
 [[nodiscard]] StorageVolume makeStorageVolume(const LinuxMountInfo& mount,
                                               const StorageDeviceEvidence& device,
                                               const QString& fileSystemLabel = {},
-                                              quint64 bytesTotal = 0);
+                                              quint64 bytesTotal = 0,
+                                              std::optional<quint64> bytesAvailable = std::nullopt);
 [[nodiscard]] QList<LinuxMountInfo> parseLinuxMountInfo(const QByteArray& contents);
 [[nodiscard]] QList<LinuxBlockDevice> parseLinuxBlockDevices(const QByteArray& contents);
 [[nodiscard]] QList<StorageVolume>

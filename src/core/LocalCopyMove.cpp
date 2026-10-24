@@ -342,6 +342,7 @@ struct EntryAttempt {
     QString error;
     QString warning;
     LocalFileOperationOutcome outcome{LocalFileOperationOutcome::Failed};
+    bool storageModified{false};
 };
 
 enum class ManifestEntryKind : char { File, Directory, SymbolicLink };
@@ -498,7 +499,8 @@ bool sourceManifestMatches(const QString& source, const SourceManifest& expected
     return true;
 }
 
-EntryAttempt failure(QString source, QString destination, QString error)
+EntryAttempt failure(QString source, QString destination, QString error,
+                     bool storageModified = false)
 {
     return {false,
             false,
@@ -506,7 +508,8 @@ EntryAttempt failure(QString source, QString destination, QString error)
             std::move(destination),
             std::move(error),
             {},
-            LocalFileOperationOutcome::Failed};
+            LocalFileOperationOutcome::Failed,
+            storageModified};
 }
 
 EntryAttempt cancellation(QString source, QString destination)
@@ -517,7 +520,8 @@ EntryAttempt cancellation(QString source, QString destination)
             std::move(destination),
             translated("The local operation was cancelled."),
             {},
-            LocalFileOperationOutcome::Cancelled};
+            LocalFileOperationOutcome::Cancelled,
+            false};
 }
 
 QString uniqueSiblingPath(const QString& destination, const QString& purpose)
@@ -701,6 +705,7 @@ EntryAttempt publishStaging(const QString& source, const QString& staging,
             if (!cleanupError.isEmpty()) {
                 collision.error +=
                     translated(" Temporary copy cleanup also failed: ") + cleanupError;
+                collision.storageModified = true;
             }
             return collision;
         }
@@ -735,11 +740,13 @@ EntryAttempt publishStaging(const QString& source, const QString& staging,
                 translated("The operation was cancelled before publication.") + rollbackError +
                     (cleanupError.isEmpty()
                          ? QString{}
-                         : translated(" Temporary copy cleanup also failed: ") + cleanupError));
+                         : translated(" Temporary copy cleanup also failed: ") + cleanupError),
+                true);
         }
         EntryAttempt cancelled = cancellation(source, destination);
         if (!cleanupError.isEmpty()) {
             cancelled.error += translated(" Temporary copy cleanup also failed: ") + cleanupError;
+            cancelled.storageModified = true;
         }
         return cancelled;
     }
@@ -762,7 +769,8 @@ EntryAttempt publishStaging(const QString& source, const QString& staging,
                 rollbackError +
                 (cleanupError.isEmpty()
                      ? QString{}
-                     : translated(" Temporary copy cleanup also failed: ") + cleanupError));
+                     : translated(" Temporary copy cleanup also failed: ") + cleanupError),
+            !rollbackError.isEmpty() || !cleanupError.isEmpty());
     }
 
     QString warning;
@@ -808,6 +816,7 @@ EntryAttempt copyAndPublish(const QString& source, const QString& destination,
             const QString cleanupError = removeEntry(staging);
             if (!cleanupError.isEmpty()) {
                 copied.error += translated(" Temporary copy cleanup also failed: ") + cleanupError;
+                copied.storageModified = true;
             }
         }
         return copied;
@@ -821,13 +830,15 @@ EntryAttempt copyAndPublish(const QString& source, const QString& destination,
                        "removed.") +
                 (cleanupError.isEmpty()
                      ? QString{}
-                     : translated(" Temporary copy cleanup also failed: ") + cleanupError));
+                     : translated(" Temporary copy cleanup also failed: ") + cleanupError),
+            !cleanupError.isEmpty());
     }
     if (cancellationRequested(cancel)) {
         const QString cleanupError = removeEntry(staging);
         EntryAttempt cancelled = cancellation(source, destination);
         if (!cleanupError.isEmpty()) {
             cancelled.error += translated(" Temporary copy cleanup also failed: ") + cleanupError;
+            cancelled.storageModified = true;
         }
         return cancelled;
     }
@@ -840,13 +851,15 @@ EntryAttempt copyAndPublish(const QString& source, const QString& destination,
             (validationError.isEmpty() ? translated("Copy validation failed.") : validationError) +
                 (cleanupError.isEmpty()
                      ? QString{}
-                     : translated(" Temporary copy cleanup also failed: ") + cleanupError));
+                     : translated(" Temporary copy cleanup also failed: ") + cleanupError),
+            !cleanupError.isEmpty());
     }
     if (cancellationRequested(cancel)) {
         const QString cleanupError = removeEntry(staging);
         EntryAttempt cancelled = cancellation(source, destination);
         if (!cleanupError.isEmpty()) {
             cancelled.error += translated(" Temporary copy cleanup also failed: ") + cleanupError;
+            cancelled.storageModified = true;
         }
         return cancelled;
     }
@@ -860,6 +873,7 @@ EntryAttempt copyAndPublish(const QString& source, const QString& destination,
                 if (!cleanupError.isEmpty()) {
                     cancelledAttempt.error +=
                         translated(" Temporary copy cleanup also failed: ") + cleanupError;
+                    cancelledAttempt.storageModified = true;
                 }
                 return cancelledAttempt;
             }
@@ -868,7 +882,8 @@ EntryAttempt copyAndPublish(const QString& source, const QString& destination,
                 sourceError +
                     (cleanupError.isEmpty()
                          ? QString{}
-                         : translated(" Temporary copy cleanup also failed: ") + cleanupError));
+                         : translated(" Temporary copy cleanup also failed: ") + cleanupError),
+                !cleanupError.isEmpty());
         }
     }
     return publishStaging(source, staging, destination, policy, backend, cancel);
@@ -908,7 +923,8 @@ EntryAttempt moveEntry(const QString& source, const QString& destination,
                 return failure(source, destination,
                                translated("The operation was cancelled, but the previous "
                                           "destination could not be restored. It remains at ") +
-                                   backup + QStringLiteral(": ") + restored.detail);
+                                   backup + QStringLiteral(": ") + restored.detail,
+                               true);
             }
         }
         return cancellation(source, destination);
@@ -934,7 +950,8 @@ EntryAttempt moveEntry(const QString& source, const QString& destination,
             return failure(
                 source, destination,
                 translated("The move failed and the previous destination could not be restored: ") +
-                    restored.detail + translated(" It remains at ") + backup + QLatin1Char('.'));
+                    restored.detail + translated(" It remains at ") + backup + QLatin1Char('.'),
+                true);
         }
     }
     if (renamed.error != LocalRenameError::CrossDevice) {
@@ -955,22 +972,25 @@ EntryAttempt moveEntry(const QString& source, const QString& destination,
                                sourceValidationError)) {
         return failure(source, destination,
                        sourceValidationError +
-                           translated(" The destination is valid and the source was preserved."));
+                           translated(" The destination is valid and the source was preserved."),
+                       true);
     }
     const QString removalError = removeEntry(source);
     if (!removalError.isEmpty()) {
         return failure(
             source, destination,
             translated("The destination was validated, but the source could not be removed: ") +
-                removalError);
+                removalError,
+            true);
     }
     return copied;
 }
 
 LocalFileOperationItemResult itemResult(const EntryAttempt& attempt)
 {
-    return {attempt.source, attempt.destination, attempt.success,
-            attempt.error.isEmpty() ? attempt.warning : attempt.error, attempt.outcome};
+    return {attempt.source,  attempt.destination,
+            attempt.success, attempt.error.isEmpty() ? attempt.warning : attempt.error,
+            attempt.outcome, attempt.success || attempt.storageModified};
 }
 
 } // namespace

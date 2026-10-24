@@ -39,9 +39,9 @@ class FakeBackend final : public rfm::core::RemoteTransferBackend
         const bool file = files.contains(path);
         const auto special = specialNodes.constFind(path);
         const rfm::core::TransferNodeType type =
-            symbolic     ? rfm::core::TransferNodeType::SymbolicLink
-            : directory  ? rfm::core::TransferNodeType::Directory
-            : file       ? rfm::core::TransferNodeType::RegularFile
+            symbolic                         ? rfm::core::TransferNodeType::SymbolicLink
+            : directory                      ? rfm::core::TransferNodeType::Directory
+            : file                           ? rfm::core::TransferNodeType::RegularFile
             : special != specialNodes.cend() ? special.value()
                                              : rfm::core::TransferNodeType::Unknown;
         return {{},
@@ -168,9 +168,9 @@ class FakeBackend final : public rfm::core::RemoteTransferBackend
             const bool symbolic = symbolicLinks.contains(child);
             const bool file = files.contains(child);
             const rfm::core::TransferNodeType type =
-                directory    ? rfm::core::TransferNodeType::Directory
-                : symbolic   ? rfm::core::TransferNodeType::SymbolicLink
-                : file       ? rfm::core::TransferNodeType::RegularFile
+                directory                      ? rfm::core::TransferNodeType::Directory
+                : symbolic                     ? rfm::core::TransferNodeType::SymbolicLink
+                : file                         ? rfm::core::TransferNodeType::RegularFile
                 : specialNodes.contains(child) ? specialNodes.value(child)
                                                : rfm::core::TransferNodeType::Unknown;
             cursor.entries.push_back(
@@ -389,6 +389,7 @@ void TransferFileJobTest::uploadsIncrementally()
     job.step();
     QCOMPARE(job.progress().state, rfm::core::TransferState::Completed);
     QCOMPARE(job.progress().transferredBytes, transferred);
+    QVERIFY(job.progress().destinationModified);
     QCOMPARE(backend.writeCalls, writes);
 }
 
@@ -413,6 +414,7 @@ void TransferFileJobTest::downloadsIncrementally()
     QVERIFY(steps > 4);
     QCOMPARE(backend.readCalls, 5);
     QCOMPARE(job.progress().state, rfm::core::TransferState::Completed);
+    QVERIFY(job.progress().destinationModified);
     QFile result(destination);
     QVERIFY(result.open(QIODevice::ReadOnly));
     QCOMPARE(result.readAll(), data);
@@ -432,6 +434,7 @@ void TransferFileJobTest::failsDuringUploadAndDownload()
                                                       uploadSource, QStringLiteral("/failed")});
     runToEnd(upload);
     QCOMPARE(upload.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY(!upload.progress().destinationModified);
     QCOMPARE(upload.progress().transferredBytes, quint64{131'072});
     QVERIFY(!uploadBackend.files.contains(QStringLiteral("/failed")));
     QVERIFY(!uploadBackend.files.contains(QStringLiteral("/failed.rfm-part-3")));
@@ -445,6 +448,7 @@ void TransferFileJobTest::failsDuringUploadAndDownload()
                                          QStringLiteral("/source"), downloadDestination});
     runToEnd(download);
     QCOMPARE(download.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY(!download.progress().destinationModified);
     QCOMPARE(download.progress().transferredBytes, quint64{131'072});
     QVERIFY(!QFile::exists(downloadDestination));
 
@@ -789,6 +793,7 @@ void TransferFileJobTest::transfersEmptyDirectories()
                                             QStringLiteral("/empty-upload"), true});
     QVERIFY(runDirectoryToEnd(upload) > 0);
     QCOMPARE(upload.progress().state, rfm::core::TransferState::Completed);
+    QVERIFY(upload.progress().destinationModified);
     QVERIFY(uploadBackend.directories.contains(QStringLiteral("/empty-upload")));
 
     FakeBackend downloadBackend;
@@ -799,6 +804,7 @@ void TransferFileJobTest::transfersEmptyDirectories()
                           QStringLiteral("/empty-remote"), localDownload, true});
     QVERIFY(runDirectoryToEnd(download) > 0);
     QCOMPARE(download.progress().state, rfm::core::TransferState::Completed);
+    QVERIFY(download.progress().destinationModified);
     QVERIFY(QFileInfo(localDownload).isDir());
 }
 
@@ -982,6 +988,7 @@ void TransferFileJobTest::reportsPartialDirectoryFailure()
         job.step();
     }
     QCOMPARE(job.progress().state, rfm::core::TransferState::Failed);
+    QVERIFY(job.progress().destinationModified);
     QCOMPARE(job.progress().completedFiles, quint64{1});
     QVERIFY(job.progress().error.contains(QStringLiteral("b.bin")));
     QCOMPARE(backend.files.value(QStringLiteral("/partial/a.bin")), QByteArray("done"));
@@ -1064,23 +1071,21 @@ void TransferFileJobTest::constructsSafeLocalDownloadDestinations()
     QVERIFY(normal.succeeded());
     QCOMPARE(normal.path, QDir(root).filePath(QStringLiteral("report.txt")));
 
-    QVERIFY(!rfm::core::LocalDownloadPath::child(
-                 root, root, QStringLiteral(".."), rfm::core::LocalPathFlavor::Posix)
+    QVERIFY(!rfm::core::LocalDownloadPath::child(root, root, QStringLiteral(".."),
+                                                 rfm::core::LocalPathFlavor::Posix)
                  .succeeded());
-    QVERIFY(!rfm::core::LocalDownloadPath::child(
-                 root, temporary.path(), QStringLiteral("escape.txt"),
-                 rfm::core::LocalPathFlavor::Posix)
+    QVERIFY(!rfm::core::LocalDownloadPath::child(root, temporary.path(),
+                                                 QStringLiteral("escape.txt"),
+                                                 rfm::core::LocalPathFlavor::Posix)
                  .succeeded());
-    QVERIFY(!rfm::core::LocalDownloadPath::child(
-                 root, root, QStringLiteral("..\\escape.txt"),
-                 rfm::core::LocalPathFlavor::Windows)
+    QVERIFY(!rfm::core::LocalDownloadPath::child(root, root, QStringLiteral("..\\escape.txt"),
+                                                 rfm::core::LocalPathFlavor::Windows)
                  .succeeded());
-    QVERIFY(!rfm::core::LocalDownloadPath::child(
-                 root, root, QStringLiteral("C:escape.txt"),
-                 rfm::core::LocalPathFlavor::Windows)
+    QVERIFY(!rfm::core::LocalDownloadPath::child(root, root, QStringLiteral("C:escape.txt"),
+                                                 rfm::core::LocalPathFlavor::Windows)
                  .succeeded());
-    QVERIFY(!rfm::core::LocalDownloadPath::child(
-                 root, root, QStringLiteral("CON.txt"), rfm::core::LocalPathFlavor::Windows)
+    QVERIFY(!rfm::core::LocalDownloadPath::child(root, root, QStringLiteral("CON.txt"),
+                                                 rfm::core::LocalPathFlavor::Windows)
                  .succeeded());
 
     const auto legalPosixName = rfm::core::LocalDownloadPath::child(
@@ -1091,11 +1096,11 @@ void TransferFileJobTest::constructsSafeLocalDownloadDestinations()
     recursiveBackend.directories.insert(QStringLiteral("/tree"));
     recursiveBackend.files.insert(QStringLiteral("/tree/..\\escape.txt"), QByteArray("escape"));
     const QString recursiveDestination = temporary.filePath(QStringLiteral("tree"));
-    rfm::core::TransferDirectoryJob recursiveDownload(
-        recursiveBackend,
-        {80, rfm::core::TransferDirection::Download, QStringLiteral("/tree"),
-         recursiveDestination, true},
-        rfm::core::LocalPathFlavor::Windows);
+    rfm::core::TransferDirectoryJob recursiveDownload(recursiveBackend,
+                                                      {80, rfm::core::TransferDirection::Download,
+                                                       QStringLiteral("/tree"),
+                                                       recursiveDestination, true},
+                                                      rfm::core::LocalPathFlavor::Windows);
     QVERIFY(runDirectoryToEnd(recursiveDownload) > 0);
     QCOMPARE(recursiveDownload.progress().state, rfm::core::TransferState::Failed);
     QVERIFY(recursiveDownload.progress().error.contains(QStringLiteral("safely")));
@@ -1147,9 +1152,9 @@ void TransferFileJobTest::rejectsUnsupportedRemoteNodeTypes()
 
     FakeBackend fileBackend;
     fileBackend.specialNodes.insert(QStringLiteral("/special"), nodeType);
-    rfm::core::TransferFileJob file(
-        fileBackend, {83, rfm::core::TransferDirection::Download, QStringLiteral("/special"),
-                      temporary.filePath(QStringLiteral("special"))});
+    rfm::core::TransferFileJob file(fileBackend, {83, rfm::core::TransferDirection::Download,
+                                                  QStringLiteral("/special"),
+                                                  temporary.filePath(QStringLiteral("special"))});
     QVERIFY(runToEnd(file) > 0);
     QCOMPARE(file.progress().state, rfm::core::TransferState::Failed);
     QVERIFY(file.progress().error.contains(QStringLiteral("not a regular file")));
@@ -1159,9 +1164,8 @@ void TransferFileJobTest::rejectsUnsupportedRemoteNodeTypes()
     directoryBackend.directories.insert(QStringLiteral("/tree"));
     directoryBackend.specialNodes.insert(QStringLiteral("/tree/special"), nodeType);
     rfm::core::TransferDirectoryJob directory(
-        directoryBackend,
-        {84, rfm::core::TransferDirection::Download, QStringLiteral("/tree"),
-         temporary.filePath(QStringLiteral("tree")), true});
+        directoryBackend, {84, rfm::core::TransferDirection::Download, QStringLiteral("/tree"),
+                           temporary.filePath(QStringLiteral("tree")), true});
     QVERIFY(runDirectoryToEnd(directory) > 0);
     QCOMPARE(directory.progress().state, rfm::core::TransferState::Failed);
     QVERIFY(directory.progress().error.contains(QStringLiteral("not a regular file")));
@@ -1174,13 +1178,12 @@ void TransferFileJobTest::reportsDistinctRemoteStatErrors_data()
     QTest::addColumn<rfm::core::TransferBackendError>("backendError");
     QTest::addColumn<QString>("expectedText");
     QTest::newRow("permission") << rfm::core::TransferBackendError::PermissionDenied
-                                 << QStringLiteral("Permission was denied");
-    QTest::newRow("io") << rfm::core::TransferBackendError::Io
-                         << QStringLiteral("I/O error");
-    QTest::newRow("connection lost") << rfm::core::TransferBackendError::ConnectionLost
-                                      << QStringLiteral("connection was lost");
+                                << QStringLiteral("Permission was denied");
+    QTest::newRow("io") << rfm::core::TransferBackendError::Io << QStringLiteral("I/O error");
+    QTest::newRow("connection lost")
+        << rfm::core::TransferBackendError::ConnectionLost << QStringLiteral("connection was lost");
     QTest::newRow("not found") << rfm::core::TransferBackendError::NotFound
-                                << QStringLiteral("not found");
+                               << QStringLiteral("not found");
 }
 
 void TransferFileJobTest::reportsDistinctRemoteStatErrors()
@@ -1191,9 +1194,9 @@ void TransferFileJobTest::reportsDistinctRemoteStatErrors()
     QVERIFY(temporary.isValid());
     FakeBackend backend;
     backend.forcedStats.insert(QStringLiteral("/source"), {{backendError, {}}, {}});
-    rfm::core::TransferFileJob job(
-        backend, {85, rfm::core::TransferDirection::Download, QStringLiteral("/source"),
-                  temporary.filePath(QStringLiteral("destination"))});
+    rfm::core::TransferFileJob job(backend, {85, rfm::core::TransferDirection::Download,
+                                             QStringLiteral("/source"),
+                                             temporary.filePath(QStringLiteral("destination"))});
 
     QVERIFY(runToEnd(job) > 0);
     QCOMPARE(job.progress().state, rfm::core::TransferState::Failed);
